@@ -4,7 +4,7 @@ import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import { DEFAULT_FONT, DEFAULT_FONT_SIZE, FIXED_SPACE, hwpToPx } from '../../formats/common';
 import { CELL_VMARGIN_HWP } from '../../formats/hwp/reader';
-import { fontStack, fontWeightFallback } from '../../fonts';
+import { fontMissing, fontStack, fontWeightFallback } from '../../fonts';
 
 /**
  * 한글(HWP)과 같은 글자 폭.
@@ -136,13 +136,27 @@ function piecesFor(node: PMNode, pos: number, parent: PMNode, cuts: number[]): P
     const n = Array.from(glyphs).length;
     let ls = 0;
     let ws = 0;
+    // 문서의 글꼴이 이 컴퓨터에 없으면 대체 글꼴로 그려진다. 한글·한자는 한글 글꼴이라면 어느 것이든 글자 크기와
+    // 같은 폭(전각)이므로, 대체 글꼴의 폭(예: Apple SD Gothic Neo 는 0.865em)이 아니라 1em 을 목표 폭으로 삼아야
+    // 한글과 같은 자리에서 줄이 바뀐다. 영문·숫자·기호는 글꼴마다 달라 대체 글꼴의 폭을 그대로 쓴다
+    // (한 조각에 한글과 영문이 섞일 수 있으므로 — 영문 글꼴이 따로 없으면 같은 글꼴 — 글자마다 가른다)
+    const missing = fontMissing(s.font);
+    let cjk = 0;
+    let rest = '';
+    if (missing) {
+      for (const ch of glyphs) {
+        const l = langOf(ch.codePointAt(0)!);
+        if (l === 'base' || l === 'hanja') cjk++;
+        else rest += ch;
+      }
+    }
     let gw = 0;
     if (n) {
       const wb = measure(canvasFont, glyphs);
-      const wp = plainFont === canvasFont ? wb : measure(plainFont, glyphs);
+      const wp = cjk ? (rest ? measure(plainFont, rest) : 0) : plainFont === canvasFont ? wb : measure(plainFont, glyphs);
       if (wb == null || wp == null) return null;
       // 한글 폭: 글자마다 (보통 굵기의) 글꼴 폭 × 장평 × (1 + 자간)
-      gw = f * wp;
+      gw = f * (cjk ? wp + cjk * sizePx : wp);
       ls = (gw - wb) / n;
     }
     if (spaces) {

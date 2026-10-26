@@ -18,7 +18,7 @@ const WORDS: Record<string, string> = {
   dots: '\\cdots', cdots: '\\cdots', ldots: '\\ldots', vdots: '\\vdots', ddots: '\\ddots', hbar: '\\hbar', ell: '\\ell', aleph: '\\aleph', circ: '\\circ', bullet: '\\bullet', star: '\\star', oplus: '\\oplus', otimes: '\\otimes',
 };
 const FUNCS = new Set(['sin', 'cos', 'tan', 'cot', 'sec', 'csc', 'arcsin', 'arccos', 'arctan', 'sinh', 'cosh', 'tanh', 'log', 'ln', 'lg', 'exp', 'max', 'min', 'det', 'gcd', 'mod', 'arg', 'dim', 'ker', 'sup', 'inf']);
-const BIG: Record<string, string> = { sum: '\\sum', prod: '\\prod', coprod: '\\coprod', int: '\\int', dint: '\\iint', tint: '\\iiint', oint: '\\oint', union: '\\bigcup', inter: '\\bigcap', bigcup: '\\bigcup', bigcap: '\\bigcap', lim: '\\lim', liminf: '\\liminf', limsup: '\\limsup' };
+const BIG: Record<string, string> = { smallsum: '\\sum', smallprod: '\\prod', smallint: '\\int', smalloint: '\\oint', sum: '\\sum', prod: '\\prod', coprod: '\\coprod', int: '\\int', dint: '\\iint', tint: '\\iiint', oint: '\\oint', union: '\\bigcup', inter: '\\bigcap', bigcup: '\\bigcup', bigcap: '\\bigcap', lim: '\\lim', liminf: '\\liminf', limsup: '\\limsup' };
 const ACCENT: Record<string, string> = { vec: '\\vec', bar: '\\overline', hat: '\\hat', dot: '\\dot', ddot: '\\ddot', tilde: '\\tilde', under: '\\underline', overline: '\\overline', check: '\\check', acute: '\\acute', grave: '\\grave', dyad: '\\overleftrightarrow', arch: '\\overgroup' };
 const FONT: Record<string, string> = { rm: '\\mathrm', it: '\\mathit', bold: '\\mathbf' };
 const MATRIX: Record<string, [string, string]> = { matrix: ['matrix', ''], pmatrix: ['pmatrix', ''], bmatrix: ['bmatrix', ''], dmatrix: ['vmatrix', ''], cases: ['cases', ''] };
@@ -208,7 +208,7 @@ function balanced(s: string): boolean {
 const REV_WORDS: Record<string, string> = {};
 for (const [k, v] of Object.entries(WORDS)) if (!(v in REV_WORDS)) REV_WORDS[v] = k;
 Object.assign(REV_WORDS, { '\\pm': '+-', '\\mp': '-+', '\\le': '<=', '\\leq': '<=', '\\ge': '>=', '\\geq': '>=', '\\ne': '!=', '\\neq': '!=', '\\to': '->', '\\rightarrow': '->', '\\leftarrow': '<-', '\\Rightarrow': '=>', '\\Leftrightarrow': '<=>', '\\infty': 'inf', '\\exists': 'exist', '\\cdots': 'cdots', '\\ldots': 'ldots' });
-const REV_BIG: Record<string, string> = Object.fromEntries(Object.entries(BIG).map(([k, v]) => [v, k]));
+const REV_BIG: Record<string, string> = Object.fromEntries(Object.entries(BIG).filter(([k]) => !k.startsWith('small')).map(([k, v]) => [v, k]));
 const REV_ACCENT: Record<string, string> = { '\\vec': 'vec', '\\overline': 'bar', '\\bar': 'bar', '\\hat': 'hat', '\\widehat': 'hat', '\\dot': 'dot', '\\ddot': 'ddot', '\\tilde': 'tilde', '\\widetilde': 'tilde', '\\underline': 'under', '\\check': 'check', '\\acute': 'acute', '\\grave': 'grave' };
 const REV_FONT: Record<string, string> = { '\\mathrm': 'rm', '\\text': '', '\\textrm': '', '\\mathit': 'it', '\\mathbf': 'bold', '\\textbf': 'bold', '\\boldsymbol': 'bold', '\\operatorname': 'rm' };
 const REV_ENV: Record<string, string> = { matrix: 'matrix', pmatrix: 'pmatrix', bmatrix: 'bmatrix', vmatrix: 'dmatrix', Vmatrix: 'dmatrix', cases: 'cases', array: 'matrix', aligned: 'matrix' };

@@ -92,6 +92,22 @@ export interface BorderFill {
   css?: string | null;
   /** 그림 채우기: 그림 id (HWP 는 BinData 번호, HWPX 는 binaryItemIDRef) 와 채우는 방식 (TOTAL, TILE, CENTER …) */
   img?: { id: string; mode: string } | null;
+  /** 그러데이션 채우기 (CSS background-image 값). bg 는 첫 색으로 두어 그러데이션을 모르는 형식에도 바탕색이 남는다 */
+  gradient?: string | null;
+}
+
+/**
+ * 한글 그러데이션 → CSS. 한글의 기울임은 0 이 위→아래, 90 이 왼쪽→오른쪽 (CSS 는 0 이 아래→위, 90 이 왼쪽→오른쪽).
+ * 종류: 줄무늬(선형)·원형·원뿔·사각형 (사각형은 원형으로 대신).
+ */
+export function gradientCss(type: 'LINEAR' | 'RADIAL' | 'CONICAL' | 'SQUARE', angle: number, cx: number, cy: number, colors: string[]): string | null {
+  const cs = colors.map((c) => normColor(c)).filter((c): c is string => !!c);
+  if (cs.length < 2) return null;
+  const stops = cs.join(', ');
+  const at = `${Math.max(0, Math.min(100, cx))}% ${Math.max(0, Math.min(100, cy))}%`;
+  if (type === 'RADIAL' || type === 'SQUARE') return `radial-gradient(circle at ${at}, ${stops})`;
+  if (type === 'CONICAL') return `conic-gradient(from ${Math.round(angle)}deg at ${at}, ${stops})`;
+  return `linear-gradient(${Math.round(180 - angle)}deg, ${stops})`;
 }
 
 /** 그림 채우기 방식 → 칸 배경 그림의 맞춤 */
@@ -176,9 +192,12 @@ export function parseHeader(doc: Document): HeaderInfo {
       bg = normColor(fc);
     }
     const grad = descendant(bf, 'gradation');
-    if (!bg && grad) {
-      const color = descendant(grad, 'color');
-      bg = normColor(attr(color, 'value'));
+    let gradient: string | null = null;
+    if (grad) {
+      const colors = kids(grad, 'color').map((c) => attr(c, 'value') || '');
+      const gt = (attr(grad, 'type') || 'LINEAR').toUpperCase() as 'LINEAR' | 'RADIAL' | 'CONICAL' | 'SQUARE';
+      gradient = gradientCss(gt, numAttr(grad, 'angle', 0), numAttr(grad, 'centerX', 50), numAttr(grad, 'centerY', 50), colors);
+      if (!bg) bg = normColor(colors[0]);
     }
     if (bg === '#FFFFFF') bg = null;
     const noBorders: string[] = [];
@@ -196,7 +215,7 @@ export function parseHeader(doc: Document): HeaderInfo {
     }
     const ib = descendant(bf, 'imgBrush');
     const imgRef = ib ? attr(kid(ib, 'img'), 'binaryItemIDRef') : null;
-    info.borderFills.set(id, { bg, noBorders, css: borderCss(det), img: ib && imgRef ? { id: imgRef, mode: attr(ib, 'mode') || 'TOTAL' } : null });
+    info.borderFills.set(id, { bg, noBorders, css: borderCss(det), img: ib && imgRef ? { id: imgRef, mode: attr(ib, 'mode') || 'TOTAL' } : null, gradient });
   }
 
   for (const cp of descendants(doc, 'charPr')) {
@@ -745,6 +764,7 @@ export class HwpxConverter {
         const va = attr(sub, 'vertAlign');
         const attrs: Record<string, any> = { colspan: cs, rowspan: rs, colwidth: null };
         if (bf?.bg) attrs.backgroundColor = bf.bg;
+        if (bf?.gradient) attrs.bgGradient = bf.gradient;
         const fillSrc = bf?.img ? this.images.get(bf.img.id) : null;
         if (fillSrc && bf?.img) attrs.bgImages = [{ src: fillSrc, fit: imgFillFit(bf.img.mode) }];
         if (bf && bf.noBorders.length) attrs.borderStyle = bf.noBorders.join(' ');
@@ -763,9 +783,18 @@ export class HwpxConverter {
     const inM = kid(tbl, 'inMargin');
     const tAttrs: Record<string, any> = {};
     if (inM) tAttrs.cellPadding = Math.round(hwpToPx((numAttr(inM, 'left', 510) + numAttr(inM, 'right', 510)) / 2) * 10) / 10;
-    if (attr(kid(tbl, 'pos'), 'treatAsChar') === '1') tAttrs.inline = true;
+    const pos = kid(tbl, 'pos');
+    if (attr(pos, 'treatAsChar') === '1') tAttrs.inline = true;
     const outM = kid(tbl, 'outMargin');
     if (outM) tAttrs.outMargin = ['left', 'right', 'top', 'bottom'].map((k) => Math.round(hwpToPx(numAttr(outM, k, 283)) * 10) / 10);
+    // 떠 있는 표(글자처럼 취급 아님)가 문단 기준으로 아래로 떨어져 있으면 그만큼 위 여백으로 (Kite 에는 떠 있는 개체가 없다)
+    if (!tAttrs.inline && pos && attr(pos, 'vertRelTo') === 'PARA') {
+      const vOff = hwpToPx(numAttr(pos, 'vertOffset', 0));
+      if (vOff > 0.5) {
+        const m = tAttrs.outMargin || [0, 0, 0, 0];
+        tAttrs.outMargin = [m[0], m[1], Math.round((m[2] + vOff) * 10) / 10, m[3]];
+      }
+    }
     return { type: 'table', attrs: tAttrs, content: rows };
   }
 }
