@@ -1,6 +1,6 @@
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
-import { CELL_VMARGIN_HWP, assembleTable } from '../hwp/reader';
+import { CELL_VMARGIN_HWP, assembleTable, placeCaptions, type Caption, type Captions } from '../hwp/reader';
 import type { DocMeta, DocSettings, LoadedDoc } from '../../types';
 import {
   type JMark,
@@ -358,12 +358,51 @@ interface Ctx {
 
 const SHAPES = new Set(['rect', 'ellipse', 'arc', 'polygon', 'curve', 'connectLine', 'line', 'textart']);
 
+/**
+ * hp:t 안 요소가 차지하는 한글 글자 수 (lineseg textpos 의 셈. HWP 와 같다: 탭은 컨트롤이라 8, 나머지 글자는 1).
+ * 형광펜 시작·끝은 글자가 아니다. run 직속 개체(표·그림·컨트롤 등)는 8
+ */
+const T_WIDTH: Record<string, number> = { tab: 8, lineBreak: 1, nbSpace: 1, fwSpace: 1, hyphen: 1, markpenBegin: 0, markpenEnd: 0 };
+
+/** 한글 글자 위치(textpos) → 문단 내용 안 위치. 한글이 저장한 줄 첫 자리(lineseg)를 찾아 둔다 */
+class LineTrack {
+  pos = 0;
+  readonly at = new Map<number, number>();
+  constructor(
+    private want: Set<number>,
+    private size: () => number,
+  ) {}
+  /** 글자 n 개를 지나간다. text 를 주면 그 글자들이 그대로 내용이 되므로 사이의 줄 첫 자리도 찾는다 */
+  step(n: number, text?: string) {
+    if (this.want.size) {
+      const base = this.size();
+      if (text != null && text.length === n) {
+        for (let k = 0; k < n; k++) if (this.want.has(this.pos + k)) this.at.set(this.pos + k, base + k);
+      } else if (this.want.has(this.pos)) this.at.set(this.pos, base);
+    }
+    this.pos += n;
+  }
+  /** 문단 끝 (끝의 줄 바꿈 뒤 빈 줄) */
+  end() {
+    if (this.want.has(this.pos)) this.at.set(this.pos, this.size());
+  }
+}
+
 export class HwpxConverter {
   settingsSet = false;
   outlineNumId = '1';
   counter = new NumberingCounter();
   private linkHref: string | null = null;
   private markpen: string | null = null;
+  /** 한글이 배치해 둔 직전 문단 첫 줄의 세로 위치. 되돌아가면 한글이 새 쪽에 놓은 문단이다 */
+  private lastVpos = 0;
+  private topParas = 0;
+
+  /** 구역이 바뀌면 쪽 세기를 새로 */
+  startSection() {
+    this.lastVpos = 0;
+    this.topParas = 0;
+  }
 
   constructor(
     private h: HeaderInfo,
@@ -397,11 +436,25 @@ export class HwpxConverter {
     const pAttrs = paraAttrs(pp);
     if (ctx.bg && !pAttrs.paraBg) pAttrs.paraBg = ctx.bg;
     const blocks: JNode[] = [];
-    if (!ctx.inSub && (attr(p, 'pageBreak') === '1' || pp.pageBreakBefore)) blocks.push({ type: 'pageBreak' });
+    const pageBreak = attr(p, 'pageBreak') === '1' || pp.pageBreakBefore;
+    // 한글이 배치해 둔 줄: [줄 첫 글자 위치(textpos), 줄 폭(px)]. 화면에서 같은 자리에서 줄을 바꾸도록 문단에 넘긴다 (hwpMetrics)
+    const segEls = kids(kid(p, 'linesegarray'), 'lineseg');
+    const lineSegs: [number, number][] = segEls.map((s) => [numAttr(s, 'textpos', 0), hwpToPx(numAttr(s, 'horzsize', 0))]);
+    /** 쪽 나누기 없이 한글이 새 쪽에 놓은 문단 (첫 줄의 세로 위치가 되돌아감) */
+    let hwpPage = false;
+    if (!ctx.inSub) {
+      const vpos = segEls.length ? numAttr(segEls[0], 'vertpos', 0) : null;
+      hwpPage = this.topParas++ > 0 && !pageBreak && vpos != null && vpos < this.lastVpos;
+      if (vpos != null) this.lastVpos = vpos;
+      if (pageBreak) blocks.push({ type: 'pageBreak' });
+    }
     let inline: JNode[] = [];
     let firstSize: number | null = null;
     let produced = false;
+    const captions: Captions = { before: [], after: [] };
     this.markpen = null;
+    const inlineSize = () => inline.reduce((s, nd) => s + (nd.type === 'text' ? (nd.text || '').length : 1), 0);
+    const track = new LineTrack(new Set(lineSegs.map((s) => s[0])), inlineSize);
 
     const prefix = this.numberPrefix(pp);
     const flush = () => {
@@ -422,20 +475,23 @@ export class HwpxConverter {
       }
       for (const child of kids(run)) {
         const name = localName(child);
+        if (name !== 't') track.step(8 * (name === 'ctrl' ? kids(child).length : 1));
         switch (name) {
           case 't':
-            this.handleT(child, cp, inline);
+            this.handleT(child, cp, inline, track);
             break;
           case 'tbl': {
             flush();
             const t = this.convertTable(child);
             if (pAttrs.textAlign === 'center' || pAttrs.textAlign === 'right') t.attrs = { ...t.attrs, align: pAttrs.textAlign };
-            blocks.push(t);
+            const cap = this.caption(child);
+            blocks.push(...(cap ? (cap.top ? [...cap.blocks, t] : [t, ...cap.blocks]) : [t]));
             produced = true;
             break;
           }
           case 'pic':
             inline.push(this.convertPic(child));
+            this.addCaption(child, captions);
             break;
           case 'ole':
             inline.push(this.sizedPlaceholder(child, 'OLE 개체'));
@@ -455,6 +511,7 @@ export class HwpxConverter {
           case 'chart':
             flush();
             blocks.push(...this.convertContainer(child));
+            this.addCaption(child, captions);
             produced = true;
             break;
           default:
@@ -465,6 +522,7 @@ export class HwpxConverter {
                 blocks.push(...sub);
                 produced = true;
               }
+              this.addCaption(child, captions);
             } else if (name === 'fieldBegin' || name === 'fieldEnd') {
               this.handleField(child);
             } else if (name === 'compose' || name === 'dutmal') {
@@ -474,24 +532,52 @@ export class HwpxConverter {
         }
       }
     }
+    track.end();
+    const lineSize = inline.length && !produced ? inlineSize() : 0;
     if (inline.length) flush();
     else if (!produced) blocks.push(paragraph({ ...pAttrs, fontSize: firstSize && firstSize !== 10 ? firstSize : null }));
-    return blocks;
+    // 문단이 표 등으로 쪼개지지 않고 줄 위치를 모두 찾았을 때만 (HWP 와 같게). 첫 줄은 문단 번호(머리 글자)부터
+    track.at.set(0, 0);
+    const paras = blocks.filter((b) => b.type !== 'pageBreak');
+    if (lineSize && lineSegs.length && paras.length === 1 && paras[0].type === 'paragraph' && lineSegs.every((s) => track.at.has(s[0]))) {
+      paras[0].attrs = { ...paras[0].attrs, hwpLines: lineSegs.map((s) => [track.at.get(s[0])!, Math.round(s[1] * 100) / 100]), hwpLen: lineSize };
+    }
+    const out = placeCaptions(blocks, captions);
+    const first = out.find((b) => b.type !== 'pageBreak');
+    if (hwpPage && first && (first.type === 'paragraph' || first.type === 'table')) first.attrs = { ...first.attrs, hwpPage: true };
+    return out;
   }
 
-  private handleT(t: Element, cp: CharPr | undefined, inline: JNode[]) {
+  /** 개체의 캡션 (hp:caption, side 가 TOP 이면 개체 위) */
+  private caption(el: Element): Caption | null {
+    const cap = kid(el, 'caption');
+    const ps = kids(kid(cap, 'subList'), 'p');
+    if (!cap || !ps.length) return null;
+    return { top: attr(cap, 'side') === 'TOP', blocks: this.convertParagraphs(ps, { inSub: true }) };
+  }
+
+  /** 문단 안 개체의 캡션을 문단 앞뒤에 놓도록 모은다 */
+  private addCaption(el: Element, captions: Captions) {
+    const cap = this.caption(el);
+    if (cap) (cap.top ? captions.before : captions.after).push(...cap.blocks);
+  }
+
+  private handleT(t: Element, cp: CharPr | undefined, inline: JNode[], track: LineTrack) {
     const push = (s: string) => {
       const n = textNode(s, charMarks(cp, this.linkHref, this.markpen));
       if (n) inline.push(n);
     };
     for (let n = t.firstChild; n; n = n.nextSibling) {
       if (n.nodeType === 3 || n.nodeType === 4) {
+        track.step((n.nodeValue || '').length, n.nodeValue || '');
         push(n.nodeValue || '');
         continue;
       }
       if (n.nodeType !== 1) continue;
       const el = n as Element;
-      switch (localName(el)) {
+      const ln = localName(el);
+      track.step(T_WIDTH[ln] ?? (el.textContent || '').length, ln in T_WIDTH ? undefined : el.textContent || '');
+      switch (ln) {
         case 'tab': {
           // 탭은 폭(HWPUNIT)·채움·종류를 가진다 → 탭 글자 하나에 마크로 붙인다
           const tw = numAttr(el, 'width', 0);
@@ -851,6 +937,7 @@ export async function readHwpx(data: Uint8Array): Promise<LoadedDoc> {
     if (!xml) continue;
     const sec = parseXml(xml).documentElement;
     if (i > 0 && blocks.length) blocks.push({ type: 'pageBreak' });
+    conv.startSection();
     blocks.push(...conv.convertParagraphs(kids(sec, 'p'), { inSub: false }));
   }
   while (blocks.length && blocks[0].type === 'pageBreak') blocks.shift();

@@ -427,6 +427,7 @@ class HwpConverter {
 
     let inline: JNode[] = [];
     let produced = false;
+    const captions: Captions = { before: [], after: [] };
     const firstCp = this.charPr(shapes[0][1]);
     const firstSize = firstCp?.fontSize || null;
     const fontSize = firstSize && firstSize !== 10 ? firstSize : null;
@@ -506,7 +507,7 @@ class HwpConverter {
         pushText();
         const ctrl = ctrls[ctrlIdx++];
         if (ctrl) {
-          const res = this.handleCtrl(ctrl, shapeAt(i), inline);
+          const res = this.handleCtrl(ctrl, shapeAt(i), inline, captions);
           if (res.length) {
             for (const b of res)
               if (b.type === 'table' && (pAttrs.textAlign === 'center' || pAttrs.textAlign === 'right')) b.attrs = { ...b.attrs, align: pAttrs.textAlign };
@@ -527,17 +528,20 @@ class HwpConverter {
     const lineSize = inline.length && !produced ? inlineSize() : 0;
     if (inline.length) flush();
     else if (!produced) blocks.push(paragraph({ ...pAttrs, fontSize }));
-    // 문단이 표 등으로 쪼개지지 않고 줄 위치를 모두 찾았을 때만
+    // 문단이 표 등으로 쪼개지지 않고 줄 위치를 모두 찾았을 때만. 첫 줄은 문단 번호(머리 글자)부터
+    lineAt.set(0, 0);
     const paras = blocks.filter((b) => b.type !== 'pageBreak');
-    if (lineSize && paras.length === 1 && paras[0].type === 'paragraph' && lineSegs.every((s) => lineAt.has(s[0]))) {
+    if (lineSize && lineSegs.length && paras.length === 1 && paras[0].type === 'paragraph' && lineSegs.every((s) => lineAt.has(s[0]))) {
       paras[0].attrs = { ...paras[0].attrs, hwpLines: lineSegs.map((s) => [lineAt.get(s[0])!, Math.round(s[1] * 100) / 100]), hwpLen: lineSize };
     }
-    if (hwpPage && paras[0] && (paras[0].type === 'paragraph' || paras[0].type === 'table')) paras[0].attrs = { ...paras[0].attrs, hwpPage: true };
-    return blocks;
+    const out = placeCaptions(blocks, captions);
+    const first = out.find((b) => b.type !== 'pageBreak');
+    if (hwpPage && first && (first.type === 'paragraph' || first.type === 'table')) first.attrs = { ...first.attrs, hwpPage: true };
+    return out;
   }
 
   /** 확장 컨트롤 처리. 블록을 반환하면 문단을 끊고 삽입 */
-  private handleCtrl(ctrl: Rec, shapeId: number, inline: JNode[]): JNode[] {
+  private handleCtrl(ctrl: Rec, shapeId: number, inline: JNode[], captions?: Captions): JNode[] {
     const id = ctrlIdOf(ctrl);
     switch (id) {
       case 'secd':
@@ -545,12 +549,12 @@ class HwpConverter {
         return [];
       case 'tbl ': {
         const t = this.convertTable(ctrl);
-        const cap = (t as any).caption as JNode[] | undefined;
+        const cap = (t as any).caption as Caption | undefined;
         delete (t as any).caption;
-        return cap ? [t, ...cap] : [t];
+        return cap ? (cap.top ? [...cap.blocks, t] : [t, ...cap.blocks]) : [t];
       }
       case 'gso ':
-        return this.convertGso(ctrl, inline);
+        return this.convertGso(ctrl, inline, captions);
       case 'head':
       case 'foot': {
         // 속성 bit 0~1: 0 양쪽, 1 짝수 쪽, 2 홀수 쪽 — Kite 는 머리말이 하나이므로 짝수 쪽 전용은 건너뛴다
@@ -713,14 +717,17 @@ class HwpConverter {
     // TABLE 레코드 앞의 LIST_HEADER는 캡션
     let seenTable = false;
     let caption: Rec[] | null = null;
+    let captionTop = false;
     for (const c of ctrl.children) {
       if (c.tag === T.TABLE) {
         seenTable = true;
         continue;
       }
       if (!seenTable) {
-        if (c.tag === T.LIST_HEADER) caption = [];
-        else if (c.tag === T.PARA_HEADER && caption) caption.push(c);
+        if (c.tag === T.LIST_HEADER) {
+          caption = [];
+          captionTop = isCaptionTop(c);
+        } else if (c.tag === T.PARA_HEADER && caption) caption.push(c);
         continue;
       }
       if (c.tag === T.LIST_HEADER) {
@@ -732,15 +739,15 @@ class HwpConverter {
     const nColsDecl = tbl ? u16(tbl, 6) : 0;
     const t = assembleTable(cells, nRowsDecl, nColsDecl, hwpToPx(u32(ctrl, 16)), rowH);
     if (tbl) t.attrs = { cellPadding: Math.round(hwpToPx((u16(tbl, 10) + u16(tbl, 12)) / 2) * 10) / 10 };
-    // 표 바깥 여백 [왼, 오른, 위, 아래] (저장할 때 그대로 되돌린다)
     // 글자처럼 취급(개체 속성 bit 0): 쪽에서 나뉘지 않고 문단 정렬을 따른다. 저장할 때 되돌린다
     if (u32(ctrl, 4) & 1) t.attrs = { ...t.attrs, inline: true };
-    if (ctrl.data.length >= 32) t.attrs = { ...t.attrs, outMargin: [24, 26, 28, 30].map((o) => Math.round(hwpToPx(u16(ctrl, o)) * 10) / 10) };
-    if (caption && caption.length) (t as any).caption = this.convertParagraphs(caption, true);
+    // 표 바깥 여백 [왼, 오른, 위, 아래] (저장할 때 그대로 되돌린다). 개체 공통 속성에서 z-order(24, INT32) 다음 28 부터
+    if (ctrl.data.length >= 36) t.attrs = { ...t.attrs, outMargin: [28, 30, 32, 34].map((o) => Math.round(hwpToPx(u16(ctrl, o)) * 10) / 10) };
+    if (caption && caption.length) (t as any).caption = { top: captionTop, blocks: this.convertParagraphs(caption, true) } satisfies Caption;
     return t;
   }
 
-  private convertGso(ctrl: Rec, inline: JNode[]): JNode[] {
+  private convertGso(ctrl: Rec, inline: JNode[], captions?: Captions): JNode[] {
     const w = Math.round(hwpToPx(u32(ctrl, 16)));
     const h = Math.round(hwpToPx(u32(ctrl, 20)));
     const pics: Rec[] = [];
@@ -748,9 +755,19 @@ class HwpConverter {
     let shapeRec: Rec | null = null;
     let rectRec: Rec | null = null;
     let ellipse = false;
+    /** 개체 바로 아래의 LIST_HEADER 는 캡션 (글상자의 문단 목록은 SHAPE_COMPONENT 아래에 있다) */
+    let cap: { top: boolean; paras: Rec[] } | null = null;
     const visit = (r: Rec) => {
       let curText: { header: Rec; paras: Rec[]; shape: Rec } | null = null;
       for (const c of r.children) {
+        if (r === ctrl && c.tag === T.LIST_HEADER) {
+          cap = { top: isCaptionTop(c), paras: [] };
+          continue;
+        }
+        if (r === ctrl && c.tag === T.PARA_HEADER && cap) {
+          cap.paras.push(c);
+          continue;
+        }
         if (c.tag === T.SHAPE_COMPONENT_PICTURE) pics.push(c);
         else if (c.tag === T.SHAPE_COMPONENT && !shapeRec) shapeRec = c;
         else if (c.tag === T.SHAPE_COMPONENT_RECTANGLE) rectRec = c;
@@ -764,6 +781,8 @@ class HwpConverter {
       }
     };
     visit(ctrl);
+    const capList = cap as { top: boolean; paras: Rec[] } | null;
+    if (capList && capList.paras.length && captions) (capList.top ? captions.before : captions.after).push(...this.convertParagraphs(capList.paras, true));
     if (pics.length === 1 && !texts.length) {
       inline.push(this.picture(pics[0], w, h));
       return [];
@@ -849,6 +868,30 @@ function plainText(blocks: JNode[]): string {
   };
   blocks.forEach(walk);
   return parts.join('').replace(/\s+/g, ' ').trim();
+}
+
+/** 개체(표·그림·도형)의 캡션 문단. top 이면 개체 위에 */
+export interface Caption {
+  top: boolean;
+  blocks: JNode[];
+}
+
+/** 문단 안 개체(그림 등)의 캡션: 그 문단 앞(위 캡션)과 뒤(아래·옆 캡션)에 놓는다 */
+export interface Captions {
+  before: JNode[];
+  after: JNode[];
+}
+
+/** 캡션 LIST_HEADER: 문단 수(2) 속성(4) 예비(2) 다음 캡션 속성(4)의 bit 0~1 이 방향 (0 왼, 1 오른, 2 위, 3 아래) */
+function isCaptionTop(lh: Rec): boolean {
+  return lh.data.length >= 12 && (u32(lh, 8) & 3) === 2;
+}
+
+/** 문단에서 나온 블록들 앞뒤에 캡션을 넣는다 (맨 앞 쪽 나누기는 그대로 맨 앞에) */
+export function placeCaptions(blocks: JNode[], captions: Captions): JNode[] {
+  if (!captions.before.length && !captions.after.length) return blocks;
+  const k = blocks[0]?.type === 'pageBreak' ? 1 : 0;
+  return [...blocks.slice(0, k), ...captions.before, ...blocks.slice(k), ...captions.after];
 }
 
 /** 표·그림·글상자가 들어 있는가 */
