@@ -12,7 +12,7 @@ export const CONTACT_FORM_KEY = '';
 export const PRIVACY_URL = '';
 
 /** 후원(GitHub Sponsors) 주소 */
-export const SPONSOR_URL = 'https://github.com/sponsors/knoxxr';
+export const SPONSOR_URL = 'https://github.com/sponsors/minaryhub';
 
 /** 문의 양식을 쓸 수 있는지 (주 프로세스와 화면이 함께 쓴다) */
 export const contactFormConfigured = () => !!(CONTACT_FORM_ENDPOINT || CONTACT_FORM_KEY);
