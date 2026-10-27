@@ -240,7 +240,8 @@ function computeLayout(
     let t = tops[tops.length - 1];
     let prev = pgs[pgs.length - 1];
     for (let i = tops.length; i <= k; i++) {
-      t += prev.H - prev.mt + g.gap + curPg.mt;
+      // 쪽이 늘 아래로 나아가게 (이상한 용지 값에도 멈추지 않도록)
+      t += Math.max(1, prev.H - prev.mt + g.gap + curPg.mt);
       prev = curPg;
     }
     return t;

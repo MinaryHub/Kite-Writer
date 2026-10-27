@@ -276,6 +276,31 @@ export const KImage = Image.extend({
   },
 }).configure({ inline: true, allowBase64: true });
 
+/** 붙여 넣은 HTML 의 구역 용지: 숫자만 받아 쓸 수 있는 범위로 (용지 10~2000mm, 여백은 용지 안에) */
+function cleanPageSetup(v: any): Record<string, number | boolean> | null {
+  if (!v || typeof v !== 'object') return null;
+  const num = (x: any, lo: number, hi: number) => {
+    const n = Number(x);
+    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : lo;
+  };
+  const width = num(v.width, 10, 2000);
+  const height = num(v.height, 10, 2000);
+  if (!(Number(v.width) > 0) || !(Number(v.height) > 0)) return null;
+  const mh = Math.min(width, height) / 2;
+  return {
+    width,
+    height,
+    marginTop: num(v.marginTop, 0, mh),
+    marginBottom: num(v.marginBottom, 0, mh),
+    marginLeft: num(v.marginLeft, 0, mh),
+    marginRight: num(v.marginRight, 0, mh),
+    marginHeader: num(v.marginHeader, 0, mh),
+    marginFooter: num(v.marginFooter, 0, mh),
+    gutter: num(v.gutter, 0, mh),
+    landscape: v.landscape === true,
+  };
+}
+
 // ---------------- 쪽 나누기 ----------------
 export const PageBreak = Node.create({
   name: 'pageBreak',
@@ -293,8 +318,7 @@ export const PageBreak = Node.create({
         default: null,
         parseHTML: (el: HTMLElement) => {
           try {
-            const v = JSON.parse(el.getAttribute('data-section') || 'null');
-            return v && typeof v === 'object' && +v.width > 0 && +v.height > 0 ? v : null;
+            return cleanPageSetup(JSON.parse(el.getAttribute('data-section') || 'null'));
           } catch {
             return null;
           }
