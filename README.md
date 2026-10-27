@@ -109,7 +109,7 @@ npm run dist:store      # 윈도우에서만: electron-builder 의 makeappx 로 
 
 ## 후원·문의
 
-- 후원: 도구 → 후원하기 또는 정보 창의 "후원하기" → GitHub Sponsors(https://github.com/sponsors/knoxxr). 저장소의 `.github/FUNDING.yml` 이 GitHub 의 Sponsor 단추를 만든다 (저장소가 공개일 때)
+- 후원: 도구 → 후원하기 또는 정보 창의 "후원하기" → GitHub Sponsors(https://github.com/sponsors/minaryhub). 저장소의 `.github/FUNDING.yml` 이 GitHub 의 Sponsor 단추를 만든다 (저장소가 공개일 때)
 - 문의: 도구 → 문의하기. 앱 안 문의 창의 내용을 주 프로세스가 문의 양식 서비스(Formspree 또는 Web3Forms)로 보내고, 서비스가 등록된 메일로 전달한다. 개발사 메일 주소는 앱에 들어가지 않는다. `src/appInfo.ts` 의 `CONTACT_FORM_ENDPOINT`(Brevo 중계 `contact-relay/` 의 배포 주소 또는 Formspree) 또는 `CONTACT_FORM_KEY`(Web3Forms)를 채워야 켜진다. AI 응답 신고도 이 창으로 보낸다
 
 ## 구조
