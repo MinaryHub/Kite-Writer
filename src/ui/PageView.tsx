@@ -2,8 +2,10 @@ import { useEffect, useLayoutEffect, useReducer, useRef } from 'react';
 import { EditorContent } from '@tiptap/react';
 import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
+import type { PageSetup } from '../types';
 import { useApp } from '../app/hooks';
-import { computeGeom, hfText, hfZones, PAGE_GAP, pageBackgroundStyle, repeatHeadsHtml, type PageGeom } from '../print';
+import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, planPages, repeatHeadsHtml, stageWidth, type PageGeom } from '../print';
+import { sectionsKey } from '../editor/extensions/sections';
 import { formatPageNumber, splitExt } from '../formats/common';
 import { applyFormatPainter, insertImagesFromFiles } from '../app/commands';
 import { viewState } from '../editor/viewState';
@@ -22,17 +24,42 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
   const g: PageGeom = computeGeom(tab.settings, PAGE_GAP);
   const zoom = app.zoom;
   const pageCount = Math.max(1, tab.layout.pageCount);
-  const stageH = pageCount * g.P - g.gap;
+  // 구역마다 용지가 다를 수 있다: 무대 폭은 가장 넓은 용지, 쪽은 저마다의 크기로 무대 가운데에
+  const W = stageWidth(tab.settings, tab.editor.state.doc);
+  const plans = planPages(tab.settings, pageCount, tab.layout.pageSetups, W, PAGE_GAP);
+  const lastPlan = plans[plans.length - 1];
+  const stageH = lastPlan.top + lastPlan.g.H;
+  /** 편집기(문서 용지의 본문 칸) 왼쪽 */
+  const hostLeft = (W - g.W) / 2 + g.ml;
 
-  // 페이지 기하 정보를 페이지네이션 엔진에 전달
+  // 페이지 기하 정보를 페이지네이션 엔진에, 구역 용지의 본문 자리를 구역 확장에 전달
   useLayoutEffect(() => {
     const storage = tab.editor.storage.pagination;
-    const geo = { pageHeight: g.H, gap: g.gap, contentHeight: g.contentH, contentWidth: g.contentW };
+    const s = tab.settings;
+    const resolve = (p: PageSetup) => {
+      const x = geomFor(s, p, PAGE_GAP);
+      return { pageHeight: x.H, gap: x.gap, contentHeight: x.contentH, contentWidth: x.contentW, mt: x.mt };
+    };
+    const geo = { pageHeight: g.H, gap: g.gap, contentHeight: g.contentH, contentWidth: g.contentW, mt: g.mt, resolve };
     const prev = storage.geometry;
-    if (!prev || prev.pageHeight !== geo.pageHeight || prev.contentHeight !== geo.contentHeight || prev.contentWidth !== geo.contentWidth || prev.gap !== geo.gap) {
-      storage.geometry = geo;
-      storage.schedule();
+    const secStore = tab.editor.storage.sections;
+    const secKey = W + '|' + JSON.stringify(s.page);
+    let changed = false;
+    if (secStore && secStore.key !== secKey) {
+      secStore.key = secKey;
+      secStore.shiftOf = (p: PageSetup) => {
+        const x = geomFor(s, p, PAGE_GAP);
+        const left = (W - x.W) / 2 + x.ml;
+        return { dl: left - hostLeft, dr: hostLeft + g.contentW - (left + x.contentW) };
+      };
+      tab.editor.view.dispatch(tab.editor.state.tr.setMeta(sectionsKey, true).setMeta('addToHistory', false));
+      changed = true;
     }
+    if (!prev || prev.pageHeight !== geo.pageHeight || prev.contentHeight !== geo.contentHeight || prev.contentWidth !== geo.contentWidth || prev.gap !== geo.gap || prev.mt !== geo.mt) {
+      storage.geometry = geo;
+      changed = true;
+    } else storage.geometry = { ...prev, resolve };
+    if (changed) storage.schedule();
   });
 
   useEffect(() => {
@@ -51,7 +78,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       const mode = (e as CustomEvent).detail as 'width' | 'page';
       const ws = wsRef.current;
       if (!ws) return;
-      const zw = (ws.clientWidth - 60) / g.W;
+      const zw = (ws.clientWidth - 60) / W;
       const zh = (ws.clientHeight - 50) / g.H;
       app.setZoom(mode === 'width' ? zw : Math.min(zw, zh), mode);
     };
@@ -59,7 +86,8 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       const step = (e as CustomEvent).detail as number;
       const ws = wsRef.current;
       if (!ws) return;
-      const cur = Math.round((ws.scrollTop - 24) / (g.P * zoom));
+      let cur = 0;
+      while (cur + 1 < plans.length && 24 + plans[cur + 1].top * zoom - 8 <= ws.scrollTop + 1) cur++;
       const target = Math.max(0, Math.min(pageCount - 1, cur + step));
       scrollToPage(target, true);
     };
@@ -87,7 +115,8 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
   const scrollToPage = (k: number, moveCaret: boolean) => {
     const ws = wsRef.current;
     if (!ws) return;
-    ws.scrollTop = 24 + k * g.P * zoom - 8;
+    const pageTop = (plans[k] || plans[0]).top;
+    ws.scrollTop = 24 + pageTop * zoom - 8;
     if (moveCaret) {
       const pos = tab.layout.pageStarts[k];
       if (pos != null) {
@@ -95,7 +124,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
           const $p = tab.editor.state.doc.resolve(Math.min(pos + 1, tab.editor.state.doc.content.size));
           tab.editor.view.dispatch(tab.editor.state.tr.setSelection(TextSelection.near($p)));
           tab.editor.commands.focus();
-          ws.scrollTop = 24 + k * g.P * zoom - 8;
+          ws.scrollTop = 24 + pageTop * zoom - 8;
         } catch {
           /* 무시 */
         }
@@ -150,32 +179,35 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     }
   };
 
-  const z = hfZones(tab.settings, g);
   const s = tab.settings;
   const total = pageCount + s.pageNumber.start - 1;
 
   const pages = [];
   const chrome = [];
   for (let k = 0; k < pageCount; k++) {
-    const top = k * g.P;
+    const pl = plans[k];
+    const g = pl.g;
+    const top = pl.top;
+    const left = pl.left;
+    const z = hfZones(pl.settings, g);
     pages.push(
-      <div key={k} className="paper" style={{ top, width: g.W, height: g.H, ...(pageBackgroundStyle(s, k) || {}) }}>
+      <div key={k} className="paper" style={{ top, left, width: g.W, height: g.H, ...(pageBackgroundStyle(s, k) || {}) }}>
         <Corners g={g} />
       </div>,
     );
-    // 쪽 경계 가리개 (본문 끝 → 다음 쪽 본문 시작)
+    // 쪽 경계 가리개 (본문 끝 → 다음 쪽 본문 시작). 다음 쪽의 용지가 다를 수 있다
     const maskTop = top + g.mt + g.contentH;
-    const last = k === pageCount - 1;
+    const next = plans[k + 1];
     chrome.push(
-      <div key={'m' + k} className="mask" style={{ top: maskTop, width: g.W, height: last ? g.mb : g.mb + g.gap + g.mt }}>
-        <div className="m-paper" style={{ top: 0, height: g.mb, ...(pageBackgroundStyle(s, k, g.mt + g.contentH) || {}) }} />
-        {!last && <div className="m-gap" style={{ top: g.mb, height: g.gap }} />}
-        {!last && <div className="m-paper" style={{ top: g.mb + g.gap, height: g.mt, ...(pageBackgroundStyle(s, k + 1) || {}) }} />}
+      <div key={'m' + k} className="mask" style={{ top: maskTop, width: W, height: next ? next.top + next.g.mt - maskTop : g.mb }}>
+        <div className="m-paper" style={{ top: 0, left, width: g.W, height: g.mb, ...(pageBackgroundStyle(s, k, g.mt + g.contentH) || {}) }} />
+        {next && <div className="m-gap" style={{ top: g.mb, height: g.gap }} />}
+        {next && <div className="m-paper" style={{ top: next.top - maskTop, left: next.left, width: next.g.W, height: next.g.mt, ...(pageBackgroundStyle(s, k + 1) || {}) }} />}
       </div>,
     );
     const num = s.pageNumber.start + k;
     const hfStyle = (align: string): React.CSSProperties => ({
-      left: g.ml,
+      left: left + g.ml,
       width: g.contentW,
       justifyContent: align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center',
     });
@@ -213,7 +245,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
           style={{
             top: top + zz.top,
             height: zz.height,
-            left: g.ml,
+            left: left + g.ml,
             width: g.contentW,
             display: 'flex',
             alignItems: v === 'top' ? 'flex-start' : 'flex-end',
@@ -226,12 +258,12 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     }
     // 표가 이어지는 쪽 맨 위의 제목 줄 (쪽 나누기가 비워 둔 자리)
     if (tab.layout.repeats?.some((r) => r.page === k)) {
-      chrome.push(<div key={'rh' + k} className="pg-repeat-layer" style={{ position: 'absolute', left: 0, top, width: g.W, height: g.H, pointerEvents: 'none' }} dangerouslySetInnerHTML={{ __html: repeatHeadsHtml(tab, g, k) }} />);
+      chrome.push(<div key={'rh' + k} className="pg-repeat-layer" style={{ position: 'absolute', left, top, width: g.W, height: g.H, pointerEvents: 'none' }} dangerouslySetInnerHTML={{ __html: repeatHeadsHtml(tab, g, k) }} />);
     }
     const fns = tab.layout.footnotes.filter((f) => f.page === k);
     if (fns.length) {
       chrome.push(
-        <div key={'fn' + k} className="fn-area" style={{ left: g.ml, width: g.contentW, top: top + g.mt + g.contentH, transform: 'translateY(-100%)', fontSize: FN_FONT_PX, lineHeight: FN_LINE }}>
+        <div key={'fn' + k} className="fn-area" style={{ left: left + g.ml, width: g.contentW, top: top + g.mt + g.contentH, transform: 'translateY(-100%)', fontSize: FN_FONT_PX, lineHeight: FN_LINE }}>
           <div className="fn-sep" style={{ height: FN_SEP }} />
           {fns.map((f) => (
             <div key={f.num} className="fn-item" title="두 번 누르면 각주 편집" onDoubleClick={() => app.openDialog('footnote', { pos: findFootnotePos(tab, f.num), text: f.text })}>
@@ -258,19 +290,19 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       onDrop={onDrop}
       onScroll={() => window.dispatchEvent(new Event('kite:scroll'))}
     >
-      <div className="stage-wrap" style={{ width: g.W * zoom, height: stageH * zoom + 64 }}>
-        <div className="stage" ref={stageRef} style={{ width: g.W, height: stageH, transform: `scale(${zoom})` }} onMouseDown={onStageMouseDown}>
+      <div className="stage-wrap" style={{ width: W * zoom, height: stageH * zoom + 64 }}>
+        <div className="stage" ref={stageRef} style={{ width: W, height: stageH, transform: `scale(${zoom})` }} onMouseDown={onStageMouseDown}>
           {pages}
           <div
             className="editor-host"
-            style={{ left: g.ml, top: g.mt, width: g.contentW }}
+            style={{ left: hostLeft, top: g.mt, width: g.contentW }}
             onMouseUp={() => app.painter && setTimeout(applyFormatPainter, 0)}
             onContextMenu={(e) => {
               e.preventDefault();
               showContextMenu(e.clientX, e.clientY, tab);
             }}
           >
-            <EditorContent editor={tab.editor} style={{ minHeight: (pageCount - 1) * g.P + g.contentH }} />
+            <EditorContent editor={tab.editor} style={{ minHeight: lastPlan.contentTop + lastPlan.g.contentH }} />
           </div>
           <div className="chrome-layer">{chrome}</div>
         </div>
@@ -316,9 +348,9 @@ export function caretPage(tab: DocTab): number {
     const view = tab.editor.view;
     const c = view.coordsAtPos(view.state.selection.head);
     const r = view.dom.getBoundingClientRect();
-    const g = computeGeom(tab.settings, PAGE_GAP);
+    const plans = planPages(tab.settings, tab.layout.pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP);
     const y = (c.top - r.top) / (viewState.zoom || 1);
-    return Math.max(1, Math.min(tab.layout.pageCount, Math.floor(y / g.P) + 1));
+    return Math.max(1, Math.min(tab.layout.pageCount, pageAtY(plans, y) + 1));
   } catch {
     return 1;
   }

@@ -196,6 +196,9 @@ function lineDecos(node: PMNode, pos: number, pieces: Piece[] | null, out: Decor
   if (!Array.isArray(lines) || !lines.length || node.attrs?.hwpLen !== node.content.size) return false;
   const start = pos + 1;
   const align = node.attrs?.textAlign || 'justify';
+  // 한글이 저장한 줄 폭은 문단 왼쪽·오른쪽 여백만 뺀 폭이라 모든 줄이 같다. 들여쓰기(첫 줄)·내어쓰기(둘째 줄부터)로
+  // 안으로 들어간 줄은 그만큼 좁다
+  const indentPx = (+node.attrs?.textIndent || 0) * PT2PX;
   for (let k = 0; k < lines.length; k++) {
     const a = start + lines[k][0];
     const b = k + 1 < lines.length ? start + lines[k + 1][0] : start + node.content.size;
@@ -207,7 +210,7 @@ function lineDecos(node: PMNode, pos: number, pieces: Piece[] | null, out: Decor
     const w = ps.reduce((s, p) => s + p.width, 0);
     const chars = ps.reduce((s, p) => s + p.n + p.spaces, 0);
     const sp = ps.reduce((s, p) => s + p.spaces, 0);
-    const target = lines[k][1];
+    const target = lines[k][1] - (k === 0 ? Math.max(0, indentPx) : Math.max(0, -indentPx));
     if (!(target > 0) || !chars) continue;
     // 문단 끝 줄과 줄 바꿈(Shift+Enter) 앞 줄은 양쪽 정렬하지 않는다
     const last = k === lines.length - 1 || node.childBefore(b - start).node?.type.name === 'hardBreak';

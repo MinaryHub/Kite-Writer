@@ -4,6 +4,7 @@ import { Mapping } from '@tiptap/pm/transform';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { viewState } from '../viewState';
+import type { PageSetup } from '../../types';
 
 /**
  * 쪽 나누기(페이지네이션) 엔진.
@@ -22,12 +23,16 @@ export interface PageGeometry {
   contentHeight: number;
   /** 본문 폭(px) */
   contentWidth: number;
+  /** 본문 위 여백(px) = 위쪽 + 머리말 (구역마다 용지가 다를 때 쪽 위치를 잇는 데 쓴다) */
+  mt?: number;
+  /** 구역 나누기(쪽 나누기의 sectionPage)의 용지 → 그 구역의 쪽 기하 */
+  resolve?: (p: PageSetup) => PageGeometry;
 }
 
 function sameGeometry(a: PageGeometry | null, b: PageGeometry | null): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
-  return a.pageHeight === b.pageHeight && a.gap === b.gap && a.contentHeight === b.contentHeight && a.contentWidth === b.contentWidth;
+  return a.pageHeight === b.pageHeight && a.gap === b.gap && a.contentHeight === b.contentHeight && a.contentWidth === b.contentWidth && a.mt === b.mt;
 }
 
 export interface PageBreakInfo {
@@ -58,6 +63,8 @@ export interface LayoutResult {
   pageStarts: number[];
   /** 쪽 맨 위에 되풀이해 그릴 표 제목 줄 */
   repeats?: RepeatHead[];
+  /** 쪽마다의 편집 용지 (구역마다 용지가 다른 문서만. null 은 문서 용지) */
+  pageSetups?: (PageSetup | null)[];
 }
 
 interface PState {
@@ -206,8 +213,52 @@ function computeLayout(
   // 큰 문서에서 다시 배치하는 데만 100ms 넘게 걸렸다.
   let offset = 0;
   const rel = (y: number) => relRaw(y) - offset;
-  const P = g.pageHeight + g.gap;
-  const CH = g.contentHeight;
+  // 쪽마다의 기하: 높이·본문 높이·본문 위 여백. 구역마다 용지가 다를 수 있어 쪽 위치는 누적으로 구한다.
+  // 편집기 좌표 0 = 첫 쪽 본문 맨 위. k 쪽 본문 맨 위 T(k) = T(k-1) - mt(k-1) + H(k-1) + 간격 + mt(k)
+  interface Pg {
+    H: number;
+    CH: number;
+    mt: number;
+    setup: PageSetup | null;
+  }
+  const basePg: Pg = { H: g.pageHeight, CH: g.contentHeight, mt: g.mt ?? 0, setup: null };
+  /** 확정된 쪽(지금 쪽까지)의 기하와 본문 맨 위 */
+  const pgs: Pg[] = [basePg];
+  const tops: number[] = [0];
+  /** 앞으로 생길 쪽의 기하 (구역 나누기를 지나면 바뀐다) */
+  let curPg: Pg = basePg;
+  /** 구역마다 용지가 다른 문서 (쪽 크기가 같다고 보는 증분 배치를 쓰지 않는다) */
+  let multi = false;
+  view.state.doc.forEach((n) => {
+    if (n.type.name === 'pageBreak' && n.attrs?.sectionPage) multi = true;
+  });
+  if (multi) cache = null;
+  const MAX_PAGES = 20000;
+  /** k 쪽 본문 맨 위 (아직 없는 쪽은 앞으로 생길 쪽의 기하로) */
+  const T = (k: number): number => {
+    if (k < tops.length) return tops[k];
+    let t = tops[tops.length - 1];
+    let prev = pgs[pgs.length - 1];
+    for (let i = tops.length; i <= k; i++) {
+      t += prev.H - prev.mt + g.gap + curPg.mt;
+      prev = curPg;
+    }
+    return t;
+  };
+  const CHof = (k: number) => (k < pgs.length ? pgs[k] : curPg).CH;
+  /** y 가 놓인 쪽: T(k) <= y 인 가장 큰 k (from 부터 센다) */
+  const pageAtY = (y: number, from = 0) => {
+    let k = Math.max(0, from);
+    while (k < MAX_PAGES && T(k + 1) <= y) k++;
+    return k;
+  };
+  /** 지금 쪽까지 기하를 확정한다 */
+  const commit = () => {
+    while (tops.length <= page && tops.length < MAX_PAGES) {
+      tops.push(T(tops.length));
+      pgs.push(curPg);
+    }
+  };
 
   let page = 0;
   let shift = 0;
@@ -271,16 +322,16 @@ function computeLayout(
     if (el.textContent !== String(i + 1)) el.textContent = String(i + 1);
   });
 
-  const MAX_PAGES = 20000;
   const normalize = (top: number) => {
     if (!isFinite(top)) return;
-    const target = Math.floor((top + 0.5) / P);
+    const target = pageAtY(top + 0.5, page);
     if (target > page) {
       page = Math.min(target, MAX_PAGES);
       fnUsed = 0;
+      commit();
     }
   };
-  const limitFor = (fnH: number) => page * P + CH - fnUsed - (fnH > 0 && fnUsed === 0 ? FN_SEP : 0) - fnH;
+  const limitFor = (fnH: number) => T(page) + CHof(page) - fnUsed - (fnH > 0 && fnUsed === 0 ? FN_SEP : 0) - fnH;
 
   const markPageStart = (docPos: number) => {
     while (pageStarts.length <= page && pageStarts.length < MAX_PAGES) pageStarts.push(docPos);
@@ -299,12 +350,12 @@ function computeLayout(
     top += shift;
     bottom += shift;
     normalize(top);
-    const pageTop = page * P;
-    const overflow = bottom > limitFor(fnH) + 0.5 || top > pageTop + CH;
+    const pageTop = T(page);
+    const overflow = bottom > limitFor(fnH) + 0.5 || top > pageTop + CHof(page);
     if ((forceNext || softNext || overflow) && (forceNext || top > pageTop + 0.5)) {
       const pos = getPos();
       if (pos != null) {
-        const h = Math.round(((page + 1) * P - top) * 100) / 100;
+        const h = Math.round((T(page + 1) - top) * 100) / 100;
         if (h > 0) {
           breaks.push({ pos, height: h, kind });
           shift += h;
@@ -313,6 +364,7 @@ function computeLayout(
         }
         page++;
         fnUsed = 0;
+        commit();
         normalize(top);
       }
     }
@@ -320,11 +372,12 @@ function computeLayout(
     softNext = false;
     markPageStart(docPos);
     if (fnH > 0) fnUsed += fnH + (fnUsed === 0 ? FN_SEP : 0);
-    if (bottom > page * P + CH + 0.5) {
-      const endPage = Math.min(MAX_PAGES, Math.floor((bottom - 0.5) / P));
+    if (bottom > T(page) + CHof(page) + 0.5) {
+      const endPage = Math.min(MAX_PAGES, pageAtY(bottom - 0.5, page));
       if (endPage > page) {
         page = endPage;
         fnUsed = 0;
+        commit();
         markPageStart(docPos);
       }
     }
@@ -437,10 +490,9 @@ function computeLayout(
     // 그대로 들어가는지 확인
     const sTop = top + shift;
     const sBottom = bottom + shift;
-    let p = page;
-    while (sTop >= (p + 1) * P - 0.5) p++;
+    const p = pageAtY(sTop + 0.5, page);
     const fnUsedHere = p === page ? fnUsed : 0;
-    const limit = p * P + CH - fnUsedHere - (fnTotal > 0 && fnUsedHere === 0 ? FN_SEP : 0) - fnTotal;
+    const limit = T(p) + CHof(p) - fnUsedHere - (fnTotal > 0 && fnUsedHere === 0 ? FN_SEP : 0) - fnTotal;
     if (forceNext || sBottom <= limit + 0.5) {
       place(top, bottom, fnTotal, () => pos, 'block', pos);
       pushFootnotes(fns);
@@ -510,26 +562,26 @@ function computeLayout(
         const top = rel(r.top);
         const bottom = rel(r.bottom);
         const sT = top + shift + cs;
-        while (sT >= (pc + 1) * P - 0.5) pc++;
-        if (bottom + shift + cs > pc * P + CH + 0.5) {
+        pc = pageAtY(sT + 0.5, pc);
+        if (bottom + shift + cs > T(pc) + CHof(pc) + 0.5) {
           const lines = lf.node.isTextblock ? getLines(el) : [];
           if (lines.length >= 2) {
             for (let li = 0; li < lines.length; li++) {
               const lt = (li === 0 ? top : (lines[li - 1].bottom + lines[li].top) / 2) + shift + cs;
               const lb = (li === lines.length - 1 ? bottom : (lines[li].bottom + lines[li + 1].top) / 2) + shift + cs;
-              while (lt >= (pc + 1) * P - 0.5) pc++;
-              if (lb > pc * P + CH + 0.5 && lt > pc * P + 0.5) {
+              pc = pageAtY(lt + 0.5, pc);
+              if (lb > T(pc) + CHof(pc) + 0.5 && lt > T(pc) + 0.5) {
                 const p = li === 0 ? lf.pos : posAtLineStart(el, lines[li], lf.pos, lf.pos + lf.node.nodeSize);
                 if (p != null) {
-                  const h = Math.round(((pc + 1) * P - lt + (tableHead?.h || 0)) * 100) / 100;
+                  const h = Math.round((T(pc + 1) - lt + (tableHead?.h || 0)) * 100) / 100;
                   breaks.push({ pos: p, height: h, kind: li === 0 ? 'block' : 'line', ...headFor(pc + 1) });
                   cs += h;
                   pc++;
                 }
               }
             }
-          } else if (sT > pc * P + 0.5) {
-            const h = Math.round(((pc + 1) * P - sT + (tableHead?.h || 0)) * 100) / 100;
+          } else if (sT > T(pc) + 0.5) {
+            const h = Math.round((T(pc + 1) - sT + (tableHead?.h || 0)) * 100) / 100;
             breaks.push({ pos: lf.pos, height: h, kind: 'block', ...headFor(pc + 1) });
             cs += h;
             pc++;
@@ -547,10 +599,11 @@ function computeLayout(
     const extra = rowBottom - uBottom;
     shift += extra;
     const endS = uBottom + shift; // = 늘어난 줄의 아래 끝
-    const endPage = Math.min(MAX_PAGES, Math.floor((endS - 0.5) / P));
+    const endPage = Math.min(MAX_PAGES, pageAtY(endS - 0.5, page));
     if (endPage > page) {
       page = endPage;
       fnUsed = 0;
+      commit();
       markPageStart(rowPos);
     }
     lastBottom = Math.max(lastBottom, endS);
@@ -565,10 +618,9 @@ function computeLayout(
     const fns = collectFootnotes(el, pos);
     const fnTotal = fns.reduce((a, f) => a + f.h, 0);
     const sBottom = bottom + shift;
-    let p = page;
-    while (top + shift >= (p + 1) * P - 0.5) p++;
+    const p = pageAtY(top + shift + 0.5, page);
     const fnUsedHere = p === page ? fnUsed : 0;
-    if (forceNext || sBottom <= p * P + CH - fnUsedHere - fnTotal - (fnTotal ? FN_SEP : 0) + 0.5) {
+    if (forceNext || sBottom <= T(p) + CHof(p) - fnUsedHere - fnTotal - (fnTotal ? FN_SEP : 0) + 0.5) {
       place(top, bottom, fnTotal, () => pos, 'block', pos);
       pushFootnotes(fns);
       return;
@@ -590,12 +642,11 @@ function computeLayout(
     rows.forEach((row, i) => {
       const rr = row.el.getBoundingClientRect();
       const uTop = i === 0 ? top : rel(rr.top);
-      tableHead = headN && i >= headN && headH > 0 && headH < CH / 3 ? { table: pos, h: headH } : null;
+      tableHead = headN && i >= headN && headH > 0 && headH < CHof(page) / 3 ? { table: pos, h: headH } : null;
       const uBottom = i === rows.length - 1 ? bottom : rel(rr.bottom);
       // 한글 기본(셀 단위 나눔)처럼, 넘치는 줄은 셀 내용을 쪽 경계에서 나눈다 (짧은 줄은 통째로 넘김)
-      let pp = page;
-      while (uTop + shift >= (pp + 1) * P - 0.5) pp++;
-      if (uBottom + shift > pp * P + CH + 0.5 && uBottom - uTop > 60) {
+      const pp = pageAtY(uTop + shift + 0.5, page);
+      if (uBottom + shift > T(pp) + CHof(pp) + 0.5 && uBottom - uTop > 60) {
         const rowNode = node.child(i);
         splitRow(rowNode, row.pos, uTop, uBottom);
         return;
@@ -632,6 +683,12 @@ function computeLayout(
     const name = child.type.name;
     if (name === 'pageBreak') {
       forceNext = true;
+      // 구역 나누기: 다음 쪽부터 그 구역의 용지
+      const sp = child.attrs?.sectionPage as PageSetup | null;
+      if (sp && g.resolve) {
+        const sg = g.resolve(sp);
+        curPg = { H: sg.pageHeight, CH: sg.contentHeight, mt: sg.mt ?? 0, setup: sp };
+      }
       return;
     }
     softNext = !!child.attrs?.hwpPage;
@@ -688,7 +745,7 @@ function computeLayout(
         const delta = top - ps.top;
         const dp = page - ps.page;
         // 이 블록의 쪽 안 위치와 각주 상태가 지난번과 같으면(쪽 번호는 dp 만큼 밀려도) 뒤는 모두 같다
-        if (Math.abs(shift + delta - (ps.shift + dp * P)) < 0.5 && Math.abs(fnUsed - ps.fnUsed) < 0.5 && forceNext === ps.forceNext) {
+        if (Math.abs(shift + delta - (ps.shift + dp * (g.pageHeight + g.gap))) < 0.5 && Math.abs(fnUsed - ps.fnUsed) < 0.5 && forceNext === ps.forceNext) {
           early = { j, pj, delta, dp };
           break;
         }
@@ -717,14 +774,14 @@ function computeLayout(
     footnotes = footnotes.concat(cache!.footnotes.slice(ps.nFn).map((f) => ({ ...f, pos: dirty!.mapping.map(f.pos), page: f.page + dp })));
     pageStarts = pageStarts.concat(cache!.pageStarts.slice(ps.nStarts).map((x) => dirty!.mapping.map(x)));
     pageCount = Math.min(MAX_PAGES, cache!.pageCount + dp);
-    lastBottom = cache!.lastBottom + dp * P;
+    lastBottom = cache!.lastBottom + dp * (g.pageHeight + g.gap);
     // 지난 스냅샷을 새 문서에 맞춰 옮긴다 (자연 위치는 delta 만큼, 쪽은 dp 만큼, 밀림은 그에 맞게)
     for (let i = pj; i < cache!.snaps.length; i++) {
       const o = cache!.snaps[i];
-      snaps[j + (i - pj)] = { ...o, top: o.top + delta, page: o.page + dp, shift: o.shift + dp * P - delta, lastBottom: o.lastBottom + dp * P, nBreaks: o.nBreaks + dB, nFn: o.nFn + dF, nStarts: o.nStarts + dS };
+      snaps[j + (i - pj)] = { ...o, top: o.top + delta, page: o.page + dp, shift: o.shift + dp * (g.pageHeight + g.gap) - delta, lastBottom: o.lastBottom + dp * (g.pageHeight + g.gap), nBreaks: o.nBreaks + dB, nFn: o.nFn + dF, nStarts: o.nStarts + dS };
     }
   } else {
-    pageCount = Math.max(page + 1, Math.floor(Math.max(0, lastBottom - 0.5) / P) + 1);
+    pageCount = Math.max(page + 1, pageAtY(Math.max(0, lastBottom - 0.5), page) + 1);
     if (forceNext) pageCount = Math.max(pageCount, page + 2);
     pageCount = Math.min(pageCount, MAX_PAGES);
   }
@@ -732,6 +789,12 @@ function computeLayout(
   if (pageStarts.length > pageCount) pageStarts = pageStarts.slice(0, pageCount);
   const repeats = breaks.filter((b) => b.head).map((b) => b.head!);
   const result: LayoutResult = { pageCount, footnotes, pageStarts, ...(repeats.length ? { repeats } : {}) };
+  // 구역마다 용지가 다른 문서: 쪽마다의 용지 (끝 쪽까지 채운다)
+  if (multi) {
+    page = pageCount - 1;
+    commit();
+    result.pageSetups = pgs.slice(0, pageCount).map((x) => x.setup);
+  }
   return { breaks, result, cache: { doc, snaps, breaksLen: breaks.length, footnotes, pageStarts, pageCount, lastBottom }, incremental: useCache };
 }
 

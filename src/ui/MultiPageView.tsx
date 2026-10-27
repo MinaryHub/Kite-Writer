@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } fro
 import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
 import { useApp } from '../app/hooks';
-import { buildPrintPage, collectPageBoxes, computeGeom, PAGE_GAP, type PageBox, type PageGeom } from '../print';
+import { buildPrintPage, collectPageBoxes, computeGeom, PAGE_GAP, printPlans, type PageBox, type PageGeom, type PagePlan } from '../print';
 
 const GAP = 28;
 const LABEL_H = 22;
@@ -19,8 +19,10 @@ export function MultiPageView({ tab }: { tab: DocTab }) {
   const g: PageGeom = computeGeom(tab.settings, PAGE_GAP);
   const zoom = app.zoom;
   const pageCount = Math.max(1, tab.layout.pageCount);
-  const pw = g.W * zoom;
-  const ph = g.H * zoom;
+  // 구역마다 용지가 다르면 칸은 가장 큰 용지 크기로
+  const plans = printPlans(tab);
+  const pw = Math.max(...plans.map((p) => p.g.W)) * zoom;
+  const ph = Math.max(...plans.map((p) => p.g.H)) * zoom;
   const rowH = ph + LABEL_H + GAP;
 
   // 작업 영역 너비 → 열 수
@@ -90,8 +92,9 @@ export function MultiPageView({ tab }: { tab: DocTab }) {
     const cell = e.currentTarget as HTMLElement;
     const r = cell.getBoundingClientRect();
     // 쪽 안에서 누른 자리 → 편집기 좌표 (배율 없는 px)
-    const xDoc = (e.clientX - r.left) / zoom - g.ml;
-    const yDoc = k * g.P + (e.clientY - r.top) / zoom - g.mt;
+    const pl = plans[k] || plans[0];
+    const xDoc = (e.clientX - r.left) / zoom - pl.g.ml + pl.dx;
+    const yDoc = pl.contentTop + (e.clientY - r.top) / zoom - pl.g.mt;
     app.setMultiPage(false);
     setTimeout(() => {
       window.dispatchEvent(new CustomEvent('kite:goto-page', { detail: k + 1 }));
@@ -127,8 +130,8 @@ export function MultiPageView({ tab }: { tab: DocTab }) {
     const visible = row >= range[0] && row <= range[1];
     cells.push(
       <div key={k} className="mp-cell" style={{ width: pw, height: ph + LABEL_H }}>
-        <div className={'mp-page' + (k === curPage ? ' current' : '')} style={{ width: pw, height: ph }} onClick={(e) => goEdit(k, e)} title="누르면 이 쪽을 편집합니다">
-          {visible && <PageClone tab={tab} g={g} k={k} boxes={boxes} pageCount={pageCount} zoom={zoom} version={version} />}
+        <div className={'mp-page' + (k === curPage ? ' current' : '')} style={{ width: (plans[k] || plans[0]).g.W * zoom, height: (plans[k] || plans[0]).g.H * zoom }} onClick={(e) => goEdit(k, e)} title="누르면 이 쪽을 편집합니다">
+          {visible && <PageClone tab={tab} plan={plans[k] || plans[0]} k={k} boxes={boxes} pageCount={pageCount} zoom={zoom} version={version} />}
         </div>
         <div className="mp-label">{k + 1}</div>
       </div>,
@@ -144,13 +147,14 @@ export function MultiPageView({ tab }: { tab: DocTab }) {
   );
 }
 
-function PageClone({ tab, g, k, boxes, pageCount, zoom, version }: { tab: DocTab; g: PageGeom; k: number; boxes: PageBox[]; pageCount: number; zoom: number; version: number }) {
+function PageClone({ tab, plan, k, boxes, pageCount, zoom, version }: { tab: DocTab; plan: PagePlan; k: number; boxes: PageBox[]; pageCount: number; zoom: number; version: number }) {
   const ref = useRef<HTMLDivElement>(null);
+  const g = plan.g;
   useLayoutEffect(() => {
     const host = ref.current;
     if (!host) return;
-    host.replaceChildren(buildPrintPage(tab, g, k, boxes, pageCount));
+    host.replaceChildren(buildPrintPage(tab, plan, k, boxes, pageCount));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, g.W, g.H, g.P, k, boxes, pageCount, version]);
+  }, [tab, g.W, g.H, plan.contentTop, plan.dx, k, boxes, pageCount, version]);
   return <div ref={ref} className="mp-scale" style={{ width: g.W, height: g.H, transform: `scale(${zoom})` }} />;
 }

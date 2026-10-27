@@ -1,7 +1,7 @@
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
-import { CELL_VMARGIN_HWP, assembleTable, placeCaptions, type Caption, type Captions } from '../hwp/reader';
-import type { DocMeta, DocSettings, LoadedDoc } from '../../types';
+import { CELL_VMARGIN_HWP, FLOATING, HwpPageMarks, assembleTable, fitTableLines, placeCaptions, takeFloating, type Caption, type Captions } from '../hwp/reader';
+import type { DocMeta, DocSettings, LoadedDoc, PageSetup } from '../../types';
 import {
   type JMark,
   type JNode,
@@ -416,11 +416,13 @@ export class HwpxConverter {
   /** 한글이 배치해 둔 직전 문단 첫 줄의 세로 위치. 되돌아가면 한글이 새 쪽에 놓은 문단이다 */
   private lastVpos = 0;
   private topParas = 0;
+  private pageMarks = new HwpPageMarks();
 
   /** 구역이 바뀌면 쪽 세기를 새로 */
   startSection() {
     this.lastVpos = 0;
     this.topParas = 0;
+    this.pageMarks.reset();
   }
 
   constructor(
@@ -461,10 +463,12 @@ export class HwpxConverter {
     const lineSegs: [number, number][] = segEls.map((s) => [numAttr(s, 'textpos', 0), hwpToPx(numAttr(s, 'horzsize', 0))]);
     /** 쪽 나누기 없이 한글이 새 쪽에 놓은 문단 (첫 줄의 세로 위치가 되돌아감) */
     let hwpPage = false;
+    let vpos: number | null = null;
     if (!ctx.inSub) {
-      const vpos = segEls.length ? numAttr(segEls[0], 'vertpos', 0) : null;
+      vpos = segEls.length ? numAttr(segEls[0], 'vertpos', 0) : null;
       hwpPage = this.topParas++ > 0 && !pageBreak && vpos != null && vpos < this.lastVpos;
-      if (vpos != null) this.lastVpos = vpos;
+      // 다음 문단과는 이 문단 마지막 줄의 세로 위치로 견준다 (여러 줄 문단은 줄 사이에서 쪽이 바뀔 수 있다)
+      if (segEls.length) this.lastVpos = numAttr(segEls[segEls.length - 1], 'vertpos', 0);
       if (pageBreak) blocks.push({ type: 'pageBreak' });
     }
     let inline: JNode[] = [];
@@ -509,7 +513,11 @@ export class HwpxConverter {
             break;
           }
           case 'pic':
-            inline.push(this.convertPic(child));
+            {
+              const pic = this.convertPic(child);
+              if (attr(kid(child, 'pos'), 'treatAsChar') !== '1') pic.attrs = { ...pic.attrs, [FLOATING]: true };
+              inline.push(pic);
+            }
             this.addCaption(child, captions);
             break;
           case 'ole':
@@ -557,13 +565,15 @@ export class HwpxConverter {
     else if (!produced) blocks.push(paragraph({ ...pAttrs, fontSize: firstSize && firstSize !== 10 ? firstSize : null }));
     // 문단이 표 등으로 쪼개지지 않고 줄 위치를 모두 찾았을 때만 (HWP 와 같게). 첫 줄은 문단 번호(머리 글자)부터
     track.at.set(0, 0);
+    // 떠 있는 개체 표시는 늘 지운다 (문서 노드에는 없는 속성)
+    const floating = blocks.map(takeFloating).some(Boolean);
     const paras = blocks.filter((b) => b.type !== 'pageBreak');
-    if (lineSize && lineSegs.length && paras.length === 1 && paras[0].type === 'paragraph' && lineSegs.every((s) => track.at.has(s[0]))) {
+    if (lineSize && lineSegs.length && paras.length === 1 && paras[0].type === 'paragraph' && !floating && lineSegs.every((s) => track.at.has(s[0]))) {
       paras[0].attrs = { ...paras[0].attrs, hwpLines: lineSegs.map((s) => [track.at.get(s[0])!, Math.round(s[1] * 100) / 100]), hwpLen: lineSize };
     }
     const out = placeCaptions(blocks, captions);
     const first = out.find((b) => b.type !== 'pageBreak');
-    if (hwpPage && first && (first.type === 'paragraph' || first.type === 'table')) first.attrs = { ...first.attrs, hwpPage: true };
+    if (!ctx.inSub) this.pageMarks.mark(first, vpos, hwpPage);
     return out;
   }
 
@@ -729,23 +739,10 @@ export class HwpxConverter {
     const ol = attr(sec, 'outlineShapeIDRef');
     if (ol) this.outlineNumId = ol;
     if (this.settingsSet) return;
-    const pagePr = kid(sec, 'pagePr');
-    if (!pagePr) return;
+    const pg = pageOfSecPr(sec, this.settings.page);
+    if (!pg) return;
     this.settingsSet = true;
-    const m = kid(pagePr, 'margin');
-    const pg = this.settings.page;
-    pg.width = round(hwpToMm(numAttr(pagePr, 'width', 59528)), 1);
-    pg.height = round(hwpToMm(numAttr(pagePr, 'height', 84188)), 1);
-    pg.landscape = attr(pagePr, 'landscape') === 'NARROWLY';
-    if (m) {
-      pg.marginLeft = round(hwpToMm(numAttr(m, 'left', 8504)), 1);
-      pg.marginRight = round(hwpToMm(numAttr(m, 'right', 8504)), 1);
-      pg.marginTop = round(hwpToMm(numAttr(m, 'top', 5668)), 1);
-      pg.marginBottom = round(hwpToMm(numAttr(m, 'bottom', 4252)), 1);
-      pg.marginHeader = round(hwpToMm(numAttr(m, 'header', 4252)), 1);
-      pg.marginFooter = round(hwpToMm(numAttr(m, 'footer', 4252)), 1);
-      pg.gutter = round(hwpToMm(numAttr(m, 'gutter', 0)), 1);
-    }
+    this.settings.page = pg;
   }
 
   private sizedPlaceholder(el: Element, label: string): JNode {
@@ -881,8 +878,31 @@ export class HwpxConverter {
         tAttrs.outMargin = [m[0], m[1], Math.round((m[2] + vOff) * 10) / 10, m[3]];
       }
     }
-    return { type: 'table', attrs: tAttrs, content: rows };
+    const out: JNode = { type: 'table', attrs: tAttrs, content: rows };
+    fitTableLines(out);
+    return out;
   }
+}
+
+/** 구역 정의(hp:secPr)의 편집 용지. 없으면 null (base 의 값을 기본으로) */
+function pageOfSecPr(sec: Element, base: PageSetup): PageSetup | null {
+  const pagePr = kid(sec, 'pagePr');
+  if (!pagePr) return null;
+  const m = kid(pagePr, 'margin');
+  const pg: PageSetup = { ...base };
+  pg.width = round(hwpToMm(numAttr(pagePr, 'width', 59528)), 1);
+  pg.height = round(hwpToMm(numAttr(pagePr, 'height', 84188)), 1);
+  pg.landscape = attr(pagePr, 'landscape') === 'NARROWLY';
+  if (m) {
+    pg.marginLeft = round(hwpToMm(numAttr(m, 'left', 8504)), 1);
+    pg.marginRight = round(hwpToMm(numAttr(m, 'right', 8504)), 1);
+    pg.marginTop = round(hwpToMm(numAttr(m, 'top', 5668)), 1);
+    pg.marginBottom = round(hwpToMm(numAttr(m, 'bottom', 4252)), 1);
+    pg.marginHeader = round(hwpToMm(numAttr(m, 'header', 4252)), 1);
+    pg.marginFooter = round(hwpToMm(numAttr(m, 'footer', 4252)), 1);
+    pg.gutter = round(hwpToMm(numAttr(m, 'gutter', 0)), 1);
+  }
+  return pg;
 }
 
 // ---------------- 패키지 ----------------
@@ -965,7 +985,10 @@ export async function readHwpx(data: Uint8Array): Promise<LoadedDoc> {
     const xml = await zipText(zip, sectionPaths[i]);
     if (!xml) continue;
     const sec = parseXml(xml).documentElement;
-    if (i > 0 && blocks.length) blocks.push({ type: 'pageBreak' });
+    // 구역 나누기: 구역마다 용지가 다를 수 있으므로 쪽 나누기에 이 구역의 용지를 담는다
+    const secPr = descendant(sec, 'secPr');
+    const secPage = i > 0 && secPr ? pageOfSecPr(secPr, settings.page) : null;
+    if (i > 0 && blocks.length) blocks.push(secPage ? { type: 'pageBreak', attrs: { sectionPage: secPage } } : { type: 'pageBreak' });
     conv.startSection();
     blocks.push(...conv.convertParagraphs(kids(sec, 'p'), { inSub: false }));
   }

@@ -17,7 +17,7 @@ const collect = (doc) => {
 let fail = 0;
 for (let i = 2; i + 1 < process.argv.length; i += 2) {
   const [a, b] = [collect(await read(process.argv[i])), collect(await read(process.argv[i + 1]))];
-  const k = (p) => JSON.stringify([p.type, p.lines?.map((l) => l[0]), p.len, p.page]);
+  const k = (p) => JSON.stringify([p.type, p.lines?.map((l) => [l[0], Math.round(l[1])]), p.len, p.page]);
   let same = 0, diff = 0, withLines = [0, 0], pages = [0, 0];
   for (const p of a) { if (p.lines) withLines[0]++; if (p.page) pages[0]++; }
   for (const p of b) { if (p.lines) withLines[1]++; if (p.page) pages[1]++; }

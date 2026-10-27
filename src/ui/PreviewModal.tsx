@@ -74,7 +74,7 @@ export function PreviewModal() {
     setGeom({ W: g.W, H: g.H });
     const host = pagesRef.current;
     host.replaceChildren();
-    const pages = buildPrintPages(tab, g);
+    const pages = buildPrintPages(tab);
     pages.forEach((p, i) => {
       const wrap = document.createElement('div');
       wrap.className = 'pv-page';
