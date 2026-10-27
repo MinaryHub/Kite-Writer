@@ -128,6 +128,13 @@ export function privateFontFor(name: string): string | null {
   return null;
 }
 
+/** 문서의 글꼴이 이 컴퓨터에 없어(별칭·한컴 폴더·PDF 글꼴로도) 대체 글꼴로 그려지는가 */
+export function fontMissing(name: string): boolean {
+  const n = name.trim();
+  if (!n) return false;
+  return !fontUsable(n) && !usableAlias(n) && !embeddedAliases.has(n);
+}
+
 /** 그 이름으로는 못 그리지만 다른 이름으로 설치되어 있으면 그 이름 */
 function usableAlias(name: string): string | null {
   for (const a of FONT_ALIASES[name.trim()] || []) if (fontUsable(a)) return a;
@@ -320,9 +327,11 @@ export function fontStack(name: string, opts: { canvas?: boolean } = {}): string
   // kite-sym: 가운뎃점(·) 등 몇몇 기호만 맡는 글꼴(editor.css 의 @font-face, unicode-range).
   // 휴먼명조·HY 계열 글꼴은 이 기호를 전각으로 그리지만 한글은 기호 글꼴로 반각으로 보여 주므로 그에 맞춘다.
   // 한글은 설치되지 않은 글꼴을 기본 글꼴(함초롬바탕)로 보여 준다. 이름이 분명히 고딕 계열일 때만 고딕으로 대신한다
+  // macOS: 일반 serif/sans-serif 는 'Apple SD Gothic Neo' 로 풀리는데 그 글꼴의 한글 폭은 0.865em 이라
+  // 한글 글꼴(모두 1em)보다 좁아 줄 바꿈이 달라진다. 한글 폭이 1em 에 가깝고 계열이 맞는 나눔·애플 글꼴을 앞에 둔다
   return SANS_RE.test(name) && !SERIF_RE.test(name)
-    ? `'kite-sym', ${q}, '함초롬돋움', 'HCR Dotum', '맑은 고딕', 'Malgun Gothic', sans-serif, 'Segoe UI Symbol', Wingdings`
-    : `'kite-sym', ${q}, '함초롬바탕', 'HCR Batang', '휴먼명조', '바탕', Batang, serif, 'Segoe UI Symbol', Wingdings`;
+    ? `'kite-sym', ${q}, '함초롬돋움', 'HCR Dotum', '맑은 고딕', 'Malgun Gothic', 'NanumGothic', 'AppleGothic', sans-serif, 'Segoe UI Symbol', Wingdings`
+    : `'kite-sym', ${q}, '함초롬바탕', 'HCR Batang', '휴먼명조', '바탕', Batang, 'NanumMyeongjo', 'AppleMyungjo', serif, 'Segoe UI Symbol', Wingdings`;
 }
 
 export function cssFontFamily(name: string): string {

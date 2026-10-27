@@ -421,6 +421,13 @@ export const KOrderedList = OrderedList.extend({
 });
 
 // ---------------- 표 ----------------
+/** linear/radial/conic-gradient 에 각도·위치·색만 든 값인지 (임의 CSS·url() 은 거른다) */
+function cleanGradient(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  return /^(linear|radial|conic)-gradient\([\w\s%.,#()-]{1,400}\)$/.test(s) && !/url|var|expression/i.test(s) ? s : null;
+}
+
 const cellAttrs = {
   backgroundColor: {
     default: null,
@@ -429,6 +436,15 @@ const cellAttrs = {
     renderHTML: (a: Record<string, any>) => {
       const c = normColor(a.backgroundColor);
       return c ? { 'data-bg': c, style: `background-color: ${c}` } : {};
+    },
+  },
+  /** 그러데이션 채우기 (한글): 우리가 만든 꼴의 CSS 그러데이션만 받는다 */
+  bgGradient: {
+    default: null,
+    parseHTML: (el: HTMLElement) => cleanGradient(el.getAttribute('data-bg-gradient')),
+    renderHTML: (a: Record<string, any>) => {
+      const g = cleanGradient(a.bgGradient);
+      return g ? { 'data-bg-gradient': g, style: `background-image: ${g}` } : {};
     },
   },
   verticalAlign: {
@@ -630,8 +646,13 @@ class KTableView extends TableView {
     else t.style.removeProperty('--cell-px');
     const align = node.attrs.align;
     const indent = typeof node.attrs.indent === 'number' && isFinite(node.attrs.indent) ? Math.max(-200, Math.min(400, node.attrs.indent)) : 0;
-    t.style.marginLeft = align === 'center' || align === 'right' ? 'auto' : indent ? indent + 'pt' : '';
+    // 한글 표의 바깥 여백 [왼, 오른, 위, 아래]: 위·아래는 그대로 띄우고, 왼쪽은 정렬이 없을 때만 (가운데·오른쪽은 auto 가 자리를 정한다)
+    const om = cleanMargins(node.attrs.outMargin);
+    const left = (indent ? indent * (96 / 72) : 0) + (om && !align ? om[0] : 0);
+    t.style.marginLeft = align === 'center' || align === 'right' ? 'auto' : left ? left.toFixed(1) + 'px' : '';
     t.style.marginRight = align === 'center' ? 'auto' : '';
+    t.style.marginTop = om && om[2] ? om[2] + 'px' : '';
+    t.style.marginBottom = om && om[3] ? om[3] + 'px' : '';
   }
 }
 
@@ -674,7 +695,11 @@ export const KTable = Table.extend({
         },
         renderHTML: (a: Record<string, any>) => {
           const v = cleanMargins(a.outMargin);
-          return v ? { 'data-out-margin': JSON.stringify(v) } : {};
+          if (!v) return {};
+          // 한글처럼 위·아래 바깥 여백만큼 표를 띄운다 (왼쪽 여백은 정렬이 없을 때만: 가운데·오른쪽 정렬은 CSS 가 자리를 정한다)
+          const st = [`margin-top: ${v[2]}px`, `margin-bottom: ${v[3]}px`];
+          if (!a.align && v[0]) st.push(`margin-left: ${v[0]}px`);
+          return { 'data-out-margin': JSON.stringify(v), style: st.join('; ') };
         },
       },
       /** 한글(HWP)에서 이 표가 새 쪽의 맨 위에서 시작했다 (쪽 나누기가 그 자리에서 쪽을 넘긴다). 화면 전용 */

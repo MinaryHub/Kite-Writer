@@ -670,3 +670,7 @@
   color: #c62828;
   font-family: monospace;
 }
+/* 한글 문서의 수식은 글자 크기와 같은 크기로 (한글의 수식 글꼴 크기 = 글자 크기) */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) .k-math .katex {
+  font-size: 1em;
+}

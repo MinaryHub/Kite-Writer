@@ -31,6 +31,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # Electron 44+ no longer downloads its binary on npm install; electronDist needs node_modules/electron/dist.
+      - run: node node_modules/electron/install.js
 
       - name: Set version from tag
         shell: pwsh

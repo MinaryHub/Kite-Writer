@@ -27,7 +27,7 @@ import {
   type BorderSide,
   FIXED_SPACE,
 } from '../common';
-import { charMarks, paraAttrs, imgFillFit, langFontsOf, type CharPr, type ParaPr, type BorderFill, type Numbering } from '../hwpx/reader';
+import { charMarks, paraAttrs, imgFillFit, langFontsOf, gradientCss, type CharPr, type ParaPr, type BorderFill, type Numbering } from '../hwpx/reader';
 
 /**
  * HWP 5.0 (바이너리, OLE 복합 문서) 읽기.
@@ -222,7 +222,24 @@ function parseDocInfo(recs: Rec[]): DocInfo {
           const binId = u16(r, o + 4);
           if (binId) img = { id: String(binId), mode: IMG_FILL_MODES[u8(r, o)] || 'TOTAL' };
         }
-        info.borderFills.push({ bg, noBorders, css: borderCss(sides), img });
+        // 그러데이션: 종류(1) 기울임(4) 가로 중심(4) 세로 중심(4) 번짐 정도(4) 색 수(4) [색이 3개 이상이면 바뀌는 위치 4×n] 색 4×n
+        let gradient: string | null = null;
+        if (fillType & 4) {
+          const o = 36 + (fillType & 1 ? 12 : 0);
+          if (r.data.length >= o + 21) {
+            const gt = (['LINEAR', 'LINEAR', 'RADIAL', 'CONICAL', 'SQUARE'] as const)[u8(r, o)] || 'LINEAR';
+            const angle = u32(r, o + 1) | 0;
+            const cx = u32(r, o + 5) | 0;
+            const cy = u32(r, o + 9) | 0;
+            const n = Math.min(16, u32(r, o + 17));
+            let co = o + 21 + (n > 2 ? n * 4 : 0);
+            const colors: string[] = [];
+            for (let k = 0; k < n && co + 4 <= r.data.length; k++, co += 4) colors.push(colorRefToHex(u32(r, co)) || '');
+            gradient = gradientCss(gt, angle, cx, cy, colors);
+            if (!bg && colors[0]) bg = colors[0] === '#FFFFFF' ? null : colors[0];
+          }
+        }
+        info.borderFills.push({ bg, noBorders, css: borderCss(sides), img, gradient });
         break;
       }
       case T.CHAR_SHAPE: {
@@ -701,6 +718,7 @@ class HwpConverter {
       const va = (attrVal >>> 21) & 3;
       const attrs: Record<string, any> = { colspan: cs, rowspan: rs, colwidth: null };
       if (bf?.bg) attrs.backgroundColor = bf.bg;
+      if (bf?.gradient) attrs.bgGradient = bf.gradient;
       if (bf && bf.noBorders.length) attrs.borderStyle = bf.noBorders.join(' ');
       if (bf?.css) attrs.borderCss = bf.css;
       const fillSrc = bf?.img ? this.images.get(+bf.img.id) : null;
@@ -740,9 +758,19 @@ class HwpConverter {
     const t = assembleTable(cells, nRowsDecl, nColsDecl, hwpToPx(u32(ctrl, 16)), rowH);
     if (tbl) t.attrs = { cellPadding: Math.round(hwpToPx((u16(tbl, 10) + u16(tbl, 12)) / 2) * 10) / 10 };
     // 글자처럼 취급(개체 속성 bit 0): 쪽에서 나뉘지 않고 문단 정렬을 따른다. 저장할 때 되돌린다
-    if (u32(ctrl, 4) & 1) t.attrs = { ...t.attrs, inline: true };
+    const objAttr = u32(ctrl, 4);
+    if (objAttr & 1) t.attrs = { ...t.attrs, inline: true };
     // 표 바깥 여백 [왼, 오른, 위, 아래] (저장할 때 그대로 되돌린다). 개체 공통 속성에서 z-order(24, INT32) 다음 28 부터
     if (ctrl.data.length >= 36) t.attrs = { ...t.attrs, outMargin: [28, 30, 32, 34].map((o) => Math.round(hwpToPx(u16(ctrl, o)) * 10) / 10) };
+    // 떠 있는 표(글자처럼 취급 아님)가 문단 기준(bit 3-4 = 2)으로 아래로 떨어져 있으면 그만큼 위 여백으로
+    // (Kite 에는 떠 있는 개체가 없어 흐름에 놓는다: 한글에서 표가 놓이는 세로 자리는 맞춘다)
+    if (!(objAttr & 1) && ((objAttr >> 3) & 3) === 2 && ctrl.data.length >= 32) {
+      const vOff = hwpToPx(u32(ctrl, 8));
+      if (vOff > 0.5 && vOff < 2000) {
+        const m = (t.attrs as any).outMargin || [0, 0, 0, 0];
+        t.attrs = { ...t.attrs, outMargin: [m[0], m[1], Math.round((m[2] + vOff) * 10) / 10, m[3]] };
+      }
+    }
     if (caption && caption.length) (t as any).caption = { top: captionTop, blocks: this.convertParagraphs(caption, true) } satisfies Caption;
     return t;
   }
