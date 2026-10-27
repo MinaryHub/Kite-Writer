@@ -283,11 +283,31 @@ export const PageBreak = Node.create({
   group: 'block',
   atom: true,
   selectable: true,
+  addAttributes() {
+    return {
+      /**
+       * 구역 나누기: 여기서 시작하는 구역의 편집 용지 (PageSetup). 없으면 앞 구역의 용지 그대로 쪽만 넘긴다.
+       * 한글 문서는 구역마다 용지 크기·방향·여백이 다를 수 있다
+       */
+      sectionPage: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          try {
+            const v = JSON.parse(el.getAttribute('data-section') || 'null');
+            return v && typeof v === 'object' && +v.width > 0 && +v.height > 0 ? v : null;
+          } catch {
+            return null;
+          }
+        },
+        renderHTML: (a: Record<string, any>) => (a.sectionPage ? { 'data-section': JSON.stringify(a.sectionPage) } : {}),
+      },
+    };
+  },
   parseHTML() {
     return [{ tag: 'div[data-type="page-break"]' }, { tag: 'hr[data-type="page-break"]' }];
   },
-  renderHTML() {
-    return ['div', { 'data-type': 'page-break', class: 'page-break' }];
+  renderHTML({ HTMLAttributes }) {
+    return ['div', { ...HTMLAttributes, 'data-type': 'page-break', class: 'page-break' }];
   },
   addCommands() {
     return {
