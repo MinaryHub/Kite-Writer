@@ -188,6 +188,11 @@ export class AppController {
       if (prefs && typeof prefs === 'object') this.prefs = { ...this.prefs, ...prefs };
       if (prefs?.view) this.view = { ...this.view, ...prefs.view };
       if (prefs?.zoom) this.zoom = prefs.zoom;
+      // 휴대폰처럼 좁은 화면: 처음엔 눈금자를 감추고, 늘 쪽 폭에 맞춰 연다
+      if (typeof window !== 'undefined' && window.innerWidth < 760) {
+        if (!prefs?.view) this.view = { ...this.view, ruler: false };
+        this.zoomMode = 'width';
+      }
     } catch {
       /* 무시 */
     }
@@ -445,7 +450,9 @@ export class AppController {
     const def = SAVE_FORMATS.find((f) => f.id === fmt) || SAVE_FORMATS[0];
     const [stem] = splitExt(tab.path ? baseName(tab.path) : tab.title.replace(/\s*\(.*에서 변환\)$/, ''));
     const dir = tab.path ? tab.path.slice(0, tab.path.length - baseName(tab.path).length) : '';
-    const filters = [def, ...SAVE_FORMATS.filter((f) => f.id !== def.id && f.id !== 'pdf')].map((f) => ({ name: f.name, extensions: [f.ext] }));
+    // 안드로이드는 형식이 여럿이면 저장 위치를 고르기 전에 형식부터 묻는다: 형식을 정해 부른 경우엔 묻지 않는다
+    const choices = format && platform.isAndroid ? [def] : [def, ...SAVE_FORMATS.filter((f) => f.id !== def.id && f.id !== 'pdf')];
+    const filters = choices.map((f) => ({ name: f.name, extensions: [f.ext] }));
     const target = await platform.chooseSavePath(dir + stem + '.' + def.ext, filters);
     if (!target) return false;
     const [, ext] = splitExt(target);
@@ -483,7 +490,7 @@ export class AppController {
     try {
       const data = await exportDocument(format, tab.toKDocument(), { pageCount: tab.layout.pageCount });
       await platform.writeFile(path, data);
-      if (platform.isElectron) {
+      if (platform.hasFilePaths) {
         tab.path = path;
         tab.title = baseName(path);
         tab.saveFormat = format;

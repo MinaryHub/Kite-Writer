@@ -1,0 +1,90 @@
+name: Android
+
+# Builds the Android app (android/) from the same web build as the desktop app.
+# - Every push/PR that touches the app: debug APK as a workflow artifact.
+# - Tag v*: release APK/AAB attached to the GitHub Release (signed when the secrets below exist).
+#
+# Signing secrets (optional): ANDROID_KEYSTORE_BASE64 (base64 of the .jks), ANDROID_KEYSTORE_PASSWORD,
+# ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD. Without them the release APK is unsigned.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+    paths-ignore: ['**.md', 'store/**', 'contact-relay/**']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and attach to its release (empty: debug build of this ref)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+      - name: Set version from tag
+        if: env.TAG != ''
+        run: npm version "${TAG#v}" --no-git-tag-version --allow-same-version
+
+      - run: npm run build:web
+
+      - name: Debug APK
+        if: env.TAG == ''
+        run: node scripts/android.mjs assembleDebug
+
+      - name: Release APK + AAB
+        if: env.TAG != ''
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KITE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KITE_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KITE_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > android/release.jks
+            export KITE_KEYSTORE_FILE=release.jks
+          fi
+          node scripts/android.mjs assembleRelease bundleRelease
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kite-android
+          path: release/android/*
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            gh release upload "$TAG" release/android/* --repo "${{ github.repository }}" --clobber
+          else
+            # the Windows release job may create the same release at the same moment
+            gh release create "$TAG" release/android/* --repo "${{ github.repository }}" --title "Kite $TAG" --generate-notes \
+              || gh release upload "$TAG" release/android/* --repo "${{ github.repository }}" --clobber
+          fi

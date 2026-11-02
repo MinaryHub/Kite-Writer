@@ -19,6 +19,7 @@ import { ReviewPanel } from './ui/ReviewPanel';
 import { VersionPanel } from './ui/VersionPanel';
 import { SelectionBubble } from './ui/SelectionBubble';
 import { baseName } from './formats/common';
+import { displayPath } from './android';
 
 export function App() {
   const app = useApp();
@@ -124,7 +125,7 @@ function StartScreen() {
               {app.recent.map((p) => (
                 <div key={p} className="ri" onClick={() => app.openPath(p)}>
                   <span>{baseName(p)}</span>
-                  <span className="rp">{p}</span>
+                  <span className="rp">{displayPath(p)}</span>
                 </div>
               ))}
             </div>

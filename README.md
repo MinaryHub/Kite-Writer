@@ -1,6 +1,6 @@
 # Kite Writer
 
-한글(HWP/HWPX) 문서를 중심으로 Word·PDF·Markdown 문서까지 열어 편집하는 데스크톱 워드프로세서입니다.
+한글(HWP/HWPX) 문서를 중심으로 Word·PDF·Markdown 문서까지 열어 편집하는 워드프로세서입니다. 윈도우 데스크톱 앱과 안드로이드 앱이 있습니다.
 Electron + React + TypeScript + TipTap(ProseMirror) 기반이며, HWP/HWPX/DOCX 변환기는 외부 라이브러리 없이 직접 구현했습니다.
 
 ## 실행
@@ -82,6 +82,31 @@ HWP·HWPX 저장 결과는 한글 2018에서 실제로 열어 확인했습니다
 
 단축키 전체 목록은 프로그램의 **도구 → 단축키 목록(Shift+F1)** 에 있습니다.
 
+## 안드로이드 앱
+
+`android/` 는 데스크톱 앱과 같은 화면(`npm run build:web` 결과 `dist/`)을 WebView 로 띄우는 안드로이드 앱이다 (Android 8.0 이상). 형식 변환기·편집기는 모두 같은 코드를 쓰고, 안드로이드에서만 다른 부분은 `src/android.ts`(웹 쪽)와 `android/app/src/main/java/kr/smic/kite/`(네이티브 쪽) 에 있다.
+
+```bash
+npm run android:apk       # 웹 빌드 → release/android/Kite-<버전>-debug.apk
+npm run android:release   # 웹 빌드 → 서명한 release APK + Play 스토어용 AAB
+```
+
+필요: JDK 17 이상, Android SDK (`ANDROID_HOME` 또는 `android/local.properties` 의 `sdk.dir`). Android Studio 로 `android/` 폴더를 열어도 된다 (먼저 `npm run build:web`).
+버전은 `package.json` 에서 가져온다 (1.2.3 → versionCode 10203).
+
+release 서명: `android/keystore.properties` 에 `storeFile`, `storePassword`, `keyAlias`, `keyPassword` 를 적거나 환경 변수 `KITE_KEYSTORE_FILE`, `KITE_KEYSTORE_PASSWORD`, `KITE_KEY_ALIAS`, `KITE_KEY_PASSWORD` 를 준다. 없으면 서명하지 않은 APK 가 나온다.
+
+GitHub Actions(`.github/workflows/android.yml`): 푸시할 때마다 debug APK 를 작업 결과물(artifact)로 올리고, `v*` 태그에서는 release APK·AAB 를 GitHub 릴리스에 붙인다. 서명하려면 저장소 Secrets 에 `ANDROID_KEYSTORE_BASE64`(jks 파일의 base64), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` 를 넣는다.
+
+안드로이드에서는:
+
+- 불러오기·저장은 시스템 파일 선택기(저장소 접근 프레임워크)를 쓴다. 저장한 문서는 같은 자리에 덮어쓰고 최근 문서에서 다시 열 수 있다. 다른 이름으로 저장할 때는 형식을 먼저 고른다
+- 파일 관리자·메신저·메일의 '다음으로 열기'와 '공유'로 HWP·HWPX·DOCX·PDF·MD 등을 받아 연다. 파일 → 공유하기로 저장한 문서를 다른 앱에 보낸다
+- 인쇄와 PDF로 저장은 안드로이드 인쇄 화면으로 한다 (PDF는 프린터에서 'PDF로 저장' 선택)
+- 뒤로 가기는 열린 창·메뉴를 닫고, 없으면 저장 확인 후 끝낸다. 앱이 뒤로 가면 바로 자동 저장한다
+- 휴대폰처럼 좁은 화면에서는 메뉴·도구 상자가 가로로 밀리고, 쪽 폭에 맞춰 연다
+- DOC 열기, AI 도우미, AI 앱 연결(MCP), 공동 편집, 한컴오피스 글꼴 읽기는 데스크톱 앱 전용이다. 인터넷 권한이 없어 문서가 기기 밖으로 나가지 않는다
+
 ## Microsoft Store 배포
 
 ```
@@ -116,6 +141,7 @@ npm run dist:store      # 윈도우에서만: electron-builder 의 makeappx 로 
 
 ```
 electron/           메인 프로세스(파일 대화 상자, 인쇄/PDF, DOC 변환, 글꼴 목록, 자동 저장, AI, MCP, 공동 편집 중계)
+android/            안드로이드 앱 (WebView 셸: 파일 열기/저장, 인쇄, 다음으로 열기, 뒤로 가기) — 웹 쪽은 src/android.ts
 src/formats/        형식 변환기 (hwp, hwpx, docx, pdf, markdown, html) + flatten(공통 문단 모델)
 src/editor/         TipTap 확장 (문단/글자 모양, 쪽 나누기 엔진, 각주, 표, 찾기)
 src/ui/             메뉴, 도구 상자, 쪽 화면, 눈금자, 대화 상자, 검사·검토·버전 창

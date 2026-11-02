@@ -11,6 +11,7 @@
     "dev": "node scripts/dev.mjs",
     "dev:web": "vite",
     "build": "node scripts/gen-notices.mjs && tsc --noEmit && vite build && node scripts/build-electron.mjs",
+    "build:web": "node scripts/gen-notices.mjs && tsc --noEmit && vite build",
     "start": "node scripts/start.mjs",
     "typecheck": "tsc --noEmit",
     "dist": "node scripts/bump-version.mjs && npm run build && electron-builder --win",
@@ -19,6 +20,8 @@
     "version:major": "node scripts/bump-version.mjs major",
     "dist:store": "node scripts/bump-version.mjs && npm run build && electron-builder --win appx",
     "dist:msix": "node scripts/bump-version.mjs && npm run build && node scripts/pack-msix.mjs --build",
+    "android:apk": "npm run build:web && node scripts/android.mjs assembleDebug",
+    "android:release": "npm run build:web && node scripts/android.mjs assembleRelease bundleRelease",
     "release": "node scripts/release.mjs",
     "release:minor": "node scripts/release.mjs minor",
     "release:major": "node scripts/release.mjs major"

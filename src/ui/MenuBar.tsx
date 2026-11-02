@@ -4,6 +4,7 @@ import { useApp } from '../app/hooks';
 import { useOutsideClose } from './widgets';
 import { Icon } from './Icon';
 import { baseName } from '../formats/common';
+import { platform } from '../platform';
 
 export type MenuEntry =
   | string
@@ -28,6 +29,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
       '-',
       'file.preview',
       'file.print',
+      ...(platform.canShare() ? ['file.share'] : []),
       '-',
       'file.versions',
       'file.info',
@@ -204,7 +206,14 @@ export function MenuList({ items, close }: { items: MenuEntry[]; close: () => vo
         }
         if ('items' in it) {
           return (
-            <div key={i} className="menu-item" onMouseEnter={() => setSub(i)} onMouseDown={(e) => e.preventDefault()}>
+            <div
+              key={i}
+              className="menu-item"
+              onMouseEnter={() => setSub(i)}
+              onMouseDown={(e) => e.preventDefault()}
+              // 터치 화면: 눌러서 펼친다
+              onClick={() => setSub(i)}
+            >
               <span className="mi-icon" />
               <span className="mi-label">{it.label}</span>
               <Icon name="ChevronRight" size={13} />

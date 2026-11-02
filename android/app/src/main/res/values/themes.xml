@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="kite_navy">#1F3A68</color>
+    <color name="kite_bg">#E9ECF1</color>
+    <style name="Theme.Kite" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/kite_bg</item>
+        <item name="android:colorPrimary">@color/kite_navy</item>
+        <item name="android:colorPrimaryDark">@color/kite_navy</item>
+        <item name="android:colorAccent">@color/kite_navy</item>
+        <item name="android:statusBarColor">@color/kite_navy</item>
+    </style>
+</resources>
