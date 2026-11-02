@@ -84,4 +84,6 @@ tasks.named("preBuild") { dependsOn(copyWebAssets) }
 dependencies {
     implementation("androidx.activity:activity:1.9.3")
     implementation("androidx.core:core:1.13.1")
+    // androidx 가 끌어오는 kotlin-stdlib 와 옛 -jdk7/-jdk8 조각이 겹치지 않게 한 버전으로 맞춘다
+    implementation(platform("org.jetbrains.kotlin:kotlin-bom:1.8.22"))
 }
