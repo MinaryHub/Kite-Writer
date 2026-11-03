@@ -3,7 +3,7 @@
   "productName": "Kite",
   "version": "1.0.5",
   "description": "HWP/HWPX/DOCX/DOC/PDF/MD 문서 편집기",
-  "author": "SMIC",
+  "author": "minary",
   "license": "UNLICENSED",
   "private": true,
   "main": "dist-electron/main.js",
@@ -27,7 +27,7 @@
     "release:major": "node scripts/release.mjs major"
   },
   "build": {
-    "appId": "kr.smic.kite",
+    "appId": "com.minary.kite",
     "productName": "Kite",
     "icon": "build/icon.ico",
     "files": [

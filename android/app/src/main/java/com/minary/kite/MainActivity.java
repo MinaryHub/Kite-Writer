@@ -1,4 +1,4 @@
-package kr.smic.kite;
+package com.minary.kite;
 
 import android.annotation.SuppressLint;
 import android.app.ActivityManager;

@@ -1,4 +1,4 @@
-package kr.smic.kite;
+package com.minary.kite;
 
 import android.content.Context;
 import android.webkit.WebResourceResponse;
