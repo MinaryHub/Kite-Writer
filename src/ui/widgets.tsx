@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Icon } from './Icon';
 import { cssFontFamily } from '../fonts';
 
@@ -153,12 +153,22 @@ export function useOutsideClose(open: boolean, close: () => void, ref: React.Ref
 export function Dropdown(props: { button: (open: boolean, toggle: () => void) => ReactNode; children: (close: () => void) => ReactNode; align?: 'left' | 'right' }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const [fixed, setFixed] = useState<CSSProperties | null>(null);
   useOutsideClose(open, () => setOpen(false), ref);
+  // 가로로 스크롤되는 도구 상자(좁은 화면) 안에서는 잘리지 않게 화면 기준으로 띄운다
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!open || !el) return setFixed(null);
+    const scroller = el.closest('.toolbar') as HTMLElement | null;
+    if (!scroller || getComputedStyle(scroller).overflowX === 'visible') return setFixed(null);
+    const r = el.getBoundingClientRect();
+    setFixed({ position: 'fixed', top: r.bottom + 2, left: Math.max(4, Math.min(r.left, window.innerWidth - 280)), right: 'auto' });
+  }, [open]);
   return (
     <div className="dropdown" ref={ref}>
       {props.button(open, () => setOpen(!open))}
       {open && (
-        <div className="dropdown-pop" style={props.align === 'right' ? { left: 'auto', right: 0 } : undefined} onMouseDown={(e) => e.preventDefault()}>
+        <div className="dropdown-pop" style={fixed || (props.align === 'right' ? { left: 'auto', right: 0 } : undefined)} onMouseDown={(e) => e.preventDefault()}>
           {props.children(() => setOpen(false))}
         </div>
       )}

@@ -184,6 +184,18 @@ export const commands: Record<string, Command> = {
   'file.exportPdf': { label: 'PDF로 저장하기...', icon: 'FileDown', run: () => app.exportPdf(), enabled: hasDoc },
   'file.preview': { label: '미리 보기', icon: 'Eye', run: () => app.set({ previewOpen: true }), enabled: hasDoc },
   'file.print': { label: '인쇄...', icon: 'Printer', shortcut: 'Alt+P', keys: ['Alt+P', 'Ctrl+P'], run: () => app.print(), enabled: hasDoc },
+  'file.share': {
+    label: '공유하기...',
+    icon: 'Share2',
+    run: async () => {
+      const tab = app.active;
+      if (!tab) return;
+      // 저장한 파일을 보낸다: 고친 내용이 있으면 먼저 저장
+      if ((!tab.path || tab.dirty) && !(await app.save(tab))) return;
+      if (tab.path) platform.share(tab.path);
+    },
+    enabled: () => hasDoc() && platform.canShare(),
+  },
   'file.info': { label: '문서 정보...', icon: 'Info', shortcut: 'Ctrl+Q,I', run: () => app.openDialog('docInfo'), enabled: hasDoc },
   'file.close': { label: '문서 닫기', icon: 'X', shortcut: 'Ctrl+F4', keys: ['Ctrl+F4', 'Ctrl+W'], run: () => app.active && app.closeTab(app.active.id), enabled: hasDoc },
   'file.exit': { label: '끝', icon: 'LogOut', shortcut: 'Alt+X', keys: ['Alt+X'], run: () => app.requestQuit() },
