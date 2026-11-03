@@ -84,7 +84,7 @@ HWP·HWPX 저장 결과는 한글 2018에서 실제로 열어 확인했습니다
 
 ## 안드로이드 앱
 
-`android/` 는 데스크톱 앱과 같은 화면(`npm run build:web` 결과 `dist/`)을 WebView 로 띄우는 안드로이드 앱이다 (Android 8.0 이상). 형식 변환기·편집기는 모두 같은 코드를 쓰고, 안드로이드에서만 다른 부분은 `src/android.ts`(웹 쪽)와 `android/app/src/main/java/kr/smic/kite/`(네이티브 쪽) 에 있다.
+`android/` 는 데스크톱 앱과 같은 화면(`npm run build:web` 결과 `dist/`)을 WebView 로 띄우는 안드로이드 앱이다 (Android 8.0 이상). 형식 변환기·편집기는 모두 같은 코드를 쓰고, 안드로이드에서만 다른 부분은 `src/android.ts`(웹 쪽)와 `android/app/src/main/java/com/minary/kite/`(네이티브 쪽) 에 있다.
 
 ```bash
 npm run android:apk       # 웹 빌드 → release/android/Kite-<버전>-debug.apk

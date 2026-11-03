@@ -77,7 +77,7 @@ jobs:
             export KITE_KEY_PASSWORD="$KITE_KEYSTORE_PASSWORD"
             keytool -genkeypair -keystore android/release.jks -storetype PKCS12 -alias "$KITE_KEY_ALIAS" \
               -keyalg RSA -keysize 2048 -validity 10000 -storepass "$KITE_KEYSTORE_PASSWORD" -keypass "$KITE_KEY_PASSWORD" \
-              -dname "CN=Kite, O=SMIC, C=KR"
+              -dname "CN=Kite, O=minary, C=KR"
           fi
           export KITE_KEYSTORE_FILE=release.jks
           node scripts/android.mjs assembleRelease bundleRelease

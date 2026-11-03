@@ -118,7 +118,7 @@ function migrateOldUserData() {
   }
 }
 if (!process.env.KITE_SMOKE && !process.env.KITE_USER_DATA && !MCP_BRIDGE) migrateOldUserData();
-app.setAppUserModelId('kr.smic.kite');
+app.setAppUserModelId('com.minary.kite');
 
 /** 창 아이콘 (배포본: dist/icon.png, 개발: public/icon.png) */
 function appIcon(): string | undefined {

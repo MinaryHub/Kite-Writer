@@ -1,7 +1,7 @@
 Kite Writer 개인정보 처리방침
 시행일: 2026년 10월 18일
 
-Kite Writer(이하 "Kite")는 문서를 사용자의 컴퓨터에서 편집하는 프로그램입니다. Kite 개발사(SMIC)는 사용자의 문서나 개인정보를 수집·저장하지 않습니다.
+Kite Writer(이하 "Kite")는 문서를 사용자의 컴퓨터에서 편집하는 프로그램입니다. Kite 개발사(minary)는 사용자의 문서나 개인정보를 수집·저장하지 않습니다.
 
 1. 수집하는 정보
 Kite 개발사는 사용자 정보를 수집하지 않습니다. 회원 가입, 사용 통계(원격 측정), 광고, 추적 기능이 없습니다.
@@ -35,7 +35,7 @@ Kite는 개인정보를 수집하지 않으므로 아동의 개인정보도 수�
 Kite Writer Processor Privacy Policy
 Effective date: October 18, 2026
 
-Kite Writer Processor ("Kite") edits documents on your computer. The developer of Kite (SMIC) does not collect or store your documents or personal information.
+Kite Writer Processor ("Kite") edits documents on your computer. The developer of Kite (minary) does not collect or store your documents or personal information.
 
 1. Information we collect
 We do not collect any information about you. Kite has no account sign-up, usage analytics (telemetry), advertising, or tracking.

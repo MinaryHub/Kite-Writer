@@ -34,11 +34,11 @@ val copyWebAssets by tasks.registering(Sync::class) {
 }
 
 android {
-    namespace = "kr.smic.kite"
+    namespace = "com.minary.kite"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "kr.smic.kite"
+        applicationId = "com.minary.kite"
         minSdk = 26
         targetSdk = 35
         versionCode = appVersionCode
