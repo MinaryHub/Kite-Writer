@@ -69,8 +69,17 @@ jobs:
         run: |
           if [ -n "$KEYSTORE_B64" ]; then
             echo "$KEYSTORE_B64" | base64 -d > android/release.jks
-            export KITE_KEYSTORE_FILE=release.jks
+          else
+            # No signing secrets: an unsigned APK cannot be installed, so sign with a throwaway key.
+            # Each build gets a new key, so updating needs uninstalling first. Add the secrets for a stable key.
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set; signing with a temporary key (updates will need a reinstall)"
+            export KITE_KEYSTORE_PASSWORD="$(openssl rand -hex 16)" KITE_KEY_ALIAS=kite
+            export KITE_KEY_PASSWORD="$KITE_KEYSTORE_PASSWORD"
+            keytool -genkeypair -keystore android/release.jks -storetype PKCS12 -alias "$KITE_KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 -storepass "$KITE_KEYSTORE_PASSWORD" -keypass "$KITE_KEY_PASSWORD" \
+              -dname "CN=Kite, O=SMIC, C=KR"
           fi
+          export KITE_KEYSTORE_FILE=release.jks
           node scripts/android.mjs assembleRelease bundleRelease
 
       - uses: actions/upload-artifact@v4
