@@ -1,7 +1,8 @@
 name: Android
 
 # Builds the Android app (android/) from the same web build as the desktop app.
-# - Every push/PR that touches the app: debug APK as a workflow artifact.
+# - Every branch push: debug APK as a workflow artifact (no separate PR run: PRs here come from
+#   branches of this repo, which the push run already builds).
 # - Tag v*: release APK/AAB attached to the GitHub Release (signed when the secrets below exist).
 #
 # Signing secrets (optional): ANDROID_KEYSTORE_BASE64 (base64 of the .jks), ANDROID_KEYSTORE_PASSWORD,
@@ -10,8 +11,6 @@ on:
   push:
     branches: ['**']
     tags: ['v*']
-  pull_request:
-    paths-ignore: ['**.md', 'store/**', 'contact-relay/**']
   workflow_dispatch:
     inputs:
       tag:
