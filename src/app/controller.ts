@@ -3,7 +3,7 @@ import { platform } from '../platform';
 import { importDocument, exportDocument, SAVE_FORMATS, OPEN_FILTERS } from '../formats';
 import { baseName, splitExt, MAX_IMPORT_BYTES } from '../formats/common';
 import type { SaveFormatId } from '../types';
-import { withPrintRoot } from '../print';
+import { withPrintRoot, printPlans } from '../print';
 import { viewState } from '../editor/viewState';
 import { KOREAN_FONTS, LATIN_FONTS, installedFonts, privateFontNames, ensurePrivateFonts, collectFontNames, registerPdfFonts, applyPdfFontVars, embeddedAliases } from '../fonts';
 
@@ -51,6 +51,8 @@ export interface Prefs {
   mcpSuggest: boolean;
   /** 변경 내용·메모에 남길 이름 */
   userName: string;
+  /** 축소해서 쪽이 가로로 둘 이상 들어가면 여러 쪽 보기로 바꾼다 (한글처럼) */
+  autoMultiPage?: boolean;
 }
 
 export interface ViewOptions {
@@ -100,6 +102,8 @@ export class AppController {
   zoomMode: 'custom' | 'width' | 'page' = 'custom';
   /** 여러 쪽 보기 (쪽 사본을 격자로; 누르면 그 자리로 돌아가 편집) */
   multiPage = false;
+  /** 축소해서 저절로 여러 쪽 보기가 됐을 때, 그 전의 배율 (편집으로 돌아갈 때 되돌린다) */
+  private autoMultiFrom: number | null = null;
   view: ViewOptions = { ruler: true, statusbar: true, marks: false, guides: true, transparent: true, toolbar: true, formatbar: true };
   dialog: DialogState | null = null;
   confirmState: ConfirmState | null = null;
@@ -645,18 +649,53 @@ export class AppController {
 
   // ---------------- 보기 ----------------
   setZoom(z: number, mode: AppController['zoomMode'] = 'custom') {
+    const prev = this.zoom;
     const zoom = Math.max(0.25, Math.min(4, Math.round(z * 100) / 100));
     viewState.zoom = zoom;
     this.zoom = zoom;
     this.zoomMode = mode;
+    // 사용자가 배율을 바꿀 때만 (폭·쪽 맞춤은 아님): 줄여서 쪽이 가로로 둘 들어가면 여러 쪽 보기로, 다시 키우면 돌아온다
+    if (mode === 'custom' && this.prefs.autoMultiPage !== false && zoom !== prev) {
+      if (!this.multiPage && zoom < prev && this.fitsTwoPages(zoom)) {
+        this.autoMultiFrom = prev;
+        this.multiPage = true;
+      } else if (this.multiPage && this.autoMultiFrom != null && zoom > prev && !this.fitsTwoPages(zoom)) {
+        this.autoMultiFrom = null;
+        this.multiPage = false;
+      }
+    }
     this.emit();
     // 배율은 CSS 변환이라 쪽 나누기를 다시 잴 필요가 없다 (큰 문서에서 확대/축소 때마다 300ms 가 들었다)
     this.savePrefs();
   }
 
+  /** 이 배율에서 작업 영역에 쪽이 가로로 둘 이상 들어가는가 (여러 쪽 보기의 열 계산과 같은 식) */
+  private fitsTwoPages(zoom: number): boolean {
+    const tab = this.active;
+    if (!tab || typeof document === 'undefined') return false;
+    const ws = document.querySelector('.work > .workspace.multi, .work > .workspace:not(.hidden-doc):not(.mp-hidden)') as HTMLElement | null;
+    if (!ws || !ws.clientWidth) return false;
+    const W = Math.max(...printPlans(tab).map((p) => p.g.W));
+    return ws.clientWidth >= 2 * W * zoom + 60;
+  }
+
   setMultiPage(on: boolean) {
     if (this.multiPage === on) return;
     this.multiPage = on;
+    this.autoMultiFrom = null;
+    this.emit();
+  }
+
+  /** 여러 쪽 보기에서 쪽을 눌러 편집으로 돌아간다: 축소해서 들어온 경우엔 그 전 배율로 */
+  leaveMultiPage() {
+    const back = this.autoMultiFrom;
+    this.autoMultiFrom = null;
+    this.multiPage = false;
+    if (back != null) {
+      this.zoom = viewState.zoom = back;
+      this.zoomMode = 'custom';
+      this.savePrefs();
+    }
     this.emit();
   }
 
