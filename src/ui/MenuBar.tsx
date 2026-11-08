@@ -61,6 +61,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
       'view.fitWidth',
       'view.fitPage',
       'view.multiPage',
+      'view.autoMultiPage',
       '-',
       'view.darkMode',
       'view.darkPaper',

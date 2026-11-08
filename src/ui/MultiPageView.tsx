@@ -95,7 +95,7 @@ export function MultiPageView({ tab }: { tab: DocTab }) {
     const pl = plans[k] || plans[0];
     const xDoc = (e.clientX - r.left) / zoom - pl.g.ml + pl.dx;
     const yDoc = pl.contentTop + (e.clientY - r.top) / zoom - pl.g.mt;
-    app.setMultiPage(false);
+    app.leaveMultiPage();
     setTimeout(() => {
       window.dispatchEvent(new CustomEvent('kite:goto-page', { detail: k + 1 }));
       setTimeout(() => {

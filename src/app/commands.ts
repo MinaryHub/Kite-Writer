@@ -235,6 +235,15 @@ export const commands: Record<string, Command> = {
     active: () => app.multiPage,
     enabled: hasDoc,
   },
+  'view.autoMultiPage': {
+    label: '축소하면 여러 쪽 보기',
+    run: () => {
+      app.prefs = { ...app.prefs, autoMultiPage: app.prefs.autoMultiPage === false };
+      app.savePrefs();
+      app.emit();
+    },
+    active: () => app.prefs.autoMultiPage !== false,
+  },
   'view.fullscreen': { label: '전체 화면', shortcut: 'F11', keys: ['F11'], run: () => platform.toggleFullscreen() },
   'view.darkMode': {
     label: '어두운 화면',
