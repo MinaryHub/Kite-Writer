@@ -6,6 +6,7 @@ import { sanitizeDoc } from '../editor/sanitize';
 import type { DocMeta, DocSettings, FormatId, KDocument, SaveFormatId } from '../types';
 import { defaultSettings } from '../formats/common';
 import type { LayoutResult } from '../editor/extensions/pagination';
+import { tabFillKey } from '../editor/extensions/tabFill';
 
 let seq = 0;
 
@@ -56,7 +57,9 @@ export class DocTab {
     this.editor.storage.hwpMetrics.enabled = !!this.settings.hwpMetrics;
     if (init.content) this.setContent(init.content, true);
     this.savedDoc = this.editor.state.doc;
-    this.editor.on('update', () => {
+    this.editor.on('update', ({ transaction }) => {
+      // 탭 폭 맞춤(화면 배치)만 바뀐 것은 저장할 변경이 아니다: 저장한 문서로 여긴다
+      if (transaction.getMeta(tabFillKey) && !this.dirty) this.savedDoc = this.editor.state.doc;
       const d = this.editor.state.doc !== this.savedDoc;
       if (d !== this.dirty) {
         this.dirty = d;

@@ -435,6 +435,8 @@ class HwpConverter {
     const breakType = u8(p, 11);
     const pp = this.info.paraPrs[psId];
     const pAttrs = paraAttrs(pp);
+    // 개요 문단: 차례 만들기가 제목으로 쓴다
+    if (pp && pp.headingType === 'OUTLINE') pAttrs.outlineLevel = Math.max(0, Math.min(9, pp.headingLevel)) + 1;
     if (bg && !pAttrs.paraBg) pAttrs.paraBg = bg;
     const blocks: JNode[] = [];
     /** 쪽 나누기 없이 한글이 새 쪽에 놓은 문단 */

@@ -149,6 +149,26 @@ export const ParagraphFormat = Extension.create({
           hwpSeq: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
           /** 칸의 마지막 문단: 마지막 줄 간격·문단 아래 간격을 칸 높이에 넣는다 (한글이 칸 높이를 내용으로 새로 셈한 칸) */
           hwpTrail: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 개요 수준 (1부터): 한글의 개요 문단. 차례 만들기가 제목 문단으로 쓴다 */
+          outlineLevel: {
+            default: null,
+            keepOnSplit: false,
+            parseHTML: (el: HTMLElement) => {
+              const v = +(el.getAttribute('data-outline') || 0);
+              return v >= 1 && v <= 10 ? v : null;
+            },
+            renderHTML: (a: Record<string, any>) => (+a.outlineLevel >= 1 ? { 'data-outline': String(+a.outlineLevel) } : {}),
+          },
+          /** 차례 문단 ('title' 차례 제목, 'entry' 항목): 차례 새로 고침이 이 문단들을 다시 만든다 */
+          toc: {
+            default: null,
+            keepOnSplit: false,
+            parseHTML: (el: HTMLElement) => {
+              const v = el.getAttribute('data-toc');
+              return v === 'title' || v === 'entry' ? v : null;
+            },
+            renderHTML: (a: Record<string, any>) => (a.toc === 'title' || a.toc === 'entry' ? { 'data-toc': a.toc } : {}),
+          },
           /** 한글 줄 정보가 없는 문단의 줄 높이 어림: [줄 높이(다음 줄까지), 기준선] px (같은 모양의 다른 문단에서 빌린 값) */
           hwpPitch: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
           /** 칸·글상자 안에서 앞 문단과 더 벌어진 간격(px) */

@@ -9,7 +9,7 @@ import {
   Subscript, Superscript, Table, TextSelect, Trash2, Type, Underline, Undo2, X, ZoomIn, ZoomOut,
   ChevronDown, ChevronUp, ChevronRight, Plus, Highlighter, Baseline, Check, FileType2, ArrowUp, ArrowDown,
   RotateCcw, Maximize2, ArrowLeft, ArrowRight, Crop, Sparkles, Plug, LayoutGrid,
-  Moon, Sun, Command, MessageSquare, MessageSquarePlus, History, GitCompare, ShieldCheck, EyeOff, Sigma, Users, CheckCheck, CircleCheck, CircleX, Wand2, PencilLine, ClipboardCheck, FileSearch, Reply, Lock, Landmark, CalendarDays, CalendarRange, Plane, ClipboardList, Receipt, Calculator, IdCard, Newspaper, Megaphone, LayoutTemplate, Heart, Mail, Share2, type LucideIcon,
+  Moon, Sun, Command, MessageSquare, MessageSquarePlus, History, GitCompare, ShieldCheck, EyeOff, Sigma, Users, CheckCheck, CircleCheck, CircleX, Wand2, PencilLine, ClipboardCheck, FileSearch, Reply, Lock, Landmark, CalendarDays, CalendarRange, Plane, ClipboardList, Receipt, Calculator, IdCard, Newspaper, Megaphone, LayoutTemplate, Heart, Mail, Share2, RefreshCw, MoreHorizontal, TableOfContents, type LucideIcon,
 } from 'lucide-react';
 
 const ICONS: Record<string, LucideIcon> = {
@@ -23,7 +23,7 @@ const ICONS: Record<string, LucideIcon> = {
   Subscript, Superscript, Table, TextSelect, Trash2, Type, Underline, Undo2, X, ZoomIn, ZoomOut,
   ChevronDown, ChevronUp, ChevronRight, Plus, Highlighter, Baseline, Check, FileType2, ArrowUp, ArrowDown,
   RotateCcw, Maximize2, ArrowLeft, ArrowRight, Crop, Sparkles, Plug, LayoutGrid,
-  Moon, Sun, Command, MessageSquare, MessageSquarePlus, History, GitCompare, ShieldCheck, EyeOff, Sigma, Users, CheckCheck, CircleCheck, CircleX, Wand2, PencilLine, ClipboardCheck, FileSearch, Reply, Lock, Landmark, CalendarDays, CalendarRange, Plane, ClipboardList, Receipt, Calculator, IdCard, Newspaper, Megaphone, LayoutTemplate, Heart, Mail, Share2,
+  Moon, Sun, Command, MessageSquare, MessageSquarePlus, History, GitCompare, ShieldCheck, EyeOff, Sigma, Users, CheckCheck, CircleCheck, CircleX, Wand2, PencilLine, ClipboardCheck, FileSearch, Reply, Lock, Landmark, CalendarDays, CalendarRange, Plane, ClipboardList, Receipt, Calculator, IdCard, Newspaper, Megaphone, LayoutTemplate, Heart, Mail, Share2, RefreshCw, MoreHorizontal, TableOfContents,
 };
 
 export function Icon({ name, size = 16, color, strokeWidth = 1.7 }: { name?: string; size?: number; color?: string; strokeWidth?: number }) {
