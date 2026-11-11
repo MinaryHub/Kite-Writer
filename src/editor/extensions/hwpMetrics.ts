@@ -38,6 +38,22 @@ function measure(font: string, text: string): number | null {
   return ctx.measureText(text).width;
 }
 
+const boxCache = new Map<string, { a: number; d: number } | null>();
+/** 글꼴의 글자 상자: 기준선 위(a)·아래(d) 높이(px) */
+function fontBox(font: string): { a: number; d: number } | null {
+  let b = boxCache.get(font);
+  if (b !== undefined) return b;
+  b = null;
+  if (ctx === undefined) ctx = typeof document !== 'undefined' ? document.createElement('canvas').getContext('2d') : null;
+  if (ctx) {
+    if (ctx.font !== font) ctx.font = font;
+    const m = ctx.measureText('한');
+    if (m.fontBoundingBoxAscent > 0) b = { a: m.fontBoundingBoxAscent, d: m.fontBoundingBoxDescent };
+  }
+  boxCache.set(font, b);
+  return b;
+}
+
 function spaceWidth(font: string): number | null {
   let w = widthCache.get(font);
   if (w == null) {
@@ -186,12 +202,60 @@ function lineBreakWidget(): HTMLElement {
   return br;
 }
 
+/** 한글이 놓은 줄 상자: 줄 높이(다음 줄까지, px)와 줄 위에서 기준선까지(px) */
+export interface HwpLineBox {
+  pitch: number;
+  base: number;
+}
+
+/**
+ * 한글이 놓은 줄마다의 줄 상자 (hwpVs: [줄 위쪽, 줄 높이, 줄 아래 간격, 기준선]). 문단 내용이 그대로이고 줄 첫 자리를
+ * 모두 알 때만 (여러 줄이면 hwpLines 가 있어야 한다). lastInBox: 칸·글상자의 마지막 문단 — 한글은 마지막 줄 아래
+ * 간격을 칸 높이에 넣지 않는다
+ */
+export function hwpLineBoxes(node: PMNode, lastInBox: boolean): HwpLineBox[] | null {
+  const vs = node.attrs?.hwpVs as number[][] | null;
+  if (!Array.isArray(vs) || !vs.length || node.attrs?.hwpLen !== node.content.size) return null;
+  const lines = node.attrs?.hwpLines as [number, number][] | null;
+  if (vs.length > 1 && !(Array.isArray(lines) && lines.length === vs.length)) return null;
+  const out: HwpLineBox[] = [];
+  for (let i = 0; i < vs.length; i++) {
+    const v = vs[i];
+    if (!Array.isArray(v) || !(v[1] > 0)) return null;
+    const next = vs[i + 1];
+    let pitch = v[1] + (+v[2] || 0);
+    // 같은 쪽에서 이어지는 줄은 다음 줄의 자리까지 (개체를 피해 밀린 줄 포함). 다음 줄이 새 쪽(자리가 되돌아감)이면 줄 높이 + 간격
+    if (next && next[0] > v[0] + 0.5) pitch = next[0] - v[0];
+    // 칸의 마지막 줄 아래 간격은 칸 높이에 들지 않는다. 다만 한글이 칸 높이를 새로 셈해야 했던 칸(hwpTrail: 적힌 칸 높이가
+    // 내용보다 작다)은 마지막 줄 간격과 문단 아래 간격까지 넣어 줄 높이를 정한다
+    else if (!next && lastInBox && node.attrs?.hwpTrail !== true) pitch = v[1];
+    // 기준선: 문단의 줄 안 세로 정렬이 '가운데'·'위'면 한글은 기준선 자리에 줄 가운데(높이의 절반)나 위를 적어 둔다.
+    // 그 값은 글자의 기준선이 아니므로, 줄 높이의 0.6 에 못 미치면 한글 글꼴의 보통 기준선(높이의 0.85)으로 본다
+    const base = v[3] >= v[1] * 0.6 ? v[3] : v[1] * 0.85;
+    out.push({ pitch: Math.max(1, Math.round(pitch * 100) / 100), base: Math.round(base * 100) / 100 });
+  }
+  return out;
+}
+
+/** 줄 첫머리의 버팀대: 줄 상자를 한글의 줄 높이로 만들고 글자 기준선을 한글의 기준선에 놓는다 */
+function lineStartWidget(box: HwpLineBox): () => HTMLElement {
+  return () => {
+    const strut = document.createElement('span');
+    strut.className = 'hwp-strut';
+    strut.contentEditable = 'false';
+    // 빈 inline-block 의 기준선은 아래 끝: 기준선 아래로 (줄 높이 - 기준선)만큼 내리면 위 끝이 기준선 위 base 에 온다
+    strut.style.height = box.pitch + 'px';
+    strut.style.verticalAlign = (-(box.pitch - box.base)).toFixed(2) + 'px';
+    return strut;
+  };
+}
+
 /**
  * 한글이 배치해 둔 줄(hwpLines)대로 줄을 바꾼다: 문단은 저절로 줄을 바꾸지 않게 하고(white-space: pre) 줄 첫 자리마다
  * 줄 바꿈을 넣는다. 한글 글꼴이 없어 대신 그린 글꼴의 폭이 달라도 줄이 한글 폭에 맞도록, 넘치는 줄은 글자 사이를
  * 좁히고 양쪽 정렬 줄은 빈칸을 넓혀 한글의 줄 폭에 맞춘다.
  */
-function lineDecos(node: PMNode, pos: number, pieces: Piece[] | null, out: Decoration[]): boolean {
+function lineDecos(node: PMNode, pos: number, pieces: Piece[] | null, out: Decoration[], boxes: HwpLineBox[] | null = null): boolean {
   const lines = node.attrs?.hwpLines as [number, number][] | null;
   if (!Array.isArray(lines) || !lines.length || node.attrs?.hwpLen !== node.content.size) return false;
   const start = pos + 1;
@@ -203,7 +267,10 @@ function lineDecos(node: PMNode, pos: number, pieces: Piece[] | null, out: Decor
     const a = start + lines[k][0];
     const b = k + 1 < lines.length ? start + lines[k + 1][0] : start + node.content.size;
     const before = a > start ? node.childBefore(lines[k][0]).node : null;
-    if (k > 0 && !(before && before.type.name === 'hardBreak')) out.push(Decoration.widget(a, lineBreakWidget, { side: -1, key: 'hwp-lb', ignoreSelection: true }));
+    const br = k > 0 && !(before && before.type.name === 'hardBreak');
+    // 차례: 줄 바꿈(-3) → 쪽 나누기의 줄 사이 공간(-2) → 줄 버팀대(-1)
+    if (br) out.push(Decoration.widget(a, lineBreakWidget, { side: -3, key: 'hwp-lb', ignoreSelection: true }));
+    if (boxes && boxes[k]) out.push(Decoration.widget(a, lineStartWidget(boxes[k]), { side: -1, key: `hwp-ls-${boxes[k].pitch}-${boxes[k].base}`, ignoreSelection: true }));
     if (!pieces) continue;
     const ps = pieces.filter((p) => p.from >= a && p.to <= b && !p.hang);
     if (!ps.length) continue;
@@ -269,7 +336,8 @@ function decosIn(doc: PMNode, from: number, to: number, out: Decoration[]) {
     let measurable = true;
     node.forEach((child, off) => {
       if (!child.isText) {
-        if (child.type.name !== 'hardBreak') measurable = false;
+        // 떠 있는 그림은 줄에서 자리를 차지하지 않는다
+        if (child.type.name !== 'hardBreak' && !child.attrs?.float) measurable = false;
         return;
       }
       const ts = child.marks.find((m) => m.type.name === 'textStyle');
@@ -280,16 +348,40 @@ function decosIn(doc: PMNode, from: number, to: number, out: Decoration[]) {
     });
     const all = groups.flat();
     for (const p of all) p.hang = hangs.some(([a, b]) => p.from >= a && p.to <= b);
-    if (useLines) lineDecos(node, pos, measurable ? all : null, out);
+    // 한글이 놓은 줄 상자 (높이·기준선): 줄 첫머리마다 버팀대를 세우고 문단 자체의 줄 높이는 없앤다
+    const inBox = !!parent && (parent.type.name === 'tableCell' || parent.type.name === 'tableHeader' || parent.type.name === 'textBox');
+    const boxes = node.type.name === 'paragraph' ? hwpLineBoxes(node, inBox && index === parent!.childCount - 1) : null;
+    if (useLines) lineDecos(node, pos, measurable ? all : null, out, boxes);
     // 앞뒤로 글자를 칠 때 꾸밈이 따라 늘어나게 (글자 묶음의 첫 조각만 앞으로)
     for (const g of groups)
       g.forEach((p, k) => {
         const d = pieceDeco(p, k === 0);
         if (d) out.push(d);
       });
+    if (boxes) {
+      // 빈 문단(줄 정보는 한 줄, 줄 첫 자리 목록은 없음)도 버팀대를 세운다
+      if (!useLines) out.push(Decoration.widget(pos + 1, lineStartWidget(boxes[0]), { side: -1, key: `hwp-ls-${boxes[0].pitch}-${boxes[0].base}`, ignoreSelection: true }));
+      const gap = +node.attrs?.hwpGap;
+      // 칸의 마지막 문단: 문단 아래 간격도 칸 높이에 들지 않는다 (hwpTrail 인 칸은 든다)
+      const noAfter = inBox && index === parent!.childCount - 1 && node.attrs?.hwpTrail !== true && +node.attrs?.spaceAfter > 0;
+      out.push(Decoration.node(pos, pos + node.nodeSize, { style: 'line-height: 0; white-space: pre' + (gap > 0 ? `; margin-top: ${gap.toFixed(2)}px` : '') + (noAfter ? '; padding-bottom: 0' : '') }));
+      return false;
+    }
     // 줄 높이 = 문단에서 가장 큰 글자 크기 × 줄 간격 (한글처럼). 글자 묶음은 줄 높이에 관여하지 않으므로(hwp-metrics CSS)
     // 문단의 글자 크기(줄 높이의 기준)를 그 크기로 맞춘다
     if (node.type.name !== 'paragraph') return false;
+    // 한글 줄 정보가 없는 문단: 같은 모양의 문단에서 빌린 줄 높이·기준선으로 (줄 바꿈은 Kite 가 한다)
+    const est = node.attrs?.hwpPitch as number[] | null;
+    if (Array.isArray(est) && est[0] > 1) {
+      const ts0 = node.firstChild?.marks.find((m) => m.type.name === 'textStyle');
+      const px = +(ts0?.attrs.fontSize || node.attrs?.fontSize || DEFAULT_FONT_SIZE) * PT2PX;
+      const fm = fontBox(`${px}px ${fontStack(String(ts0?.attrs.fontFamily || DEFAULT_FONT), { canvas: true })}`);
+      const st = [`line-height: ${est[0]}px`];
+      // CSS 는 글자 상자를 줄 상자 한가운데에 둔다. 기준선이 한글의 자리에 오도록 옮긴다
+      if (fm) st.push(`transform: translateY(${(est[1] - ((est[0] - (fm.a + fm.d)) / 2 + fm.a)).toFixed(2)}px)`);
+      out.push(Decoration.node(pos, pos + node.nodeSize, { style: st.join('; ') }));
+      return false;
+    }
     const own = +(node.attrs?.fontSize || DEFAULT_FONT_SIZE);
     const size = maxPt > 0 ? maxPt : own;
     const styles: string[] = [];
@@ -415,6 +507,7 @@ export const HwpMetrics = Extension.create<object, { enabled: boolean }>({
           const fonts: FontFaceSet | undefined = typeof document !== 'undefined' ? (document as any).fonts : undefined;
           const onFonts = () => {
             widthCache.clear();
+            boxCache.clear();
             if (storage.enabled && !view.isDestroyed) view.dispatch(view.state.tr.setMeta(hwpMetricsKey, 'all').setMeta('addToHistory', false));
           };
           const onCompEnd = () =>

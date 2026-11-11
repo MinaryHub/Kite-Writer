@@ -4,7 +4,7 @@ import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
 import type { PageSetup } from '../types';
 import { useApp } from '../app/hooks';
-import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, planPages, repeatHeadsHtml, stageWidth, type PageGeom } from '../print';
+import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
 import { sectionsKey } from '../editor/extensions/sections';
 import { formatPageNumber, splitExt } from '../formats/common';
 import { applyFormatPainter, insertImagesFromFiles } from '../app/commands';
@@ -180,7 +180,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
   };
 
   const s = tab.settings;
-  const total = pageCount + s.pageNumber.start - 1;
+  const total = pageNumAt(s, pageCount - 1);
 
   const pages = [];
   const chrome = [];
@@ -205,37 +205,41 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
         {next && <div className="m-paper" style={{ top: next.top - maskTop, left: next.left, width: next.g.W, height: next.g.mt, ...(pageBackgroundStyle(s, k + 1) || {}) }} />}
       </div>,
     );
-    const num = s.pageNumber.start + k;
+    const num = pageNumAt(s, k);
     const hfStyle = (align: string): React.CSSProperties => ({
       left: left + g.ml,
       width: g.contentW,
       justifyContent: align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center',
     });
     // 표·그림이 든 머리말/꼬리말은 한글처럼 영역 위쪽부터 모양 그대로 그린다
-    const hRich = hfRichHtml(s.header);
-    const fRich = hfRichHtml(s.footer);
+    // 첫 쪽 감추기 (표지): 영역은 그대로 두고(두 번 눌러 편집) 내용만 그리지 않는다
+    // 이 쪽의 머리말·꼬리말 (짝수 쪽, 시작 쪽, 첫 쪽 감추기). 없는 쪽도 영역은 둔다 (두 번 눌러 편집)
+    const hd = hfAt(s, 'header', k);
+    const ft = hfAt(s, 'footer', k);
+    const hRich = hd ? hfRichHtml(hd) : null;
+    const fRich = ft ? hfRichHtml(ft) : null;
     const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: hfText(html, num, total, s.pageNumber.format) }} />;
     chrome.push(
       <div
         key={'h' + k}
-        className={'hf-zone' + (s.header.text || hRich ? '' : ' empty') + (hRich ? ' rich' : '')}
+        className={'hf-zone' + (hd?.text || hRich ? '' : ' empty') + (hRich ? ' rich' : '')}
         data-hint="머리말 (두 번 누르면 편집)"
-        style={{ ...hfStyle(s.header.align), top: top + z.header.top, height: z.header.height, alignItems: 'flex-start' }}
+        style={{ ...hfStyle((hd || s.header).align), top: top + z.header.top, height: z.header.height, alignItems: hRich && hd?.valign === 'bottom' ? 'flex-end' : hRich && hd?.valign === 'middle' ? 'center' : 'flex-start' }}
         onDoubleClick={() => app.openDialog('headerFooter', { tab: 'header' })}
       >
-        {hRich ? rich(hRich) : s.header.text ? hfText(s.header.text, num, total, s.pageNumber.format) : ''}
+        {hRich ? rich(hRich) : hd?.text ? hfText(hd.text, num, total, s.pageNumber.format) : ''}
       </div>,
       <div
         key={'f' + k}
-        className={'hf-zone' + (s.footer.text || fRich ? '' : ' empty') + (fRich ? ' rich' : '')}
+        className={'hf-zone' + (ft?.text || fRich ? '' : ' empty') + (fRich ? ' rich' : '')}
         data-hint="꼬리말 (두 번 누르면 편집)"
-        style={{ ...hfStyle(s.footer.align), top: top + z.footer.top, height: z.footer.height, alignItems: fRich ? 'flex-start' : 'flex-end' }}
+        style={{ ...hfStyle((ft || s.footer).align), top: top + z.footer.top, height: z.footer.height, alignItems: fRich ? (ft?.valign === 'bottom' ? 'flex-end' : ft?.valign === 'middle' ? 'center' : 'flex-start') : 'flex-end' }}
         onDoubleClick={() => app.openDialog('headerFooter', { tab: 'footer' })}
       >
-        {fRich ? rich(fRich) : s.footer.text ? hfText(s.footer.text, num, total, s.pageNumber.format) : ''}
+        {fRich ? rich(fRich) : ft?.text ? hfText(ft.text, num, total, s.pageNumber.format) : ''}
       </div>,
     );
-    if (s.pageNumber.pos !== 'none') {
+    if (pageNumShown(s, k)) {
       const [v, h] = s.pageNumber.pos.split('-');
       const zz = v === 'top' ? z.header : z.footer;
       chrome.push(
@@ -257,7 +261,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       );
     }
     // 표가 이어지는 쪽 맨 위의 제목 줄 (쪽 나누기가 비워 둔 자리)
-    if (tab.layout.repeats?.some((r) => r.page === k)) {
+    if (tab.layout.repeats?.some((r) => r.page === k) || tab.layout.cuts?.some((c) => c.page === k)) {
       chrome.push(<div key={'rh' + k} className="pg-repeat-layer" style={{ position: 'absolute', left, top, width: g.W, height: g.H, pointerEvents: 'none' }} dangerouslySetInnerHTML={{ __html: repeatHeadsHtml(tab, g, k) }} />);
     }
     const fns = tab.layout.footnotes.filter((f) => f.page === k);

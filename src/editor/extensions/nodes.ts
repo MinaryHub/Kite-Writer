@@ -21,6 +21,15 @@ declare module '@tiptap/core' {
   }
 }
 
+/** 떠 있는 개체의 자리 (px). 값이 이상하면 null */
+export function floatOf(v: any): { x: number; y: number; behind: boolean } | null {
+  if (!v || typeof v !== 'object') return null;
+  const x = Number(v.x);
+  const y = Number(v.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 20000 || Math.abs(y) > 20000) return null;
+  return { x, y, behind: v.behind === true };
+}
+
 // ---------------- 글상자 (도형 안의 글) ----------------
 const RADIUS_RE = /^[\d.]+(px|%)$/;
 
@@ -33,7 +42,25 @@ export const TextBox = Node.create({
   isolating: true,
   addAttributes() {
     const plain = { default: null, rendered: false };
-    return { width: plain, height: plain, bg: plain, bgImage: plain, borderColor: plain, borderWidth: plain, radius: plain, padding: plain };
+    return {
+      width: plain,
+      height: plain,
+      bg: plain,
+      bgImage: plain,
+      borderColor: plain,
+      borderWidth: plain,
+      radius: plain,
+      padding: plain,
+      /** 떠 있는 자리 { x, y, behind? } (px: x 는 본문·칸 왼쪽, y 는 뒤따르는 문단 상자 위쪽 기준). 있으면 높이 없이 그 자리에 띄운다 */
+      float: plain,
+      /** 글의 세로 맞춤 (middle, bottom) */
+      valign: plain,
+      // 한글이 놓은 자리 (화면 전용: 쪽 나누기가 쓴다)
+      hwpTop: plain,
+      hwpSeq: plain,
+      hwpLen: plain,
+      hwpPage: plain,
+    };
   },
   parseHTML() {
     return [
@@ -62,7 +89,9 @@ export const TextBox = Node.create({
     const num = (v: any) => (Number.isFinite(+v) && +v > 0 ? +v : 0);
     const st: string[] = [];
     if (num(a.width)) st.push(`width:${num(a.width)}px`);
-    if (num(a.height)) st.push(`min-height:${num(a.height)}px`);
+    const fl = floatOf(a.float);
+    // 떠 있는 상자는 한글처럼 높이가 고정이다 (글이 넘치면 상자 밖으로)
+    if (num(a.height)) st.push(fl ? `height:${num(a.height)}px` : `min-height:${num(a.height)}px`);
     const bg = normColor(a.bg);
     if (bg) st.push(`background-color:${bg}`);
     if (typeof a.bgImage === 'string' && /^data:image\//.test(a.bgImage)) st.push(`background-image:url("${a.bgImage}")`);
@@ -70,6 +99,11 @@ export const TextBox = Node.create({
     if (bc) st.push(`border:${num(a.borderWidth) || 1}px solid ${bc}`);
     if (typeof a.radius === 'string' && RADIUS_RE.test(a.radius)) st.push(`border-radius:${a.radius}`);
     if (Array.isArray(a.padding) && a.padding.length === 4) st.push(`padding:${a.padding.map((v: any) => Math.max(0, +v || 0) + 'px').join(' ')}`);
+    if (a.valign === 'middle' || a.valign === 'bottom') st.push('display:flex', 'flex-direction:column', `justify-content:${a.valign === 'middle' ? 'center' : 'flex-end'}`);
+    if (fl) {
+      st.push(`left:${fl.x}px`, `top:${fl.y}px`);
+      return ['div', { class: 'k-float-anchor' }, ['div', { class: 'k-textbox k-float' + (fl.behind ? ' behind' : ''), style: st.join(';') }, 0]];
+    }
     return ['div', { class: 'k-textbox', style: st.join(';') }, 0];
   },
 });
@@ -145,6 +179,10 @@ export const KImage = Image.extend({
         },
         renderHTML: (a: Record<string, any>) => (a.height ? { height: a.height } : {}),
       },
+      /** 떠 있는 자리 { x, y, behind? } (px, 문단 상자의 왼쪽 위 기준). 있으면 줄에 끼지 않고 그 자리에 뜬다 (한글 문서 화면 전용) */
+      float: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 돌린 각도(도, 시계 방향). 한글 문서 화면 전용 */
+      rotate: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       /** 잘라 낸 비율 (0~1): 위/오른쪽/아래/왼쪽 */
       crop: {
         default: null,
@@ -200,6 +238,13 @@ export const KImage = Image.extend({
         if (img.getAttribute('src') !== n.attrs.src) img.src = n.attrs.src;
         if (n.attrs.alt) img.alt = n.attrs.alt;
         layout(n.attrs.width, n.attrs.height, cropOf(n.attrs.crop));
+        const fl = floatOf(n.attrs.float);
+        wrap.classList.toggle('k-float', !!fl);
+        wrap.classList.toggle('behind', !!fl?.behind);
+        wrap.style.left = fl ? fl.x + 'px' : '';
+        wrap.style.top = fl ? fl.y + 'px' : '';
+        const rot = Number(n.attrs.rotate);
+        wrap.style.transform = Number.isFinite(rot) && rot % 360 ? `rotate(${rot}deg)` : '';
       };
       apply(node);
       // 그림이 로드되면 그 블록의 높이만 달라지므로 위치를 알려 그 부분만 다시 재게 한다
@@ -472,6 +517,13 @@ function cleanGradient(v: unknown): string | null {
   return /^(linear|radial|conic)-gradient\([\w\s%.,#()-]{1,400}\)$/.test(s) && !/url|var|expression/i.test(s) ? s : null;
 }
 
+/** 칸 대각선 값 검사: 색과 숫자만 받는다 */
+function cleanDiag(v: any): { slash: boolean; back: boolean; c: string; zw: number; zh: number; px: number; py: number } | null {
+  if (!v || typeof v !== 'object' || !(v.slash || v.back)) return null;
+  const num = (x: any, def: number, lo: number, hi: number) => (Number.isFinite(+x) ? Math.min(hi, Math.max(lo, +x)) : def);
+  return { slash: !!v.slash, back: !!v.back, c: normColor(v.c) || '#000000', zw: num(v.zw, 100, 100, 100000), zh: num(v.zh, 100, 100, 100000), px: num(v.px, 0, 0, 100), py: num(v.py, 0, 0, 100) };
+}
+
 const cellAttrs = {
   backgroundColor: {
     default: null,
@@ -489,6 +541,28 @@ const cellAttrs = {
     renderHTML: (a: Record<string, any>) => {
       const g = cleanGradient(a.bgGradient);
       return g ? { 'data-bg-gradient': g, style: `background-image: ${g}` } : {};
+    },
+  },
+  /**
+   * 대각선 (한글 칸의 대각선): { slash?, back?, c, zw?, zh?, px?, py? }. slash 는 ／, back 은 ＼, c 는 색.
+   * 여러 칸에 걸친 대각선(셀 영역)은 zw·zh(영역 크기, 칸 크기의 %)와 px·py(이 칸의 자리, background-position %)로 제 몫만 그린다
+   */
+  diag: {
+    default: null,
+    parseHTML: (el: HTMLElement) => {
+      try {
+        return cleanDiag(JSON.parse(el.getAttribute('data-diag') || 'null'));
+      } catch {
+        return null;
+      }
+    },
+    renderHTML: (a: Record<string, any>) => {
+      const d = cleanDiag(a.diag);
+      if (!d) return {};
+      const line = (dir: string) => `linear-gradient(to ${dir}, transparent calc(50% - 0.5px), ${d.c} calc(50% - 0.5px), ${d.c} calc(50% + 0.5px), transparent calc(50% + 0.5px))`;
+      // 모서리로 향하는 그러데이션의 50% 선은 나머지 두 모서리를 지난다: 'top right' → ＼, 'bottom right' → ／
+      const img = [d.back ? line('top right') : '', d.slash ? line('bottom right') : ''].filter(Boolean).join(', ');
+      return { 'data-diag': JSON.stringify(d), style: `--dg: ${img}; --dg-size: ${d.zw}% ${d.zh}%; --dg-pos: ${d.px}% ${d.py}%` };
     },
   },
   verticalAlign: {
@@ -748,6 +822,10 @@ export const KTable = Table.extend({
       },
       /** 한글(HWP)에서 이 표가 새 쪽의 맨 위에서 시작했다 (쪽 나누기가 그 자리에서 쪽을 넘긴다). 화면 전용 */
       hwpPage: { default: false, parseHTML: () => false, renderHTML: () => ({}) },
+      // 한글이 놓은 자리·차례·그때의 내용 크기 (화면 전용: 쪽 나누기가 쓴다)
+      hwpTop: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      hwpSeq: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      hwpLen: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       borderless: {
         default: false,
         parseHTML: (el: HTMLElement) => el.getAttribute('data-borderless') === 'true',
