@@ -114,6 +114,25 @@ export function hfText(text: string, page: number, pages: number, fmt: string): 
   return text.replace(/\{\{PAGE\}\}/g, formatPageNumber(page, fmt === 'dash' ? 'digit' : fmt)).replace(/\{\{PAGES\}\}/g, String(pages));
 }
 
+/** k 번째 쪽(0부터)의 쪽 번호 */
+export function pageNumAt(s: DocSettings, k: number): number {
+  return Math.max(1, s.pageNumber.start + k - (s.pageNumber.base || 0));
+}
+
+/** k 번째 쪽에 쪽 번호를 찍는가 */
+export function pageNumShown(s: DocSettings, k: number): boolean {
+  return s.pageNumber.pos !== 'none' && k >= (s.pageNumber.from || 0) && !(k === 0 && s.hideFirst?.pageNum);
+}
+
+/** k 번째 쪽에 그릴 머리말/꼬리말 (짝수 쪽·시작 쪽·첫 쪽 감추기를 따른다). 없으면 null */
+export function hfAt(s: DocSettings, which: 'header' | 'footer', k: number): HeaderFooter | null {
+  const def = s[which];
+  if (k === 0 && s.hideFirst?.[which]) return null;
+  if (def.from != null && k < def.from) return null;
+  if (pageNumAt(s, k) % 2 === 0) return def.even ?? (def.oddOnly ? null : def);
+  return def;
+}
+
 /** 머리말/꼬리말 영역 위치 (px) */
 export function hfZones(s: DocSettings, g: PageGeom) {
   const p = s.page;
@@ -156,7 +175,8 @@ export function pageBackgroundStyle(s: DocSettings, k: number, dy = 0): Record<s
  */
 export function repeatHeadsHtml(tab: DocTab, g: PageGeom, k: number): string {
   const reps = (tab.layout.repeats || []).filter((r) => r.page === k);
-  if (!reps.length) return '';
+  const cuts = (tab.layout.cuts || []).filter((c) => c.page === k);
+  if (!reps.length && !cuts.length) return '';
   const cls = 'kdoc-content' + (tab.settings.hwpMetrics ? ' hwp-metrics' : '') + (tab.settings.fixedLines ? ' fixed-lines' : '');
   let html = '';
   for (const r of reps) {
@@ -179,25 +199,47 @@ export function repeatHeadsHtml(tab: DocTab, g: PageGeom, k: number): string {
     clone.querySelectorAll('.pg-push-row, .selectedCell').forEach((e) => e.classList.remove('pg-push-row', 'selectedCell'));
     html += `<div class="${cls} pg-repeat-head" style="position:absolute;left:${g.ml}px;top:${g.mt}px;width:${g.contentW}px;pointer-events:none">${clone.outerHTML}</div>`;
   }
+  // 쪽 경계에서 칸이 나뉜 표: 이 쪽에서 표가 끝나는 곳에 닫는 선 (한글은 나뉜 표의 아래를 선으로 닫는다)
+  for (const c of cuts) {
+    let dom: Node | null = null;
+    try {
+      dom = tab.editor.view.nodeDOM(c.table);
+    } catch {
+      continue;
+    }
+    const table = dom instanceof HTMLElement ? (dom.tagName === 'TABLE' ? dom : (dom.querySelector(':scope > table') as HTMLElement | null)) : null;
+    if (!table || table.getAttribute('data-borderless') === 'true') continue;
+    const wrap = table.parentElement as HTMLElement | null;
+    const left = (wrap && wrap !== tab.editor.view.dom ? wrap.offsetLeft : 0) + table.offsetLeft;
+    const y = Math.min(g.contentH, Math.max(0, c.y));
+    html += `<div class="pg-table-cut" style="position:absolute;left:${g.ml + left}px;top:${g.mt + y}px;width:${table.offsetWidth}px;height:${Math.max(0, g.contentH - y)}px;border-top:1px solid #000;background:#fff;box-sizing:border-box;pointer-events:none"></div>`;
+  }
   return html;
 }
 
 /** 한 쪽의 머리말/꼬리말/쪽 번호/각주 HTML */
 export function pageChromeHtml(tab: DocTab, g: PageGeom, k: number, pageCount: number, s: DocSettings = tab.settings): string {
   const z = hfZones(s, g);
-  const num = s.pageNumber.start + k;
-  const total = pageCount + s.pageNumber.start - 1;
+  const num = pageNumAt(s, k);
+  const total = pageNumAt(s, pageCount - 1);
   let html = '';
   const zone = (def: HeaderFooter, top: number, height: number, valign: string) => {
     const rich = hfRichHtml(def);
-    if (rich) return `<div class="kdoc-content hf-rich" style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px">${hfText(rich, num, total, s.pageNumber.format)}</div>`;
+    if (rich) {
+      // 영역 안 세로 맞춤 (아래·가운데면 영역 높이 안에서 맞춘다. 넘치는 내용은 자르지 않는다)
+      const va = def.valign === 'bottom' ? 'flex-end' : def.valign === 'middle' ? 'center' : 'flex-start';
+      return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;flex-direction:column;justify-content:${va}"><div class="kdoc-content hf-rich">${hfText(rich, num, total, s.pageNumber.format)}</div></div>`;
+    }
     if (!def.text.trim()) return '';
     return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;align-items:${valign};justify-content:${def.align === 'left' ? 'flex-start' : def.align === 'right' ? 'flex-end' : 'center'};font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:9pt;white-space:pre;overflow:hidden">${xmlEscape(hfText(def.text, num, total, s.pageNumber.format))}</div>`;
   };
   html += repeatHeadsHtml(tab, g, k);
-  html += zone(s.header, z.header.top, z.header.height, 'flex-start');
-  html += zone(s.footer, z.footer.top, z.footer.height, 'flex-end');
-  if (s.pageNumber.pos !== 'none') {
+  // 이 쪽의 머리말·꼬리말 (짝수 쪽, 시작 쪽, 첫 쪽 감추기)
+  const hd = hfAt(s, 'header', k);
+  const ft = hfAt(s, 'footer', k);
+  if (hd) html += zone(hd, z.header.top, z.header.height, 'flex-start');
+  if (ft) html += zone(ft, z.footer.top, z.footer.height, 'flex-end');
+  if (pageNumShown(s, k)) {
     const [v, h] = s.pageNumber.pos.split('-');
     const zz = v === 'top' ? z.header : z.footer;
     html += `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${zz.top}px;height:${zz.height}px;display:flex;align-items:${v === 'top' ? 'flex-start' : 'flex-end'};justify-content:${h === 'left' ? 'flex-start' : h === 'right' ? 'flex-end' : 'center'};font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:9pt">${xmlEscape(formatPageNumber(num, s.pageNumber.format))}</div>`;
@@ -255,7 +297,8 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
   const y0 = plan.contentTop;
   const y1 = y0 + g.contentH;
   for (const b of boxes) {
-    if (b.bottom <= y0 || b.top >= y1) continue;
+    // 높이 없는 블록(떠 있는 개체의 자리 표시)은 쪽 맨 위에 걸쳐 있어도 이 쪽 것이다
+    if (b.bottom < y0 || b.top >= y1 || (b.bottom === y0 && b.bottom > b.top)) continue;
     const clone = b.el.cloneNode(true) as HTMLElement;
     clone.style.position = 'absolute';
     clone.style.top = `${b.top - y0}px`;

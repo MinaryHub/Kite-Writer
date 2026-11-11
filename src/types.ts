@@ -20,6 +20,14 @@ export interface HeaderFooter {
   /** 텍스트. {{PAGE}} = 현재 쪽, {{PAGES}} = 전체 쪽 수 */
   text: string;
   align: HFAlign;
+  /** 영역 안 세로 맞춤 (content 를 그릴 때. 한글의 머리말·꼬리말 세로 정렬). 없으면 위 */
+  valign?: 'top' | 'middle' | 'bottom';
+  /** 짝수 쪽에 쓰는 머리말/꼬리말 (한글의 '짝수 쪽'). 없으면 짝수 쪽도 이것을 쓴다 (oddOnly 면 비운다) */
+  even?: HeaderFooter;
+  /** 홀수 쪽에만 (한글의 '홀수 쪽'만 있는 문서) */
+  oddOnly?: boolean;
+  /** 이 쪽(0부터)부터 쓴다: 머리말이 뒤 구역에서 시작하는 문서 (앞 쪽들에는 없다) */
+  from?: number;
   /**
    * 표·그림이 든 머리말/꼬리말 (HWP 에서 읽은 문서 블록 JSON). 있으면 text 대신 이것을 그린다.
    * 글자 '{{PAGE}}' 는 쪽 번호로 바뀐다. 대화상자에서 text 를 고치면 지워진다.
@@ -42,6 +50,10 @@ export interface PageNumbering {
   pos: PageNumPos;
   format: PageNumFormat;
   start: number;
+  /** start 가 매겨지는 쪽(0부터). 한글의 '새 번호로 시작'이 뒤쪽에 있는 문서 (없으면 첫 쪽) */
+  base?: number;
+  /** 이 쪽(0부터)부터 쪽 번호를 찍는다 (없으면 첫 쪽부터) */
+  from?: number;
 }
 
 export interface DocSettings {
@@ -49,6 +61,8 @@ export interface DocSettings {
   header: HeaderFooter;
   footer: HeaderFooter;
   pageNumber: PageNumbering;
+  /** 첫 쪽에서 감추는 것 (한글의 '감추기': 표지 쪽의 머리말·꼬리말·쪽 번호) */
+  hideFirst?: { header?: boolean; footer?: boolean; pageNum?: boolean };
   /**
    * 줄 높이를 문단 줄 간격으로만 정한다 (PDF 처럼). 글꼴이 섞인 줄이 글꼴마다 다른 위아래 높이 때문에
    * 줄 간격보다 높아지지 않게 한다. PDF 에서 불러온 문서에 켠다.

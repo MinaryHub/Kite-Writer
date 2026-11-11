@@ -141,6 +141,18 @@ export const ParagraphFormat = Extension.create({
            */
           hwpLines: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
           hwpLen: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 한글이 놓은 줄마다의 세로 자리(px): [줄 위쪽, 줄 높이, 줄 아래 간격, 기준선]. hwpMetrics 가 줄 상자를 그 높이로 만든다 */
+          hwpVs: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 한글이 놓은 쪽 안 세로 위치(px, 본문 맨 위 기준). 쪽 나누기가 그 자리에 맞춘다 (본문 최상위 블록만) */
+          hwpTop: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 한글 문서에서의 블록 차례 (사이에 지우거나 끼운 블록이 있으면 그 쪽은 한글 위치를 따르지 않는다) */
+          hwpSeq: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 칸의 마지막 문단: 마지막 줄 간격·문단 아래 간격을 칸 높이에 넣는다 (한글이 칸 높이를 내용으로 새로 셈한 칸) */
+          hwpTrail: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 한글 줄 정보가 없는 문단의 줄 높이 어림: [줄 높이(다음 줄까지), 기준선] px (같은 모양의 다른 문단에서 빌린 값) */
+          hwpPitch: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 칸·글상자 안에서 앞 문단과 더 벌어진 간격(px) */
+          hwpGap: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
           /** 한글(HWP)에서 이 문단이 새 쪽의 맨 위에서 시작했다 (쪽 나누기가 그 자리에서 쪽을 넘긴다) */
           hwpPage: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
           paraBg: {

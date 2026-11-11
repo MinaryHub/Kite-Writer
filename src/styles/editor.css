@@ -469,7 +469,9 @@
 }
 .print-page .print-body {
   position: absolute;
-  overflow: hidden;
+  /* 위아래만 자른다 (쪽에 걸친 블록). 가로는 열어 두어 본문 폭에 꼭 맞는 표의 오른쪽 테두리가 잘리지 않게 */
+  overflow: visible;
+  clip-path: inset(0 -100vw);
 }
 .print-page .print-body > .kdoc-content > * {
   position: absolute;
@@ -477,7 +479,7 @@
   right: 0;
 }
 .print-page .page-break::after,
-.print-page .pg-spacer {
+.print-page .print-body > .kdoc-content > .pg-spacer {
   display: none;
 }
 .print-page .selectedCell::after,
@@ -590,6 +592,11 @@
   padding-left: max(0px, calc(var(--cm-l, var(--cell-px, 1.8mm)) - 0.75px));
   padding-right: max(0px, calc(var(--cm-r, var(--cell-px, 1.8mm)) - 0.75px));
 }
+/* 세로도 같다: 한글의 줄 높이(칸 높이)에는 테두리 두께가 들지 않는다. 위아래 테두리의 절반씩만큼 안 여백을 줄인다 */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th):not(tr.pg-push-row > *) {
+  padding-top: max(0px, calc(var(--cm-t, 0.5mm) - 0.5px));
+  padding-bottom: max(0px, calc(var(--cm-b, 0.5mm) - 0.5px));
+}
 /* 줄 높이 고정 문서(PDF)의 그림은 PDF 크기 그대로: 내어쓰기(음수 text-indent)가 있는 줄에서
    max-width: 100% 가 그림을 아주 좁게 줄이는 일이 있다 */
 :is(.workspace.fixed-lines, .kdoc-content.fixed-lines) .k-image,
@@ -673,4 +680,68 @@
 /* 한글 문서의 수식은 글자 크기와 같은 크기로 (한글의 수식 글꼴 크기 = 글자 크기) */
 :is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) .k-math .katex {
   font-size: 1em;
+}
+
+/* ----- 한글 문서: 떠 있는 개체 (글자처럼 취급하지 않는 그림·글상자·도형) ----- */
+/* 글 뒤로 보낸 개체가 용지 뒤로 숨지 않게 본문이 쌓임 맥락을 만든다 */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) {
+  isolation: isolate;
+}
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) p {
+  position: relative;
+}
+/* 떠 있는 글상자: 높이 없는 자리 표시 안에서 제 위치에 뜬다 (뒤따르는 문단 상자의 위쪽이 기준) */
+.kdoc-content .k-float-anchor {
+  position: relative;
+  height: 0;
+}
+.kdoc-content .k-float-anchor > .k-textbox {
+  position: absolute;
+  max-width: none;
+  z-index: 1;
+}
+.kdoc-content .k-image.k-float {
+  position: absolute;
+  max-width: none;
+  z-index: 1;
+}
+.kdoc-content .k-image.k-float img {
+  max-width: none;
+}
+.kdoc-content .k-float.behind,
+.kdoc-content .k-float-anchor > .k-float.behind {
+  z-index: -1;
+}
+/* 한글이 놓은 줄: 줄 상자의 높이와 기준선을 줄 첫머리의 버팀대가 정한다 (문단 자체의 줄 높이는 0) */
+.kdoc-content .hwp-strut {
+  display: inline-block;
+  width: 0;
+  pointer-events: none;
+  user-select: none;
+}
+/* 인쇄: 화면에서는 표의 위 바깥 여백이 감싼 상자 밖으로 나가(여백 겹침) 감싼 상자의 위쪽이 곧 표의 위쪽이다.
+   인쇄용 사본은 그 자리에 절대 배치하므로 여백이 상자 안에 다시 생기지 않게 한다 (표가 여백만큼 내려가 찍히던 것) */
+.print-page .print-body > .kdoc-content > .tableWrapper > table {
+  margin-top: 0 !important;
+}
+
+/* 칸 대각선 (한글): 칸 위에 얹는 선. 여러 칸에 걸친 대각선은 영역 크기의 그림에서 이 칸 몫만 보인다 */
+.kdoc-content :is(td, th)[data-diag]::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: var(--dg);
+  background-size: var(--dg-size, 100% 100%);
+  background-position: var(--dg-pos, 0 0);
+  background-repeat: no-repeat;
+}
+
+/* 칸 안에서 나뉜 표 줄: 자연 높이에 끼운 공간만큼 더한 높이 (칸 아래 남는 자리를 지킨다). 재는 동안은 자연 높이 */
+.kdoc-content tr.pg-grow-row {
+  height: var(--pg-grow) !important;
+}
+.kdoc-content.pg-measuring tr.pg-grow-row,
+.kdoc-content .pg-measuring tr.pg-grow-row {
+  height: var(--row-h, auto) !important;
 }

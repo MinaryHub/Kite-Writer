@@ -5,6 +5,7 @@ import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { viewState } from '../viewState';
 import type { PageSetup } from '../../types';
+import { hwpLineBoxes } from './hwpMetrics';
 
 /**
  * 쪽 나누기(페이지네이션) 엔진.
@@ -38,9 +39,19 @@ function sameGeometry(a: PageGeometry | null, b: PageGeometry | null): boolean {
 export interface PageBreakInfo {
   pos: number;
   height: number;
-  kind: 'block' | 'row' | 'line';
+  /** grow: 칸 안에서 나뉜 표 줄의 높이를 그 값으로 (자연 높이 + 끼운 공간: 칸 아래 남는 자리를 지킨다) */
+  kind: 'block' | 'row' | 'line' | 'grow';
   /** 표가 이어지는 쪽의 맨 위에 되풀이할 제목 줄: 표 위치, 그 쪽 번호(0부터), 제목 줄 높이(px). 높이만큼 공간에 더해 둔다 */
   head?: RepeatHead;
+  /** 표의 줄이 칸 안에서 나뉜 자리: 그 쪽에서 표가 끝나는 곳에 닫는 선을 긋는다 (한글처럼) */
+  cut?: TableCut;
+}
+
+/** 쪽 경계에서 나뉜 표: 표 위치, 표가 끊긴 쪽(0부터), 그 쪽 본문 맨 위에서 끊긴 자리까지(px) */
+export interface TableCut {
+  table: number;
+  page: number;
+  y: number;
 }
 
 export interface RepeatHead {
@@ -63,6 +74,8 @@ export interface LayoutResult {
   pageStarts: number[];
   /** 쪽 맨 위에 되풀이해 그릴 표 제목 줄 */
   repeats?: RepeatHead[];
+  /** 쪽 경계에서 칸이 나뉜 표의 닫는 선 */
+  cuts?: TableCut[];
   /** 쪽마다의 편집 용지 (구역마다 용지가 다른 문서만. null 은 문서 용지) */
   pageSetups?: (PageSetup | null)[];
 }
@@ -108,6 +121,12 @@ function buildDecos(doc: PMNode, breaks: PageBreakInfo[]): DecorationSet {
   // 몇 번째 나누기인지와 높이만 넣어, 같은 자리의 같은 높이면 ProseMirror 가 기존 DOM 을 그대로 쓰게 한다.
   let i = 0;
   for (const b of breaks) {
+    if (b.kind === 'grow') {
+      const node = doc.nodeAt(b.pos);
+      if (!node || node.type.name !== 'tableRow') continue;
+      decos.push(Decoration.node(b.pos, b.pos + node.nodeSize, { class: 'pg-grow-row', style: `--pg-grow: ${b.height}px` }));
+      continue;
+    }
     if (b.kind === 'row') {
       const node = doc.nodeAt(b.pos);
       if (!node || node.type.name !== 'tableRow') continue;
@@ -121,11 +140,17 @@ function buildDecos(doc: PMNode, breaks: PageBreakInfo[]): DecorationSet {
         () => {
           const el = document.createElement(block ? 'div' : 'span');
           el.className = block ? 'pg-spacer' : 'pg-spacer pg-line-spacer';
-          el.style.height = b.height + 'px';
+          if (b.height >= 0) el.style.height = b.height + 'px';
+          else {
+            // 음수: 뒤 블록을 그만큼 끌어올린다 (한글이 놓은 자리가 자연 배치보다 위)
+            el.style.height = '0';
+            el.style.marginBottom = b.height + 'px';
+          }
           el.contentEditable = 'false';
           return el;
         },
-        { side: -1, key: `pg-${b.kind}-${i++}-${b.height}`, ignoreSelection: true, marks: [] },
+        // 줄 사이 공간은 한글 줄 바꿈(-3) 뒤, 줄 버팀대(-1) 앞에 온다 (hwpMetrics)
+        { side: block ? -1 : -2, key: `pg-${b.kind}-${i++}-${b.height}`, ignoreSelection: true, marks: [] },
       ),
     );
   }
@@ -169,6 +194,17 @@ interface Snap {
   nBreaks: number;
   nFn: number;
   nStarts: number;
+  /** 한글 배치를 따르는 중인가, 앞 블록의 차례, 앞 블록이 시작한 쪽 */
+  chain: boolean;
+  lastSeq: number;
+  prevStartPage: number;
+}
+
+/** 한글 자리에 맞춘 블록: 문서 위치, 차례, 놓여야 할 자리(편집기 좌표 px) */
+export interface FixedBlock {
+  pos: number;
+  seq: number;
+  y: number;
 }
 
 export interface LayoutCache {
@@ -199,7 +235,9 @@ function computeLayout(
   cache: LayoutCache | null = null,
   dirty: DirtyRange | null = null,
   curBreaks: PageBreakInfo[] = [],
-): { breaks: PageBreakInfo[]; result: LayoutResult; cache: LayoutCache; incremental: boolean } | null {
+  /** 한글 자리에 맞춘 블록의 보정값 (블록 차례 → px): 셈한 배치와 실제 화면의 차이 (run 이 잰다) */
+  corr: Map<number, number> | null = null,
+): { breaks: PageBreakInfo[]; result: LayoutResult; cache: LayoutCache; incremental: boolean; fixed: FixedBlock[] } | null {
   const root = view.dom as HTMLElement;
   const s = viewState.zoom || 1;
   // 공간을 숨기면 스크롤이 조정되어 편집기 자체가 움직일 수 있으므로, 전환할 때마다 기준점을 다시 읽는다
@@ -267,9 +305,20 @@ function computeLayout(
   let forceNext = false;
   /** 한글이 새 쪽에서 시작한 블록(hwpPage): 쪽 맨 위가 아니면 넘긴다 */
   let softNext = false;
+  /**
+   * 한글이 놓은 자리(hwpTop)를 따르는 중인가: 이 쪽에서 지금까지의 최상위 블록이 모두 한글 문서 그대로일 때
+   * (차례가 이어지고 내용 크기가 그대로). 고치거나 끼우거나 지운 블록을 만나면 그 쪽 끝까지는 자연 배치로 흐른다
+   */
+  let chain = false;
+  let lastSeq = 0;
+  /** 한글 줄 정보를 가진 앞 블록이 끝난 쪽, 지금 블록이 시작한 쪽 */
+  let prevStartPage = -1;
+  let blockStart = -1;
   let lastBottom = 0;
   /** 지금 배치하는 표의 되풀이할 제목 줄 (제목 줄 다음 줄들을 배치하는 동안만) */
   let tableHead: { table: number; h: number } | null = null;
+  /** 지금 배치하는 표의 위치 */
+  let curTable = -1;
   let breaks: PageBreakInfo[] = [];
   let footnotes: FootnoteInfo[] = [];
   let pageStarts: number[] = [0];
@@ -304,6 +353,9 @@ function computeLayout(
         shift = snap.shift;
         fnUsed = snap.fnUsed;
         forceNext = snap.forceNext;
+        chain = snap.chain;
+        lastSeq = snap.lastSeq;
+        prevStartPage = snap.prevStartPage;
         lastBottom = snap.lastBottom;
         breaks = curBreaks.slice(0, snap.nBreaks);
         footnotes = cache.footnotes.slice(0, snap.nFn).map((f) => ({ ...f, pos: dirty.mapping.map(f.pos) }));
@@ -372,6 +424,7 @@ function computeLayout(
     forceNext = false;
     softNext = false;
     markPageStart(docPos);
+    if (blockStart < 0) blockStart = page;
     if (fnH > 0) fnUsed += fnH + (fnUsed === 0 ? FN_SEP : 0);
     if (bottom > T(page) + CHof(page) + 0.5) {
       const endPage = Math.min(MAX_PAGES, pageAtY(bottom - 0.5, page));
@@ -383,6 +436,54 @@ function computeLayout(
       }
     }
     lastBottom = Math.max(lastBottom, bottom);
+  };
+
+  const pxOf = (v: string) => parseFloat(v) || 0;
+  /**
+   * 한글이 놓은 자리에 블록을 맞춘다: want = 쪽 본문 맨 위에서 블록 위쪽까지(px). 자연 배치와의 차이만큼 블록 앞에
+   * 공간을 끼운다 (위로 올려야 하면 음수). 쪽 나누기·한글의 새 쪽 표시가 있으면 다음 쪽의 그 자리로
+   */
+  const fixed: FixedBlock[] = [];
+  const snapTo = (el: HTMLElement, pos: number, want: number, seq = 0) => {
+    // 표는 감싼 상자가 아니라 표 자체(테두리 상자)의 위쪽을 맞춘다: 표의 위 바깥 여백은 감싼 상자 안에 있다
+    const box = (el.matches('table') ? el : el.querySelector(':scope > table')) || el;
+    const top = rel(box.getBoundingClientRect().top) + shift;
+    if (forceNext || (softNext && top > T(page) + 0.5)) {
+      page = Math.min(page + 1, MAX_PAGES);
+      fnUsed = 0;
+      commit();
+    }
+    // 셈한 밀림(shift)은 칸 안에서 나뉜 표 줄 뒤에서 실제 화면과 1px 남짓 어긋날 수 있다. 지난번에 잰 차이만큼 보정한다
+    const d = Math.round((T(page) + want - top) * 100) / 100;
+    // 보정값은 끼우는 공간에만 더한다: 셈한 밀림은 그대로 두어야 이 블록부터 셈과 화면이 다시 맞는다
+    const dc = Math.round((d + (corr?.get(seq) || 0)) * 100) / 100;
+    fixed.push({ pos, seq, y: T(page) + want });
+    if (Math.abs(dc) >= 0.25 || Math.abs(d) >= 0.25) {
+      let h = dc;
+      if (dc > 0) {
+        // 바깥 여백끼리 맞닿아 겹치던 자리(표와 표 사이)에 공간을 끼우면 두 여백이 따로 서므로 그만큼 뺀다
+        const mt = pxOf(getComputedStyle(el).marginTop);
+        let prev = el.previousElementSibling;
+        while (prev && prev.classList.contains('pg-spacer')) prev = prev.previousElementSibling;
+        const mb = prev && mt > 0 ? pxOf(getComputedStyle(prev).marginBottom) : 0;
+        if (mt > 0 && mb > 0) h = Math.max(0.01, dc - Math.min(mt, mb));
+      }
+      breaks.push({ pos, height: Math.round(h * 100) / 100, kind: 'block' });
+      shift += d;
+    }
+    forceNext = false;
+    softNext = false;
+    markPageStart(pos);
+    if (blockStart < 0) blockStart = page;
+  };
+
+  /** 한글 자리를 따르는 단위: 넘치는지 보지 않고 그대로 둔다 (쪽은 한글이 정했다) */
+  const placeFixed = (top: number, bottom: number, fnH: number, docPos: number) => {
+    if (!isFinite(top) || !isFinite(bottom)) return;
+    markPageStart(docPos);
+    if (blockStart < 0) blockStart = page;
+    if (fnH > 0) fnUsed += fnH + (fnUsed === 0 ? FN_SEP : 0);
+    lastBottom = Math.max(lastBottom, bottom + shift);
   };
 
   const collectFootnotes = (el: HTMLElement, pos: number) => {
@@ -521,6 +622,51 @@ function computeLayout(
     }
   };
 
+  /**
+   * 한글 자리를 따르는 문단: 줄마다의 세로 자리(hwpVs)가 되돌아가는 줄에서만 다음 쪽으로 넘긴다
+   * (한글이 그 줄부터 새 쪽에 놓았다). 그 밖에는 넘치는지 따지지 않는다
+   */
+  const handleFixedTextblock = (node: PMNode, pos: number, el: HTMLElement) => {
+    const r = el.getBoundingClientRect();
+    const top = rel(r.top);
+    const bottom = rel(r.bottom);
+    const fns = collectFootnotes(el, pos);
+    const fnTotal = fns.reduce((a, f) => a + f.h, 0);
+    const vs = node.attrs.hwpVs as number[][] | null;
+    const lines = node.attrs.hwpLines as [number, number][] | null;
+    const boxes = hwpLineBoxes(node, false);
+    let jump = false;
+    if (boxes && vs && lines && lines.length === vs.length) for (let i = 1; i < vs.length; i++) if (vs[i][0] < vs[i - 1][0] - 0.5) jump = true;
+    if (!jump || !boxes || !vs || !lines) {
+      placeFixed(top, bottom, fnTotal, pos);
+      pushFootnotes(fns);
+      return;
+    }
+    let y = top + pxOf(getComputedStyle(el).paddingTop);
+    let segTop = top;
+    for (let i = 0; i < vs.length; i++) {
+      if (i > 0 && vs[i][0] < vs[i - 1][0] - 0.5) {
+        const segFns = fns.filter((f) => f.top >= segTop - 1 && f.top < y);
+        placeFixed(segTop, y, segFns.reduce((a, f) => a + f.h, 0), pos);
+        pushFootnotes(segFns);
+        page = Math.min(page + 1, MAX_PAGES);
+        fnUsed = 0;
+        commit();
+        const h = Math.round((T(page) + vs[i][0] - (y + shift)) * 100) / 100;
+        if (h > 0) {
+          breaks.push({ pos: pos + 1 + lines[i][0], height: h, kind: 'line' });
+          shift += h;
+        }
+        markPageStart(pos);
+        segTop = y;
+      }
+      y += boxes[i].pitch;
+    }
+    const restFns = fns.filter((f) => f.top >= segTop - 1);
+    placeFixed(segTop, bottom, restFns.reduce((a, f) => a + f.h, 0), pos);
+    pushFootnotes(restFns);
+  };
+
   /** 셀 안의 말단 블록(문단·중첩 표 등)을 문서 순서로 */
   const collectLeaves = (parent: PMNode, base: number, out: { node: PMNode; pos: number }[] = []) => {
     parent.forEach((child, offset) => {
@@ -546,11 +692,25 @@ function computeLayout(
       headPages.add(pg);
       return { head: { table: tableHead.table, page: pg, h: tableHead.h } };
     };
+    // 칸마다 끊긴 자리 가운데 가장 아래: 그 쪽에서 표가 끝나는 곳 (닫는 선을 긋는다)
+    const cutRef = new Map<number, PageBreakInfo>();
+    const noteCut = (pg: number, y: number) => {
+      const b = breaks[breaks.length - 1];
+      const ref = cutRef.get(pg);
+      if (ref && ref.cut) ref.cut.y = Math.max(ref.cut.y, y);
+      else if (b && curTable >= 0) {
+        b.cut = { table: curTable, page: pg, y };
+        cutRef.set(pg, b);
+      }
+    };
     // 나뉜 줄의 높이 = max(줄 최소 높이, 칸마다 '내용 높이 + 끼운 공간'). 자연 배치의 아래 끝(uBottom)을 기준으로 하면
     // 최소 높이 안에서 가운데 정렬된 칸의 남는 공간까지 늘어난다고 보게 되어 뒤 내용의 자리가 어긋난다
     const rowEl = view.nodeDOM(rowPos) as HTMLElement | null;
     const minH = rowEl ? parseFloat(getComputedStyle(rowEl).getPropertyValue('--row-h')) || 0 : 0;
     let rowBottom = uTop + minH; // 자연 배치 기준 (shift 미포함)
+    /** 내용이 가장 꽉 찬 칸에서 내용 아래로 남는 자리 (자연 배치의 줄 높이 - 칸 내용 높이의 최솟값): 나뉜 뒤에도 지킨다 */
+    let minSlack = Infinity;
+    let grew = false;
     rowNode.forEach((cell, off) => {
       const cellPos = rowPos + 1 + off;
       let cs = 0;
@@ -576,6 +736,7 @@ function computeLayout(
                 if (p != null) {
                   const h = Math.round((T(pc + 1) - lt + (tableHead?.h || 0)) * 100) / 100;
                   breaks.push({ pos: p, height: h, kind: li === 0 ? 'block' : 'line', ...headFor(pc + 1) });
+                  noteCut(pc, lt - T(pc));
                   cs += h;
                   pc++;
                 }
@@ -584,6 +745,7 @@ function computeLayout(
           } else if (sT > T(pc) + 0.5) {
             const h = Math.round((T(pc + 1) - sT + (tableHead?.h || 0)) * 100) / 100;
             breaks.push({ pos: lf.pos, height: h, kind: 'block', ...headFor(pc + 1) });
+            noteCut(pc, sT - T(pc));
             cs += h;
             pc++;
           }
@@ -593,9 +755,28 @@ function computeLayout(
       // 여러 줄을 합친 칸은 끼운 공간이 합친 줄들에 나뉘어 들어가므로 이 줄의 높이로 치지 않는다
       if ((cell.attrs.rowspan || 1) > 1) return;
       const h = cellContentHeight(view.nodeDOM(cellPos) as HTMLElement | null);
-      if (h != null) rowBottom = Math.max(rowBottom, uTop + h + cs);
-      else if (last > -Infinity) rowBottom = Math.max(rowBottom, last + PAD);
+      if (h != null) {
+        rowBottom = Math.max(rowBottom, uTop + h + cs);
+        minSlack = Math.min(minSlack, Math.max(0, uBottom - uTop - h));
+        if (cs > 0) grew = true;
+      } else if (last > -Infinity) rowBottom = Math.max(rowBottom, last + PAD);
     });
+    // 한글은 나뉜 줄에서도 글 아래의 자리(마지막 줄 간격·문단 아래 간격)를 지킨다: 그만큼 줄을 늘리고, 닫는 선도 그만큼 아래에
+    if (grew && isFinite(minSlack) && minSlack > 0.5) {
+      // 한글이 이미 쪽에 걸쳐 나눠 둔 줄(칸 안 줄 자리가 되돌아간다)은 적힌 줄 높이에 조각마다의 아래 자리가 모두 들어 있다:
+      // 조각 수로 나눈 몫만 마지막 조각 아래에 둔다 (앞 조각들의 몫은 쪽 끝의 빈 자리에 들어간다)
+      let jumped = false;
+      rowNode.descendants((n) => {
+        const vs = n.attrs?.hwpVs as number[][] | null;
+        if (Array.isArray(vs)) for (let i = 1; i < vs.length; i++) if (vs[i][0] <= vs[i - 1][0]) jumped = true;
+        return !jumped;
+      });
+      const slack = jumped ? minSlack / (cutRef.size + 1) : minSlack;
+      rowBottom += slack;
+      for (const ref of cutRef.values()) if (ref.cut) ref.cut.y += slack;
+    }
+    for (const ref of cutRef.values()) if (ref.cut) ref.cut.y += 1;
+    if (grew && rowBottom - uBottom > 0.5) breaks.push({ pos: rowPos, height: Math.round((rowBottom - uTop) * 100) / 100, kind: 'grow' });
     // 이 줄이 늘어난 만큼 뒤 내용도 밀린다
     const extra = rowBottom - uBottom;
     shift += extra;
@@ -618,6 +799,7 @@ function computeLayout(
     const bottom = rel(r.bottom);
     const fns = collectFootnotes(el, pos);
     const fnTotal = fns.reduce((a, f) => a + f.h, 0);
+    curTable = pos;
     const sBottom = bottom + shift;
     const p = pageAtY(top + shift + 0.5, page);
     const fnUsedHere = p === page ? fnUsed : 0;
@@ -692,7 +874,8 @@ function computeLayout(
       }
       return;
     }
-    softNext = !!child.attrs?.hwpPage;
+    // 한글이 새 쪽에서 시작한 블록. 앞 블록(여러 쪽에 걸친 표 등)이 이미 쪽을 넘겼으면 다시 넘기지 않는다
+    softNext = !!child.attrs?.hwpPage && page === prevStartPage;
     if (child.isTextblock) handleTextblock(child, pos);
     else if (name === 'table') handleTable(child, pos);
     else if (CONTAINERS.has(name)) walk(child, pos + 1);
@@ -746,14 +929,36 @@ function computeLayout(
         const delta = top - ps.top;
         const dp = page - ps.page;
         // 이 블록의 쪽 안 위치와 각주 상태가 지난번과 같으면(쪽 번호는 dp 만큼 밀려도) 뒤는 모두 같다
-        if (Math.abs(shift + delta - (ps.shift + dp * (g.pageHeight + g.gap))) < 0.5 && Math.abs(fnUsed - ps.fnUsed) < 0.5 && forceNext === ps.forceNext) {
+        if (Math.abs(shift + delta - (ps.shift + dp * (g.pageHeight + g.gap))) < 0.5 && Math.abs(fnUsed - ps.fnUsed) < 0.5 && forceNext === ps.forceNext && chain === ps.chain && lastSeq === ps.lastSeq && prevStartPage === ps.prevStartPage + dp) {
           early = { j, pj, delta, dp };
           break;
         }
       }
     }
-    snaps[j] = { top, page, shift, fnUsed, forceNext, lastBottom, nBreaks: breaks.length, nFn: footnotes.length, nStarts: pageStarts.length };
-    handleChild(child, pos);
+    snaps[j] = { top, page, shift, fnUsed, forceNext, lastBottom, nBreaks: breaks.length, nFn: footnotes.length, nStarts: pageStarts.length, chain, lastSeq, prevStartPage };
+    blockStart = -1;
+    // 한글 자리를 따를 수 있는가: 한글 문서 그대로인 블록(차례·내용 크기)이 쪽 시작부터 이어져 왔을 때
+    const a = child.attrs;
+    const intact = child.type.name !== 'pageBreak' && a?.hwpSeq != null && a.hwpLen === child.content.size;
+    const restart = forceNext || !!a?.hwpPage || a?.hwpSeq === 1;
+    chain = intact && ((chain && a!.hwpSeq === lastSeq + 1) || restart);
+    lastSeq = intact ? a!.hwpSeq : 0;
+    if (chain && typeof a!.hwpTop === 'number' && el instanceof HTMLElement) {
+      softNext = !!a!.hwpPage && page === prevStartPage;
+      snapTo(el, pos, a!.hwpTop, a!.hwpSeq);
+      if (child.isTextblock) handleFixedTextblock(child, pos, el);
+      else if (child.type.name === 'table') handleTable(child, pos);
+      else handleOther(pos);
+    } else handleChild(child, pos);
+    // 한글의 새 쪽 표시는 '줄 정보를 가진 앞 문단의 마지막 줄보다 뒤 쪽'이라는 뜻이다. 그 사이에 낀 표(글을 밀어낸 표: 자리 정보 없음)가
+    // 쪽을 넘겼거나 통째로 다음 쪽으로 갔으면 이미 넘어온 것이므로, 기준 쪽은 줄 정보를 가진 블록이 끝난 쪽으로 둔다
+    // (한글 문서의 표: 글자처럼 취급하는 표는 표가 곧 그 줄이므로 표가 시작한 쪽, 떠 있는 표는 줄이 아니므로 기준을 바꾸지 않는다)
+    // 줄 정보가 없는 블록(한글이 줄 정보를 적지 않은 문단)도 기준을 바꾸지 않는다
+    if (a?.hwpSeq != null) {
+      if (child.type.name === 'table') {
+        if (a.inline && blockStart >= 0) prevStartPage = blockStart;
+      } else if (typeof a.hwpTop === 'number') prevStartPage = page;
+    } else prevStartPage = page;
     pos += child.nodeSize;
   }
   } finally {
@@ -779,7 +984,7 @@ function computeLayout(
     // 지난 스냅샷을 새 문서에 맞춰 옮긴다 (자연 위치는 delta 만큼, 쪽은 dp 만큼, 밀림은 그에 맞게)
     for (let i = pj; i < cache!.snaps.length; i++) {
       const o = cache!.snaps[i];
-      snaps[j + (i - pj)] = { ...o, top: o.top + delta, page: o.page + dp, shift: o.shift + dp * (g.pageHeight + g.gap) - delta, lastBottom: o.lastBottom + dp * (g.pageHeight + g.gap), nBreaks: o.nBreaks + dB, nFn: o.nFn + dF, nStarts: o.nStarts + dS };
+      snaps[j + (i - pj)] = { ...o, prevStartPage: o.prevStartPage + dp, top: o.top + delta, page: o.page + dp, shift: o.shift + dp * (g.pageHeight + g.gap) - delta, lastBottom: o.lastBottom + dp * (g.pageHeight + g.gap), nBreaks: o.nBreaks + dB, nFn: o.nFn + dF, nStarts: o.nStarts + dS };
     }
   } else {
     pageCount = Math.max(page + 1, pageAtY(Math.max(0, lastBottom - 0.5), page) + 1);
@@ -789,14 +994,15 @@ function computeLayout(
   while (pageStarts.length < pageCount) pageStarts.push(doc.content.size);
   if (pageStarts.length > pageCount) pageStarts = pageStarts.slice(0, pageCount);
   const repeats = breaks.filter((b) => b.head).map((b) => b.head!);
-  const result: LayoutResult = { pageCount, footnotes, pageStarts, ...(repeats.length ? { repeats } : {}) };
+  const cuts = breaks.filter((b) => b.cut).map((b) => b.cut!);
+  const result: LayoutResult = { pageCount, footnotes, pageStarts, ...(repeats.length ? { repeats } : {}), ...(cuts.length ? { cuts } : {}) };
   // 구역마다 용지가 다른 문서: 쪽마다의 용지 (끝 쪽까지 채운다)
   if (multi) {
     page = pageCount - 1;
     commit();
     result.pageSetups = pgs.slice(0, pageCount).map((x) => x.setup);
   }
-  return { breaks, result, cache: { doc, snaps, breaksLen: breaks.length, footnotes, pageStarts, pageCount, lastBottom }, incremental: useCache };
+  return { breaks, result, cache: { doc, snaps, breaksLen: breaks.length, footnotes, pageStarts, pageCount, lastBottom }, incremental: useCache, fixed };
 }
 
 export interface PaginationStorage {
@@ -858,7 +1064,7 @@ export const Pagination = Extension.create<{}, PaginationStorage>({
             if (tr.docChanged) {
               noteDirty(tr);
               return {
-                breaks: value.breaks.map((b) => ({ ...b, pos: tr.mapping.map(b.pos, b.kind === 'line' ? 1 : -1), ...(b.head ? { head: { ...b.head, table: tr.mapping.map(b.head.table, -1) } } : {}) })),
+                breaks: value.breaks.map((b) => ({ ...b, pos: tr.mapping.map(b.pos, b.kind === 'line' ? 1 : -1), ...(b.head ? { head: { ...b.head, table: tr.mapping.map(b.head.table, -1) } } : {}), ...(b.cut ? { cut: { ...b.cut, table: tr.mapping.map(b.cut.table, -1) } } : {}) })),
                 decos: value.decos.map(tr.mapping, tr.doc),
               };
             }
@@ -880,12 +1086,16 @@ export const Pagination = Extension.create<{}, PaginationStorage>({
           let needFull = true;
           let lastGeometry: PageGeometry | null = null;
           let lastWidth = 0;
+          /** 한글 자리에 맞춘 블록의 보정값과, 같은 문서에서 보정을 되풀이한 횟수 */
+          const corr = new Map<number, number>();
+          let corrRuns = 0;
 
           const run = () => {
             raf = 0;
             if (view.state.doc !== lastDoc) {
               lastDoc = view.state.doc;
               runsSinceDocChange = 0;
+              corrRuns = 0;
             }
             // 같은 문서에서 결과가 계속 달라지면(이론상 없어야 함) 경고만 남긴다.
             // (전에는 중단했는데, 그림이 수십 장 로드되며 배치가 정당하게 여러 번 바뀌는 경우까지 막아 버렸다)
@@ -910,8 +1120,8 @@ export const Pagination = Extension.create<{}, PaginationStorage>({
             let out: ReturnType<typeof computeLayout> = null;
             const t0 = performance.now();
             try {
-              if (canIncremental) out = computeLayout(view, storage.geometry, cache, dirty ?? { from: 0, to: 0, mapping: new Mapping() }, cur.breaks);
-              if (!out) out = computeLayout(view, storage.geometry);
+              if (canIncremental) out = computeLayout(view, storage.geometry, cache, dirty ?? { from: 0, to: 0, mapping: new Mapping() }, cur.breaks, corr);
+              if (!out) out = computeLayout(view, storage.geometry, null, null, [], corr);
             } catch (e) {
               console.error('pagination error', e);
             }
@@ -932,6 +1142,29 @@ export const Pagination = Extension.create<{}, PaginationStorage>({
               runsSinceDocChange++;
               const tr = view.state.tr.setMeta(paginationKey, out.breaks).setMeta('addToHistory', false);
               view.dispatch(tr);
+            }
+            // 한글 자리에 맞춘 블록이 실제로 그 자리에 왔는지 잰다. 어긋났으면 보정값을 고쳐 한 번 더 배치한다
+            if (out.fixed.length && !out.incremental && corrRuns < 6) {
+              const z = viewState.zoom || 1;
+              const rootTop = root.getBoundingClientRect().top;
+              let off = false;
+              // 앞 블록을 바로잡으면 뒤 블록도 그만큼 따라 움직인다: 앞에서 바로잡은 몫(carry)을 빼고 남은 차이만 보정한다
+              let carry = 0;
+              for (const fb of out.fixed) {
+                const el = view.nodeDOM(fb.pos) as HTMLElement | null;
+                if (!(el instanceof HTMLElement)) continue;
+                const box = (el.matches('table') ? el : el.querySelector(':scope > table')) || el;
+                const err = (box.getBoundingClientRect().top - rootTop) / z - fb.y - carry;
+                if (Math.abs(err) > 0.3 && Math.abs(err) < 40) {
+                  corr.set(fb.seq, (corr.get(fb.seq) || 0) - err);
+                  carry += err;
+                  off = true;
+                }
+              }
+              if (off) {
+                corrRuns++;
+                scheduleFull('snap');
+              }
             }
             const key = JSON.stringify(out.result);
             storage.result = out.result;
