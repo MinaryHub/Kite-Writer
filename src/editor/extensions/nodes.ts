@@ -133,6 +133,12 @@ export const TabStop = Mark.create({
         parseHTML: (el: HTMLElement) => +(el.getAttribute('data-tab-type') || 0),
         renderHTML: (a: Record<string, any>) => (+a.type ? { 'data-tab-type': String(+a.type) } : {}),
       },
+      /** 오른쪽 맞춤 채움 탭 (차례): 뒤 글이 문단 오른쪽 끝에 닿도록 폭을 저절로 맞춘다 (tabFill) */
+      right: {
+        default: false,
+        parseHTML: (el: HTMLElement) => el.getAttribute('data-tab-right') === '1',
+        renderHTML: (a: Record<string, any>) => (a.right ? { 'data-tab-right': '1' } : {}),
+      },
     };
   },
   parseHTML() {

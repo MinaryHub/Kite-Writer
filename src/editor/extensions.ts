@@ -38,6 +38,7 @@ import { CheckMarks } from './extensions/checkMarks';
 import { Insertion, Deletion, TrackChanges } from './extensions/trackChanges';
 import { CommentMark } from './extensions/comments';
 import { HwpMetrics } from './extensions/hwpMetrics';
+import { TabFill } from './extensions/tabFill';
 import { Sections } from './extensions/sections';
 
 /** 문서 스키마를 구성하는 확장 (편집기 없이 변환에도 사용) */
@@ -126,7 +127,7 @@ export function getExtensions(): AnyExtension[] {
 
 /** 편집 화면용 확장 (스키마 + 편집 기능) */
 export function getEditorExtensions(): AnyExtension[] {
-  return [...getExtensions(), KeyboardExtras, CellNoWrap, Search, CharacterCount, Pagination, TableResize, CheckMarks, TrackChanges, HwpMetrics, Sections];
+  return [...getExtensions(), KeyboardExtras, CellNoWrap, Search, CharacterCount, Pagination, TableResize, CheckMarks, TrackChanges, HwpMetrics, Sections, TabFill];
 }
 
 let cachedSchema: Schema | null = null;

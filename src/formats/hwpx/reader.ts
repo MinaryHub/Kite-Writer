@@ -618,6 +618,8 @@ export class HwpxConverter {
   convertP(p: Element, ctx: Ctx): JNode[] {
     const pp = this.h.paraPrs.get(attr(p, 'paraPrIDRef') || '0') || DEFAULT_PARA;
     const pAttrs = paraAttrs(pp);
+    // 개요 문단: 차례 만들기가 제목으로 쓴다
+    if (pp.headingType === 'OUTLINE') pAttrs.outlineLevel = Math.max(0, Math.min(9, pp.headingLevel)) + 1;
     if (ctx.bg && !pAttrs.paraBg) pAttrs.paraBg = ctx.bg;
     const blocks: JNode[] = [];
     const pageBreak = attr(p, 'pageBreak') === '1' || pp.pageBreakBefore;

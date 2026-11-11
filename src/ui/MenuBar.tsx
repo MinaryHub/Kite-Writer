@@ -82,6 +82,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
       'insert.math',
       'insert.symbol',
       { label: '날짜/시간', items: ['insert.date', 'insert.dateKo', 'insert.time'] },
+      { label: '차례', items: ['insert.toc', 'insert.tocUpdate', '-', 'format.leaderTab'] },
       '-',
       'insert.pageBreak',
       'insert.hr',

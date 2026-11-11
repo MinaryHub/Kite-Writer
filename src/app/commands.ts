@@ -10,6 +10,27 @@ import { computeGeom } from '../print';
 import * as review from './review';
 import * as collab from '../collab/session';
 import { openSponsor, openContact, contactAvailable } from '../support';
+import { applyLeaderTab, insertToc, updateToc } from './toc';
+
+/** 차례 만들기 (제목 1~3 · 한글의 개요 1~3 문단) */
+async function runInsertToc() {
+  const tab = app.active;
+  if (!tab) return;
+  if (!(await insertToc(tab))) app.toast('차례에 넣을 제목이 없습니다. 제목 1~3 스타일(또는 개요 문단)을 쓴 문단으로 차례를 만듭니다.', 'error', 6000);
+}
+
+async function runUpdateToc() {
+  const tab = app.active;
+  if (!tab) return;
+  if (!(await updateToc(tab))) app.toast('이 문서에 차례가 없습니다. 입력 → 차례 만들기로 넣으세요.', 'error', 5000);
+  else app.toast('차례를 새로 고쳤습니다.');
+}
+
+function runLeaderTab() {
+  const tab = app.active;
+  if (!tab) return;
+  if (!applyLeaderTab(tab)) app.toast('점선으로 채울 곳을 찾지 못했습니다. "제목 3"처럼 끝에 쪽 번호가 있거나 탭이 든 문단을 고르세요.', 'error', 6000);
+}
 
 export interface Command {
   label: string;
@@ -286,6 +307,9 @@ export const commands: Record<string, Command> = {
   'insert.symbol': { label: '문자표...', icon: 'Omega', shortcut: 'Ctrl+F10', keys: ['Ctrl+F10'], run: () => app.openDialog('symbol'), enabled: hasDoc },
   'insert.footnote': { label: '각주', icon: 'Superscript', shortcut: 'Ctrl+N,N', run: () => app.openDialog('footnote', { pos: null, text: '' }), enabled: hasDoc },
   'insert.math': { label: '수식...', icon: 'Sigma', shortcut: 'Ctrl+N,M', run: () => app.openDialog('math', { pos: null, latex: '', hwp: '' }), enabled: hasDoc },
+  'insert.toc': { label: '차례 만들기', icon: 'TableOfContents', run: () => void runInsertToc(), enabled: hasDoc },
+  'insert.tocUpdate': { label: '차례 새로 고침', icon: 'RefreshCw', run: () => void runUpdateToc(), enabled: hasDoc },
+  'format.leaderTab': { label: '제목과 쪽 사이 점선 채우기', icon: 'MoreHorizontal', run: runLeaderTab, enabled: hasDoc },
   'insert.pageBreak': { label: '쪽 나누기', icon: 'SeparatorHorizontal', shortcut: 'Ctrl+Enter', run: () => chain().setPageBreak().run(), enabled: hasDoc },
   'insert.hr': { label: '가로줄', icon: 'Minus', run: () => chain().setHorizontalRule().run(), enabled: hasDoc },
   'insert.date': { label: '날짜 (yyyy-mm-dd)', icon: 'Calendar', run: () => insertDateTime('date'), enabled: hasDoc },

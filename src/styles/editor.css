@@ -745,3 +745,17 @@
 .kdoc-content .pg-measuring tr.pg-grow-row {
   height: var(--row-h, auto) !important;
 }
+
+/* 한글 문서·줄 높이 고정 문서: 글자 조각의 줄 높이가 0 이라 폭이 정해진 탭(인라인 블록)의 높이도 0 이 되어 채움(점선)이
+   보이지 않았다. 탭 상자에 글자 크기만큼의 높이를 주고 기준선 아래로 조금 내려 채움이 글자 아래쪽에 오게 한다 */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics, .workspace.fixed-lines .ProseMirror, .kdoc-content.fixed-lines) .k-tab[style*='width'] {
+  height: 1em;
+  vertical-align: -0.2em;
+}
+/* 채움은 한글처럼 앞 글과 뒤 글(쪽 번호)에서 조금 떨어져 그린다 (탭 폭은 그대로: 안 여백 안쪽에만 채움) */
+.k-tab[data-leader]:not([data-leader='0'])[style*='width'] {
+  box-sizing: border-box;
+  padding: 0 0.3em;
+  background-clip: content-box;
+  background-origin: content-box;
+}
