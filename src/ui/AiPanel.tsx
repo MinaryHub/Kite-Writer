@@ -3,20 +3,26 @@ import { ensureAiConsent } from '../ai/consent';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { renderMarkdown } from './aiMarkdown';
 import { AiDesktopPanel } from './AiDesktopPanel';
+import { AiWebPanel } from './AiWebPanel';
+import { getAiContext, insertAiHtml } from '../ai/insert';
 import { useApp } from '../app/hooks';
 import { app } from '../app/controller';
 import { Icon } from './Icon';
 import { Modal } from './widgets';
-import { htmlToJson } from '../formats/html';
-import { writeMarkdown } from '../formats/markdown';
 import { platform } from '../platform';
 
-/** AI 도우미: Claude / GPT / Gemini / Ollama(로컬 모델) 채팅 패널 */
+/**
+ * AI 도우미. Kite 창 안에서 세 가지 방식으로 쓴다:
+ *  - 계정 로그인: 각 회사의 공식 웹 대화창을 패널 안에 띄워 자기 계정(무료·구독)으로 쓴다 — API 키 필요 없음 (AiWebPanel)
+ *  - API 키: Claude / GPT / Gemini / Ollama(로컬 모델)와 바로 대화. Claude 는 키가 없어도 로그인해 둔 계정(ant auth login)을 쓴다
+ *  - Claude 데스크톱: Claude 데스크톱 앱이 Kite 문서를 읽고 고치게 연결 (AiDesktopPanel)
+ */
 
 type Provider = 'claude' | 'openai' | 'gemini' | 'ollama';
 /** 키가 필요한데 없는지 (Ollama 는 키 대신 서버 주소, 기본값이 있어 늘 쓸 수 있다) */
 const noKey = (keys: Record<string, string> | null, p: Provider) => !!keys && p !== 'ollama' && keys[p] === 'none';
-type KeyState = Record<Provider, 'saved' | 'env' | 'none'>;
+type KeyState = Record<Provider, 'saved' | 'env' | 'login' | 'none'>;
+type Mode = 'web' | 'api' | 'desktop';
 
 interface Msg {
   role: 'user' | 'assistant';
@@ -73,21 +79,6 @@ const lsSet = (k: string, v: string) => {
 
 export { renderMarkdown };
 
-/** 현재 문서 또는 선택 영역의 내용 (Markdown) */
-function getContext(mode: 'doc' | 'selection' | 'none'): { text: string; label: string } | null {
-  const tab = app.active;
-  if (!tab || mode === 'none') return null;
-  const ed = tab.editor;
-  const { from, to, empty } = ed.state.selection;
-  if (mode === 'selection') {
-    if (empty) return null;
-    const slice = ed.state.doc.cut(from, to);
-    const md = writeMarkdown({ content: slice.toJSON(), settings: tab.settings, meta: tab.meta }).trim();
-    return { text: md || ed.state.doc.textBetween(from, to, '\n'), label: '선택' };
-  }
-  return { text: writeMarkdown(tab.toKDocument()).trim(), label: '문서' };
-}
-
 export function AiPanel() {
   const appState = useApp();
   const [provider, setProvider] = useState<Provider>(() => (lsGet('provider', 'claude') as Provider) || 'claude');
@@ -105,8 +96,11 @@ export function AiPanel() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [showKeys, setShowKeys] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
-  // 'desktop': Claude 데스크톱(구독 계정, MCP) / 'api': API 키로 직접 대화
-  const [mode, setMode] = useState<'desktop' | 'api' | null>(() => (lsGet('mode', '') as any) || null);
+  // 'web': 계정 로그인(공식 웹 대화창을 패널 안에) / 'api': API 키로 직접 대화 / 'desktop': Claude 데스크톱 연결(MCP)
+  const [mode, setMode] = useState<Mode | null>(() => {
+    const m = lsGet('mode', '');
+    return m === 'web' || m === 'api' || m === 'desktop' ? m : null;
+  });
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -178,8 +172,8 @@ export function AiPanel() {
       return;
     }
     const mode = quick && ctxMode === 'none' ? 'selection' : ctxMode;
-    let ctx = getContext(mode);
-    if (quick && !ctx) ctx = getContext('doc');
+    let ctx = getAiContext(mode);
+    if (quick && !ctx) ctx = getAiContext('doc');
     if (ctx && ctx.text.length > 600000) {
       app.toast('문서가 너무 커서 보낼 수 없습니다. 필요한 부분을 선택한 뒤 "선택 영역"으로 보내 주세요.', 'warn', 6000);
       return;
@@ -197,26 +191,15 @@ export function AiPanel() {
     await api.aiChat({ id, provider, model: curModel, system: SYSTEM, messages: [...history, { role: 'user', content: sent }] });
   };
 
+  // 화면 표시와 같은 정리(외부 그림 제거)를 거친 뒤 문서에 넣는다
   const insert = (md: string, replace: boolean) => {
-    const tab = app.active;
-    if (!tab) return;
-    // 화면 표시와 같은 정리(외부 그림 제거)를 거친 뒤 문서에 넣는다
-    const json = htmlToJson(renderMarkdown(md));
-    let content = json.content || [];
-    // 한 문단이면 글자만 넣어 현재 문단 서식을 유지
-    if (content.length === 1 && content[0].type === 'paragraph') content = content[0].content || [];
-    const c = tab.editor.chain().focus();
-    if (!replace) {
-      const { to } = tab.editor.state.selection;
-      c.setTextSelection(to);
-    }
-    c.insertContent(content).run();
-    app.toast(replace ? '선택 영역을 바꾸었습니다.' : '문서에 넣었습니다.');
+    insertAiHtml(renderMarkdown(md), replace);
   };
 
-  // 처음에는 API 키가 하나도 없으면 Claude 데스크톱 방식을 기본으로
-  const effMode: 'desktop' | 'api' = mode || (keys && (['claude', 'openai', 'gemini'] as Provider[]).some((p) => keys[p] !== 'none') ? 'api' : 'desktop');
-  const chooseMode = (m: 'desktop' | 'api') => {
+  // 처음에는: 쓸 수 있는 API 키(또는 Claude 로그인)가 있으면 API 키 방식, 없으면 계정 로그인 방식 (둘 다 Kite 안에서 대화한다)
+  const canWeb = !!api?.aiWebServices;
+  const effMode: Mode = mode || (keys && (['claude', 'openai', 'gemini'] as Provider[]).some((p) => keys[p] !== 'none') ? 'api' : canWeb ? 'web' : 'api');
+  const chooseMode = (m: Mode) => {
     setMode(m);
     lsSet('mode', m);
   };
@@ -225,7 +208,7 @@ export function AiPanel() {
   const hasSel = !!app.active && !app.active.editor.state.selection.empty;
 
   return (
-    <aside className="ai-panel">
+    <aside className={'ai-panel' + (effMode === 'web' ? ' web' : '')}>
       <div className="ai-head">
         <b>AI 도우미</b>
         <span style={{ flex: 1 }} />
@@ -245,15 +228,20 @@ export function AiPanel() {
       </div>
       <div className="ai-mode">
         <span className="seg">
-          <button className={effMode === 'desktop' ? 'on' : ''} onClick={() => chooseMode('desktop')} title="Claude 데스크톱 앱의 로그인(구독)으로 쓰기 — API 키 필요 없음">
-            Claude 데스크톱 (구독)
+          <button className={effMode === 'web' ? 'on' : ''} onClick={() => chooseMode('web')} title="Claude · ChatGPT · Gemini 에 내 계정으로 로그인해서 Kite 안에서 대화 — API 키 필요 없음">
+            계정 로그인
           </button>
-          <button className={effMode === 'api' ? 'on' : ''} onClick={() => chooseMode('api')} title="API 키로 Kite 안에서 바로 대화">
+          <button className={effMode === 'api' ? 'on' : ''} onClick={() => chooseMode('api')} title="API 키로 Kite 안에서 바로 대화 (Claude 는 ant auth login 으로 로그인해 둔 계정도 사용)">
             API 키
+          </button>
+          <button className={effMode === 'desktop' ? 'on' : ''} onClick={() => chooseMode('desktop')} title="Claude 데스크톱 앱이 Kite 문서를 직접 읽고 고치게 연결 (대화는 Claude 데스크톱에서)">
+            Claude 데스크톱
           </button>
         </span>
       </div>
-      {effMode === 'desktop' ? (
+      {effMode === 'web' ? (
+        <AiWebPanel />
+      ) : effMode === 'desktop' ? (
         <AiDesktopPanel />
       ) : (
         <>
@@ -426,7 +414,7 @@ ${href.slice(0, 500)}
 
 function AiKeysDialog({ keys, onClose, onSaved }: { keys: KeyState | null; onClose: () => void; onSaved: (k: KeyState) => void }) {
   const [vals, setVals] = useState<Record<Provider, string>>({ claude: '', openai: '', gemini: '', ollama: '' });
-  const status = (p: Provider) => (keys?.[p] === 'saved' ? '저장됨' : keys?.[p] === 'env' ? '환경 변수 사용 중' : '없음');
+  const status = (p: Provider) => (keys?.[p] === 'saved' ? '저장됨' : keys?.[p] === 'env' ? '환경 변수 사용 중' : keys?.[p] === 'login' ? '키 없이 로그인한 계정 사용 중 (ant auth login)' : '없음');
   const save = async () => {
     if (!api) return;
     let k: KeyState | null = keys;
@@ -483,6 +471,8 @@ function AiKeysDialog({ keys, onClose, onSaved }: { keys: KeyState | null; onClo
       </div>
       <p className="unit" style={{ marginTop: 12, lineHeight: 1.6 }}>
         키는 이 컴퓨터에만 운영체제 보안 저장소로 암호화해 보관하며, 각 회사의 API로만 전송됩니다. 비워 두면 기존 값을 그대로 둡니다.
+        <br />
+        Claude 는 키를 넣지 않아도, Anthropic CLI 로 로그인해 두었으면(터미널에서 ant auth login) 그 계정으로 씁니다. 키 없이 웹 계정(구독)으로 쓰려면 '계정 로그인' 방식을 고르세요.
         <br />
         AI에 보낸 문서 내용은 선택한 회사(Anthropic·OpenAI·Google)로 전송되니, 민감한 문서는 주의하세요. Ollama 는 문서가 이 컴퓨터(또는 지정한 서버) 밖으로 나가지 않습니다.
       </p>

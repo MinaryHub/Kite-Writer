@@ -7,6 +7,7 @@ import { initMcpHost, isMcpBridge, runMcpBridge } from './mcp';
 import { setupCollab } from './collab';
 import { STORE_BUILD } from './flags';
 import { setupSupport } from './support';
+import { guardAiWebHost, setupAiWeb } from './aiWeb';
 import { listPrivateFonts, readPrivateFont } from './fonts';
 
 /** AI 앱이 실행한 MCP 다리(Kite.exe --mcp): 창 없이 표준 입출력으로만 동작한다 */
@@ -184,8 +185,11 @@ function createWindow() {
       webSecurity: true,
       allowRunningInsecureContent: false,
       spellcheck: true,
+      // AI 도우미의 '계정 로그인' 방식만 쓴다: 붙일 수 있는 주소·저장소·권한은 aiWeb.ts 가 정한다
+      webviewTag: true,
     },
   });
+  guardAiWebHost(mainWindow, () => mainWindow);
   Menu.setApplicationMenu(null);
   mainWindow.once('ready-to-show', () => {
     mainWindow?.maximize();
@@ -292,6 +296,7 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(ALLOWED_PERMISSIONS.has(permission)));
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => ALLOWED_PERMISSIONS.has(permission));
   sweepStaleTemp();
+  setupAiWeb(() => mainWindow);
   createWindow();
   initMcpHost(() => mainWindow);
   setupCollab();
@@ -695,9 +700,13 @@ ipcMain.handle('doc:convert', async (_e, data: Uint8Array) => {
 });
 
 // ---------------- AI 도우미 ----------------
-import { abortChat, keyStatus, listModels, setKey, startChat, type ChatRequest, type Provider } from './ai';
+import { abortChat, keyStatus, listModels, refreshClaudeLogin, setKey, startChat, type ChatRequest, type Provider } from './ai';
 
-ipcMain.handle('ai:key-status', () => keyStatus());
+ipcMain.handle('ai:key-status', async () => {
+  // Claude 는 키가 없어도 로그인해 둔 계정(ant auth login)이 있으면 쓸 수 있다
+  await refreshClaudeLogin();
+  return keyStatus();
+});
 ipcMain.handle('ai:set-key', (_e, p: Provider, key: string | null) => {
   if (!PROVIDERS.has(p) || (key != null && (typeof key !== 'string' || key.length > 512))) throw new Error('키 형식이 올바르지 않습니다.');
   setKey(p, key);

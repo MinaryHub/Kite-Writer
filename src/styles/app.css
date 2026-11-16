@@ -1549,6 +1549,49 @@ input[type='number'] {
   white-space: nowrap;
 }
 
+/* ----- AI 도우미: 계정 로그인 (공식 웹 대화창을 패널 안에) ----- */
+/* 웹 대화창은 좁으면 쓰기 불편하므로 패널을 넓힌다 */
+.ai-panel.web {
+  width: 460px;
+}
+.ai-web {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ai-web-bar {
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.ai-web-view {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: #fff;
+}
+.ai-webview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+}
+.ai-web-fail {
+  position: absolute;
+  inset: 0;
+  padding: 18px 14px;
+  background: var(--c-surface-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.ai-web-foot {
+  padding: 5px 10px;
+  border-top: 1px solid var(--c-border);
+  line-height: 1.5;
+}
+
 /* ----- AI 도우미: 방식 전환 / Claude 데스크톱 ----- */
 .ai-mode {
   padding: 8px 10px 0;
