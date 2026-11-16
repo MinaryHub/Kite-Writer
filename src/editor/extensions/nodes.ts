@@ -22,16 +22,27 @@ declare module '@tiptap/core' {
 }
 
 /** 떠 있는 개체의 자리 (px). 값이 이상하면 null */
-export function floatOf(v: any): { x: number; y: number; behind: boolean } | null {
+export function floatOf(v: any): { x: number; y: number; behind: boolean; py: number | null } | null {
   if (!v || typeof v !== 'object') return null;
   const x = Number(v.x);
   const y = Number(v.y);
   if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 20000 || Math.abs(y) > 20000) return null;
-  return { x, y, behind: v.behind === true };
+  // py: 쪽·종이 기준으로 놓인 개체의 쪽 본문 안 세로 자리 (쪽 나누기가 그 자리에 놓는다: placePageFloats)
+  const py = v.py != null && Number.isFinite(+v.py) && Math.abs(+v.py) < 20000 ? +v.py : null;
+  return { x, y, behind: v.behind === true, py };
 }
 
 // ---------------- 글상자 (도형 안의 글) ----------------
 const RADIUS_RE = /^[\d.]+(px|%)$/;
+
+/** 한글의 선 종류 → CSS 테두리 종류 */
+function boxBorderStyle(v: unknown): string {
+  const s = typeof v === 'string' ? v : '';
+  if (/^(DASH|LONG_DASH|DASH_DOT|DASH_DOT_DOT)$/.test(s)) return 'dashed';
+  if (/^(DOT|CIRCLE)$/.test(s)) return 'dotted';
+  if (/^(DOUBLE_SLIM|SLIM_THICK|THICK_SLIM|SLIM_THICK_SLIM)$/.test(s)) return 'double';
+  return 'solid';
+}
 
 /** 한글의 글상자·도형 안 글. 크기가 정해진 상자 안에 문단이 들어가며, 배경(색·그림)과 테두리를 가진다 */
 export const TextBox = Node.create({
@@ -49,6 +60,10 @@ export const TextBox = Node.create({
       bgImage: plain,
       borderColor: plain,
       borderWidth: plain,
+      /** 테두리 선 종류 (한글의 선 종류: DASH, DOT, DASH_DOT, DOUBLE_SLIM …). 없으면 실선 */
+      borderDash: plain,
+      /** 그러데이션 채우기 (CSS 그러데이션: 우리가 만든 꼴만 받는다) */
+      bgGradient: plain,
       radius: plain,
       padding: plain,
       /** 떠 있는 자리 { x, y, behind? } (px: x 는 본문·칸 왼쪽, y 는 뒤따르는 문단 상자 위쪽 기준). 있으면 높이 없이 그 자리에 띄운다 */
@@ -94,15 +109,17 @@ export const TextBox = Node.create({
     if (num(a.height)) st.push(fl ? `height:${num(a.height)}px` : `min-height:${num(a.height)}px`);
     const bg = normColor(a.bg);
     if (bg) st.push(`background-color:${bg}`);
+    const grad = cleanGradient(a.bgGradient);
     if (typeof a.bgImage === 'string' && /^data:image\//.test(a.bgImage)) st.push(`background-image:url("${a.bgImage}")`);
+    else if (grad) st.push(`background-image:${grad}`);
     const bc = normColor(a.borderColor);
-    if (bc) st.push(`border:${num(a.borderWidth) || 1}px solid ${bc}`);
+    if (bc) st.push(`border:${num(a.borderWidth) || 1}px ${boxBorderStyle(a.borderDash)} ${bc}`);
     if (typeof a.radius === 'string' && RADIUS_RE.test(a.radius)) st.push(`border-radius:${a.radius}`);
     if (Array.isArray(a.padding) && a.padding.length === 4) st.push(`padding:${a.padding.map((v: any) => Math.max(0, +v || 0) + 'px').join(' ')}`);
     if (a.valign === 'middle' || a.valign === 'bottom') st.push('display:flex', 'flex-direction:column', `justify-content:${a.valign === 'middle' ? 'center' : 'flex-end'}`);
     if (fl) {
       st.push(`left:${fl.x}px`, `top:${fl.y}px`);
-      return ['div', { class: 'k-float-anchor' }, ['div', { class: 'k-textbox k-float' + (fl.behind ? ' behind' : ''), style: st.join(';') }, 0]];
+      return ['div', { class: 'k-float-anchor' }, ['div', { class: 'k-textbox k-float' + (fl.behind ? ' behind' : ''), style: st.join(';'), ...(fl.py != null ? { 'data-py': String(fl.py) } : {}) }, 0]];
     }
     return ['div', { class: 'k-textbox', style: st.join(';') }, 0];
   },
@@ -206,6 +223,31 @@ export const KImage = Image.extend({
     };
   },
 
+  // 편집기 밖에서 그릴 때(머리말·꼬리말·바탕쪽·도형 안의 글, HTML 저장): 떠 있는 자리·자르기·회전을 편집 화면과 같게
+  renderHTML({ node, HTMLAttributes }) {
+    const a = node.attrs;
+    const fl = floatOf(a.float);
+    const c = cropOf(a.crop);
+    const rot = Number(a.rotate);
+    const turned = Number.isFinite(rot) && rot % 360 !== 0;
+    const base = mergeAttributes(this.options.HTMLAttributes, HTMLAttributes);
+    if (!fl && !c && !turned) return ['img', base];
+    const st: string[] = [];
+    const w = +a.width || 0;
+    const h = +a.height || 0;
+    let imgStyle = '';
+    if (c && w && h) {
+      const iw = w / Math.max(0.01, 1 - c.l - c.r);
+      const ih = h / Math.max(0.01, 1 - c.t - c.b);
+      st.push(`width:${w}px`, `height:${h}px`, 'overflow:hidden');
+      imgStyle = `width:${iw}px;height:${ih}px;max-width:none;display:block;margin-left:${-c.l * iw}px;margin-top:${-c.t * ih}px`;
+    } else if (w && h) imgStyle = `width:${w}px;height:${h}px`;
+    if (fl) st.push(`left:${fl.x}px`, `top:${fl.y}px`);
+    if (turned) st.push(`transform:rotate(${rot}deg)`);
+    const cls = 'k-image' + (fl ? ' k-float' + (fl.behind ? ' behind' : '') : '') + (c ? ' cropped' : '');
+    return ['span', { class: cls, style: st.join(';'), ...(fl && fl.py != null ? { 'data-py': String(fl.py) } : {}) }, ['img', imgStyle ? mergeAttributes(base, { style: imgStyle }) : base]];
+  },
+
   addNodeView() {
     return ({ node, getPos, editor }) => {
       let current = node;
@@ -249,6 +291,11 @@ export const KImage = Image.extend({
         wrap.classList.toggle('behind', !!fl?.behind);
         wrap.style.left = fl ? fl.x + 'px' : '';
         wrap.style.top = fl ? fl.y + 'px' : '';
+        if (fl && fl.py != null) wrap.setAttribute('data-py', String(fl.py));
+        else wrap.removeAttribute('data-py');
+        // 글줄 안에서의 세로 자리 (한글 문서: 개체 높이에 따라 기준선 아래로 내린다 — editor.css)
+        if (n.attrs.height) wrap.style.setProperty('--kh', n.attrs.height + 'px');
+        else wrap.style.removeProperty('--kh');
         const rot = Number(n.attrs.rotate);
         wrap.style.transform = Number.isFinite(rot) && rot % 360 ? `rotate(${rot}deg)` : '';
       };

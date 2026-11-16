@@ -1,8 +1,9 @@
-import { indentByBlanks } from '../hwpLayout';
+import { indentByBlanks, type FloatHw } from '../hwpLayout';
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
 import { CELL_VMARGIN_HWP, FLOATING, HwpPageMarks, assembleTable, fitTableLines, placeCaptions, takeFloating, type Caption, type Captions } from '../hwp/reader';
 import type { DocMeta, DocSettings, LoadedDoc, PageSetup } from '../../types';
+import { type Gradient, type Mat, type ShapeData, type ShapeItem, type ShapeRaw, IDENTITY, SHADOW_DEFAULT, SHADOW_UNIT_PX, arrowOf, arrowSizeOf, composeMats, gradientToCss, matOfHwp, shapeBounds } from '../shape';
 import {
   type JMark,
   type JNode,
@@ -103,14 +104,19 @@ export interface BorderFill {
  * 한글 그러데이션 → CSS. 한글의 기울임은 0 이 위→아래, 90 이 왼쪽→오른쪽 (CSS 는 0 이 아래→위, 90 이 왼쪽→오른쪽).
  * 종류: 줄무늬(선형)·원형·원뿔·사각형 (사각형은 원형으로 대신).
  */
-export function gradientCss(type: 'LINEAR' | 'RADIAL' | 'CONICAL' | 'SQUARE', angle: number, cx: number, cy: number, colors: string[]): string | null {
-  const cs = colors.map((c) => normColor(c)).filter((c): c is string => !!c);
-  if (cs.length < 2) return null;
-  const stops = cs.join(', ');
-  const at = `${Math.max(0, Math.min(100, cx))}% ${Math.max(0, Math.min(100, cy))}%`;
-  if (type === 'RADIAL' || type === 'SQUARE') return `radial-gradient(circle at ${at}, ${stops})`;
-  if (type === 'CONICAL') return `conic-gradient(from ${Math.round(angle)}deg at ${at}, ${stops})`;
-  return `linear-gradient(${Math.round(180 - angle)}deg, ${stops})`;
+export function gradientCss(type: 'LINEAR' | 'RADIAL' | 'CONICAL' | 'SQUARE', angle: number, cx: number, cy: number, colors: string[], stepCenter = 50): string | null {
+  const g = gradientOf(type, angle, cx, cy, colors, stepCenter);
+  return g ? gradientToCss(g) : null;
+}
+
+/** 한글 그러데이션 값 (색이 둘 이상일 때만). 줄무늬는 첫 색이 중심(가로·세로 중심)에 놓이고 양 끝으로 번진다 */
+export function gradientOf(type: string, angle: number, cx: number, cy: number, colors: string[], stepCenter = 50): Gradient | null {
+  const c = colors.map((x) => normColor(x)).filter((x): x is string => !!x);
+  if (c.length < 2) return null;
+  const t = (['LINEAR', 'RADIAL', 'CONICAL', 'SQUARE'].includes(type.toUpperCase()) ? type.toUpperCase() : 'LINEAR') as Gradient['t'];
+  const g: Gradient = { t, a: angle, cx: Math.max(0, Math.min(100, cx)), cy: Math.max(0, Math.min(100, cy)), c };
+  if (stepCenter !== 50) g.sc = stepCenter;
+  return g;
 }
 
 /** 그림 채우기 방식 → 칸 배경 그림의 맞춤 */
@@ -384,6 +390,8 @@ interface Ctx {
   bg?: string | null;
   /** 글이 놓이는 폭(px): 칸·글상자 안 폭 (떠 있는 개체의 가운데·오른쪽 맞춤에 쓴다) */
   width?: number;
+  /** 머리말·꼬리말·바탕쪽 안: 그 영역의 왼쪽 위가 종이에서 놓인 자리(px). 종이·쪽 기준 개체의 자리를 셈할 수 있다 */
+  origin?: { x: number; y: number };
 }
 
 const PT2PX = 96 / 72;
@@ -407,7 +415,51 @@ function objSize(el: Element): { w: number; h: number } {
   return { w: 0, h: 0 };
 }
 
-const INLINE_LEAVES = new Set(['image', 'hardBreak', 'footnote', 'math']);
+/** 그리기 개체의 렌더링 행렬: 이동 × Π(회전 × 크기) 를 px 단위 행렬 하나로. raw 는 저장할 때 그대로 쓰는 한글 값 */
+function shapeMatrix(el: Element): { m: Mat; raw: ShapeRaw } {
+  const ri = kid(el, 'renderingInfo');
+  const read = (e: Element) => ['e1', 'e2', 'e3', 'e4', 'e5', 'e6'].map((k, i) => numAttr(e, k, i === 0 || i === 4 ? 1 : 0));
+  const mats: number[][] = [];
+  let trans: Mat = [...IDENTITY];
+  const pairs: [Mat, Mat][] = [];
+  let sca: Mat | null = null;
+  for (const e of kids(ri)) {
+    const n = localName(e);
+    const v = read(e);
+    if (n === 'transMatrix') {
+      trans = matOfHwp(v);
+      mats.unshift(v);
+    } else if (n === 'scaMatrix') {
+      sca = matOfHwp(v);
+      mats.push(v);
+    } else if (n === 'rotMatrix') {
+      pairs.push([sca || [...IDENTITY], matOfHwp(v)]);
+      sca = null;
+      mats.push(v);
+    }
+  }
+  if (sca) pairs.push([sca, [...IDENTITY]]);
+  if (!mats.length) mats.push([1, 0, 0, 0, 1, 0]);
+  const off = kid(el, 'offset');
+  const org = kid(el, 'orgSz');
+  const cur = kid(el, 'curSz');
+  const flip = kid(el, 'flip');
+  const rot = kid(el, 'rotationInfo');
+  const raw: ShapeRaw = {
+    off: [i32Attr(off, 'x', 0), i32Attr(off, 'y', 0)],
+    org: [i32Attr(org, 'width', 0), i32Attr(org, 'height', 0)],
+    cur: [i32Attr(cur, 'width', 0), i32Attr(cur, 'height', 0)],
+    flip: [attr(flip, 'horizontal') === '1' ? 1 : 0, attr(flip, 'vertical') === '1' ? 1 : 0],
+    rot: [i32Attr(rot, 'angle', 0), i32Attr(rot, 'centerX', 0), i32Attr(rot, 'centerY', 0)],
+    mats,
+    lvl: numAttr(el, 'groupLevel', 0),
+  };
+  const lw = numAttr(kid(el, 'lineShape'), 'width', -1);
+  if (lw >= 0) raw.lw = lw;
+  return { m: composeMats(trans, pairs, 1 / 75), raw };
+}
+
+const INLINE_LEAVES = new Set(['image', 'hardBreak', 'footnote', 'math', 'shape']);
 const LEAF_BLOCKS = new Set(['pageBreak', 'horizontalRule']);
 /** 문서 노드(JSON)가 ProseMirror 에서 차지하는 크기 (nodeSize) */
 function jsonSize(n: JNode): number {
@@ -430,7 +482,7 @@ function stripLayout(n: JNode): JNode {
   const out: JNode = { ...n };
   if (n.attrs) {
     const a: Record<string, any> = {};
-    for (const k of Object.keys(n.attrs)) if (!/^hwp(Lines|Len|Top|Seq|Page)$/.test(k) && k !== 'float') a[k] = n.attrs[k];
+    for (const k of Object.keys(n.attrs)) if (!/^hwp(Lines|Len|Top|Seq|Page)$/.test(k)) a[k] = n.attrs[k];
     out.attrs = a;
   }
   if (n.content) out.content = n.content.map(stripLayout);
@@ -443,6 +495,10 @@ export interface FloatPos {
   y: number;
   /** 글 뒤로 */
   behind?: boolean;
+  /** 문서에 적힌 자리 값 (저장할 때 그대로 되돌려 쓴다) */
+  hw?: FloatHw;
+  /** 쪽·종이 기준으로 놓인 개체: 쪽 본문 맨 위에서의 세로 자리(px). 쪽 나누기가 끝난 뒤 그 자리에 놓는다 (y 는 그 전의 어림) */
+  py?: number;
 }
 
 const SHAPES = new Set(['rect', 'ellipse', 'arc', 'polygon', 'curve', 'connectLine', 'line', 'textart']);
@@ -530,11 +586,16 @@ export class HwpxConverter {
     if (!sz.w || !sz.h) return null;
     const w = hwpToPx(sz.w);
     const h = hwpToPx(sz.h);
-    const omB = hwpToPx(numAttr(kid(el, 'outMargin'), 'bottom', 0));
+    const om = kid(el, 'outMargin');
+    const omB = hwpToPx(numAttr(om, 'bottom', 0));
+    const omT = hwpToPx(numAttr(om, 'top', 0));
+    const omL = hwpToPx(numAttr(om, 'left', 0));
+    const omR = hwpToPx(numAttr(om, 'right', 0));
     const wrap = attr(el, 'textWrap') || 'SQUARE';
     // 칸·글상자 안에서 자리를 차지하는 개체는 칸의 내용 높이에 든다 (칸의 세로 맞춤이 그 높이로 정해진다): 흐름 안에 둔다
     if (ctx.inSub && wrap === 'TOP_AND_BOTTOM') return null;
-    const vRel = ctx.inSub ? 'PARA' : attr(pos, 'vertRelTo') || 'PARA';
+    // 칸·글상자 안의 개체는 문단 기준으로만 놓인다. 머리말·꼬리말·바탕쪽(origin)은 종이에서의 자리를 알므로 종이·쪽 기준도 된다
+    const vRel = ctx.inSub && !ctx.origin ? 'PARA' : attr(pos, 'vertRelTo') || 'PARA';
     const hRel = attr(pos, 'horzRelTo') || 'COLUMN';
     const vAl = attr(pos, 'vertAlign') || 'TOP';
     const hAl = attr(pos, 'horzAlign') || 'LEFT';
@@ -544,16 +605,24 @@ export class HwpxConverter {
     const v0 = segV.length ? segV[0][0] : null;
     const g = this.pageGeom();
     let y: number;
+    /** 쪽 본문 맨 위에서의 자리 (본문의 쪽·종이 기준 개체) */
+    let py: number | null = null;
     if (vRel === 'PARA') {
       // 자리를 차지하는 개체가 문단 첫 줄 자리에 걸치면 한글은 글을 개체 아래로 민다: 개체는 밀린 첫 줄 바로 위에 있다
-      y = wrap === 'TOP_AND_BOTTOM' && pushed(h, omB, vOff) ? sb - omB - h : sb + vOff;
+      y = wrap === 'TOP_AND_BOTTOM' && pushed(h, omB, vOff) ? sb - omB - h : sb + vOff + omT;
     } else {
-      // 쪽(본문)·종이 기준: 문단 첫 줄의 쪽 안 위치를 알아야 한다
-      if (v0 == null) return null;
+      // 쪽(본문)·종이 기준. 바깥 여백: 개체는 여백 상자 안쪽에 놓인다 (한글의 미리 보기 그림으로 확인: 위·왼쪽 맞춤은 여백만큼 안으로)
       const refH = vRel === 'PAPER' ? g.H : g.bodyH;
       const top = vRel === 'PAPER' ? -g.mt : 0;
-      const Y = top + (vAl === 'CENTER' ? (refH - h) / 2 + vOff : vAl === 'BOTTOM' || vAl === 'OUTSIDE' ? refH - h - vOff : vOff);
-      y = Y - (v0 - sb);
+      const Y = top + (vAl === 'CENTER' ? (refH - h) / 2 + vOff : vAl === 'BOTTOM' || vAl === 'OUTSIDE' ? refH - h - vOff - omB : vOff + omT);
+      if (ctx.origin) {
+        // 영역 안: 문단 첫 줄의 영역 안 위치(없으면 맨 위)에서 거꾸로 셈한다
+        y = Y + g.mt - ctx.origin.y - ((v0 ?? sb) - sb);
+      } else {
+        // 본문: 문단 첫 줄의 쪽 안 위치를 알면 그것으로 어림하고, 쪽 나누기가 끝나면 쪽 기준 자리(py)에 놓는다
+        y = v0 != null ? Y - (v0 - sb) : 0;
+        py = Y;
+      }
     }
     const colW = ctx.inSub ? ctx.width ?? 0 : g.bodyW;
     let base = 0;
@@ -561,13 +630,17 @@ export class HwpxConverter {
     if (hRel === 'PARA') {
       base = pp.indentLeft * PT2PX;
       refW = colW - (pp.indentLeft + pp.indentRight) * PT2PX;
-    } else if (hRel === 'PAPER' && !ctx.inSub) {
-      base = -g.ml;
+    } else if (hRel === 'PAPER' && (!ctx.inSub || ctx.origin)) {
+      base = -(ctx.origin ? ctx.origin.x : g.ml);
       refW = g.W;
+    } else if (hRel === 'PAGE' && ctx.origin) {
+      base = g.ml - ctx.origin.x;
+      refW = g.bodyW;
     }
     // 폭을 모르면(칸 안) 왼쪽 맞춤으로
-    const x = base + (!(refW > 0) ? hOff : hAl === 'CENTER' ? (refW - w) / 2 + hOff : hAl === 'RIGHT' || hAl === 'OUTSIDE' ? refW - w - hOff : hOff);
-    return { x: r2(x), y: r2(y), ...(wrap === 'BEHIND_TEXT' ? { behind: true } : {}) };
+    const x = base + (!(refW > 0) ? hOff + omL : hAl === 'CENTER' ? (refW - w) / 2 + hOff : hAl === 'RIGHT' || hAl === 'OUTSIDE' ? refW - w - hOff - omR : hOff + omL);
+    const hw: FloatHw = { wrap, vr: attr(pos, 'vertRelTo') || 'PARA', hr: hRel, va: vAl, ha: hAl, vo: i32Attr(pos, 'vertOffset', 0), ho: i32Attr(pos, 'horzOffset', 0), om: ['left', 'right', 'top', 'bottom'].map((k) => numAttr(om, k, 0)) };
+    return { x: r2(x), y: r2(y), ...(wrap === 'BEHIND_TEXT' ? { behind: true } : {}), ...(py != null ? { py: r2(py) } : {}), hw };
   }
 
   constructor(
@@ -705,7 +778,13 @@ export class HwpxConverter {
             const cap = this.caption(child);
             const tb = cap ? (cap.top ? [...cap.blocks, t] : [t, ...cap.blocks]) : [t];
             const tpos = kid(child, 'pos');
-            if (segV.length && tpos && attr(tpos, 'treatAsChar') !== '1') {
+            const twrap = attr(child, 'textWrap') || 'TOP_AND_BOTTOM';
+            // 글 앞·글 뒤로 놓인 표는 자리를 차지하지 않는다: 그 자리에 띄운다 (높이 없는 글상자에 담아)
+            const tfp = tpos && attr(tpos, 'treatAsChar') !== '1' && (twrap === 'IN_FRONT_OF_TEXT' || twrap === 'BEHIND_TEXT') ? this.floatPos(child, pp, segV, ctx, pushed) : null;
+            if (tfp) {
+              t.attrs = { ...t.attrs, outMargin: null, align: null };
+              before.push({ type: 'textBox', attrs: { width: null, height: null, padding: [0, 0, 0, 0], float: tfp }, content: tb });
+            } else if (segV.length && tpos && attr(tpos, 'treatAsChar') !== '1') {
               // 떠 있는 표는 문단의 글을 쪼개지 않는다. 글이 있는 문단의 첫 줄 자리에 걸친 표는 글을 아래로 밀어내므로 글보다 먼저 온다
               const tOff = hwpToPx(i32Attr(tpos, 'vertOffset', 0));
               const omT = hwpToPx(numAttr(kid(child, 'outMargin'), 'top', 0));
@@ -736,8 +815,8 @@ export class HwpxConverter {
               if (fp) pic.attrs = { ...pic.attrs, float: { ...fp, x: r2(fp.x - (pp.indentLeft + Math.max(0, -pp.textIndent)) * PT2PX) } };
               else if (attr(kid(child, 'pos'), 'treatAsChar') !== '1') pic.attrs = { ...pic.attrs, [FLOATING]: true };
               inline.push(pic);
+              this.addCaption(child, captions, fp, before);
             }
-            this.addCaption(child, captions);
             break;
           case 'ole':
             inline.push(this.sizedPlaceholder(child, 'OLE 개체'));
@@ -754,26 +833,39 @@ export class HwpxConverter {
             this.handleSecPr(child);
             break;
           case 'container':
-          case 'chart':
-            flush();
-            blocks.push(...this.convertContainer(child));
-            this.addCaption(child, captions);
-            produced = true;
+          case 'chart': {
+            // 묶은 개체: 자식들을 제자리에 그린 도형 하나로 (그릴 것이 없으면 예전처럼 자식을 차례로 놓는다)
+            const node = name === 'container' ? this.shapeNode(child, ctx) : null;
+            let cfp: FloatPos | null = null;
+            if (node) cfp = this.placeShape(node, child, pp, segV, ctx, pushed, inline);
+            else {
+              flush();
+              blocks.push(...this.convertContainer(child));
+              produced = true;
+            }
+            this.addCaption(child, captions, cfp, before);
             break;
+          }
           default:
             if (SHAPES.has(name)) {
               const fp = this.floatPos(child, pp, segV, ctx, pushed);
-              const sub = this.convertShape(child, !!fp);
-              if (sub.length && fp) {
-                // 떠 있는 글상자·도형: 문단 앞에 높이 없는 블록으로 두고 그 자리에 띄운다
-                sub[0].attrs = { ...sub[0].attrs, float: fp };
-                before.push(...sub);
-              } else if (sub.length) {
-                flush();
-                blocks.push(...sub);
-                produced = true;
+              if (this.isTextBox(child)) {
+                const sub = this.convertShape(child, !!fp);
+                if (sub.length && fp) {
+                  // 떠 있는 글상자: 문단 앞에 높이 없는 블록으로 두고 그 자리에 띄운다
+                  sub[0].attrs = { ...sub[0].attrs, float: fp };
+                  before.push(...sub);
+                } else if (sub.length) {
+                  flush();
+                  blocks.push(...sub);
+                  produced = true;
+                }
+              } else {
+                // 선·다각형·곡선·호, 글이 없거나 돌린 사각형·타원: 도형으로 그린다
+                const node = this.shapeNode(child, ctx);
+                if (node) this.placeShape(node, child, pp, segV, ctx, pushed, inline);
               }
-              this.addCaption(child, captions);
+              this.addCaption(child, captions, fp, before);
             } else if (name === 'fieldBegin' || name === 'fieldEnd') {
               this.handleField(child);
             } else if (name === 'compose' || name === 'dutmal') {
@@ -858,10 +950,30 @@ export class HwpxConverter {
     return { top: attr(cap, 'side') === 'TOP', blocks: this.convertParagraphs(ps, { inSub: true }) };
   }
 
-  /** 문단 안 개체의 캡션을 문단 앞뒤에 놓도록 모은다 */
-  private addCaption(el: Element, captions: Captions) {
+  /**
+   * 문단 안 개체의 캡션: 흐름 안의 개체는 문단 앞뒤에 놓고, 떠 있는 개체(fp)는 개체 아래(위)에 함께 띄운다
+   * (before: 문단 앞에 놓는 떠 있는 블록들)
+   */
+  private addCaption(el: Element, captions: Captions, fp: FloatPos | null = null, before: JNode[] | null = null) {
     const cap = this.caption(el);
-    if (cap) (cap.top ? captions.before : captions.after).push(...cap.blocks);
+    if (!cap) return;
+    if (fp && before) {
+      const capEl = kid(el, 'caption');
+      const sz = objSize(el);
+      const gap = hwpToPx(numAttr(capEl, 'gap', 850));
+      // 캡션 글의 높이: 마지막 문단의 마지막 줄 아래까지 (한글이 적어 둔 줄 자리)
+      const segs = descendants(capEl, 'lineseg');
+      const last = segs[segs.length - 1];
+      const capH = last ? hwpToPx(i32Attr(last, 'vertpos', 0) + i32Attr(last, 'vertsize', 1000)) : 16;
+      const y = cap.top ? fp.y - gap - capH : fp.y + hwpToPx(sz.h) + gap;
+      before.push({
+        type: 'textBox',
+        attrs: { width: Math.round(hwpToPx(sz.w)) || null, height: null, padding: [0, 0, 0, 0], float: { x: fp.x, y: r2(y), ...(fp.behind ? { behind: true } : {}), ...(fp.py != null ? { py: r2(fp.py + y - fp.y) } : {}) } },
+        content: cap.blocks.length ? cap.blocks : [paragraph()],
+      });
+      return;
+    }
+    (cap.top ? captions.before : captions.after).push(...cap.blocks);
   }
 
   private handleT(t: Element, cp: CharPr | undefined, inline: JNode[], track: LineTrack) {
@@ -963,7 +1075,11 @@ export class HwpxConverter {
           this.inHF++;
           let rich: JNode[] = [];
           try {
-            rich = this.convertParagraphs(ps, { inSub: true, width: this.pageGeom().bodyW }).map(stripLayout);
+            // 영역의 종이 안 자리: 머리말은 위쪽 여백 아래, 꼬리말은 본문 아래 (종이·쪽 기준으로 놓인 개체의 자리를 셈한다)
+            const g = this.pageGeom();
+            const pg = this.secPage || this.settings.page;
+            const origin = { x: g.ml, y: name === 'header' ? pg.marginTop * MM2PX : g.mt + g.bodyH };
+            rich = this.convertParagraphs(ps, { inSub: true, width: g.bodyW, origin }).map(stripLayout);
           } finally {
             this.inHF--;
           }
@@ -1098,6 +1214,220 @@ export class HwpxConverter {
     return { type: 'image', attrs: { src, width: w || null, height: h || null, crop, ...(angle ? { rotate: angle } : {}) } };
   }
 
+  /** 도형 노드를 문단에 놓는다: 떠 있는 개체는 제자리에 띄우고, 글자처럼 취급하는 개체는 글줄 안에 */
+  private placeShape(node: JNode, el: Element, pp: ParaPr, segV: number[][], ctx: Ctx, pushed: (h: number, omB: number, vOff: number) => boolean, inline: JNode[]): FloatPos | null {
+    const fp = this.floatPos(el, pp, segV, ctx, pushed);
+    if (fp) node.attrs = { ...node.attrs, float: { ...fp, x: r2(fp.x - (pp.indentLeft + Math.max(0, -pp.textIndent)) * PT2PX) } };
+    else if (attr(kid(el, 'pos'), 'treatAsChar') !== '1') node.attrs = { ...node.attrs, [FLOATING]: true };
+    inline.push(node);
+    return fp;
+  }
+
+  /** 글상자로 읽을 도형인가: 글이 든, 돌리지 않은 사각형·타원 (그 밖의 도형은 그려서 보여 준다) */
+  private isTextBox(el: Element): boolean {
+    const name = localName(el);
+    if (name !== 'rect' && name !== 'ellipse') return false;
+    const ps = kids(kid(kid(el, 'drawText'), 'subList'), 'p');
+    if (!ps.length) return false;
+    // 글이 없는 빈 문단 하나뿐이면 도형으로 그린다 (선·채우기 모양을 그대로 살린다)
+    const hasContent = ps.some((p) => kids(p, 'run').some((run) => kids(run).some((c) => localName(c) !== 't' || !!(c.textContent || '').trim() || kids(c).length > 0)));
+    if (!hasContent) return false;
+    const m = shapeMatrix(el).m;
+    // 회전·기울임이 없는 것만
+    return Math.abs(m[1]) < 1e-4 && Math.abs(m[2]) < 1e-4 && m[0] > 0 && m[3] > 0;
+  }
+
+  /** 그리기 개체의 선·채우기·그림자 */
+  private shapeStyle(el: Element): Partial<ShapeItem> {
+    const out: Partial<ShapeItem> = {};
+    const ls = kid(el, 'lineShape');
+    const style = (attr(ls, 'style') || 'SOLID').toUpperCase();
+    if (ls && style !== 'NONE') {
+      const lw = Math.max(0, numAttr(ls, 'width', 33));
+      out.sc = normColor(attr(ls, 'color')) || '#000000';
+      // 선 굵기는 HWPUNIT (33 ≈ 0.12mm)
+      out.sw = Math.max(0.3, hwpToPx(lw));
+      if (style !== 'SOLID') out.sd = style;
+      if ((attr(ls, 'endCap') || '').toUpperCase() === 'ROUND') out.cap = 'round';
+      const head = arrowOf(attr(ls, 'headStyle'), attr(ls, 'headfill') === '1');
+      if (head.s) {
+        out.hs = head.s;
+        out.hf = head.f;
+        out.hz = arrowSizeOf(attr(ls, 'headSz'));
+      }
+      const tail = arrowOf(attr(ls, 'tailStyle'), attr(ls, 'tailfill') === '1');
+      if (tail.s) {
+        out.ts = tail.s;
+        out.tf = tail.f;
+        out.tz = arrowSizeOf(attr(ls, 'tailSz'));
+      }
+    }
+    const fill = kid(el, 'fillBrush');
+    const wb = kid(fill, 'winBrush');
+    const fc = normColor(attr(wb, 'faceColor'));
+    if (fc) out.fc = fc;
+    const grad = kid(fill, 'gradation');
+    if (grad) {
+      const g = gradientOf(attr(grad, 'type') || 'LINEAR', numAttr(grad, 'angle', 0), numAttr(grad, 'centerX', 50), numAttr(grad, 'centerY', 50), kids(grad, 'color').map((c) => attr(c, 'value') || ''), numAttr(grad, 'stepCenter', 50));
+      if (g) out.fg = g;
+    }
+    const ib = kid(fill, 'imgBrush');
+    const fi = ib ? this.images.get(attr(kid(ib, 'img'), 'binaryItemIDRef') || '') : null;
+    if (fi) out.fi = fi;
+    const shadow = kid(el, 'shadow');
+    const st = (attr(shadow, 'type') || 'NONE').toUpperCase();
+    if (shadow && st !== 'NONE') {
+      // 그림자 거리는 0.01mm 단위. 0 으로 적힌 그림자도 한글은 조금 벗어난 자리에 그린다
+      const rx = Math.min(5000, Math.abs(i32Attr(shadow, 'offsetX', 0)));
+      const ry = Math.min(5000, Math.abs(i32Attr(shadow, 'offsetY', 0)));
+      const dx = (rx || ry ? rx : SHADOW_DEFAULT) * SHADOW_UNIT_PX;
+      const dy = (rx || ry ? ry : SHADOW_DEFAULT) * SHADOW_UNIT_PX;
+      const c = normColor(attr(shadow, 'color'));
+      if (c) out.sh = { c, x: /LEFT/.test(st) ? -dx : dx, y: /TOP/.test(st) ? -dy : dy };
+    }
+    return out;
+  }
+
+  /**
+   * 그리기 개체 하나를 도형 항목으로 (묶음이면 자식들까지). 자식의 행렬에는 묶음의 변환이 이미 들어 있어
+   * 모두 최상위 개체의 틀 기준이다
+   */
+  private shapeItems(el: Element, out: ShapeItem[], ctx: Ctx) {
+    const name = localName(el);
+    if (name === 'container') {
+      for (const ch of kids(el)) if (SHAPES.has(localName(ch)) || localName(ch) === 'pic' || localName(ch) === 'container') this.shapeItems(ch, out, ctx);
+      return;
+    }
+    const { m, raw } = shapeMatrix(el);
+    const org = kid(el, 'orgSz');
+    const w = hwpToPx(Math.abs(i32Attr(org, 'width', 0)));
+    const h = hwpToPx(Math.abs(i32Attr(org, 'height', 0)));
+    const base = { m, w, h, raw };
+    const pt = (e: Element | null): [number, number] => [hwpToPx(i32Attr(e, 'x', 0)), hwpToPx(i32Attr(e, 'y', 0))];
+    if (name === 'pic') {
+      const img = descendant(el, 'img');
+      const src = this.images.get(attr(img, 'binaryItemIDRef') || '');
+      if (!src || !/^data:image\//.test(src)) return;
+      const dim = kid(el, 'imgDim');
+      const dw = numAttr(dim, 'dimwidth', 0) || numAttr(org, 'width', 0);
+      const dh = numAttr(dim, 'dimheight', 0) || numAttr(org, 'height', 0);
+      const clip = kid(el, 'imgClip');
+      const crop = clip && dw && dh ? normCrop(numAttr(clip, 'top', 0) / dh, 1 - numAttr(clip, 'right', dw) / dw, 1 - numAttr(clip, 'bottom', dh) / dh, numAttr(clip, 'left', 0) / dw) : null;
+      out.push({ k: 'img', ...base, src, crop });
+      return;
+    }
+    const style = this.shapeStyle(el);
+    switch (name) {
+      case 'line':
+      case 'connectLine': {
+        const a = pt(kid(el, 'startPt'));
+        const b = pt(kid(el, 'endPt'));
+        // 꺾인·굽은 연결선: 조절점을 차례로 잇는다
+        const cps = kids(kid(el, 'controlPoints'), 'point').map(pt);
+        const ctype = name === 'connectLine' ? (attr(el, 'type') || '').toUpperCase() : '';
+        if (name === 'connectLine' && cps.length > 2) out.push({ k: 'poly', ...base, ...style, fc: null, fg: null, fi: null, p: cps.flat() });
+        else if (ctype.startsWith('STROKE')) {
+          // 꺾인 연결선: 이어진 변(오른쪽·왼쪽이면 가로로, 위·아래면 세로로 나간다)에 맞춰 직각으로 꺾는다
+          const sIdx = numAttr(kid(el, 'startPt'), 'subjectIdx', 1);
+          const eIdx = numAttr(kid(el, 'endPt'), 'subjectIdx', 0);
+          const sH = sIdx % 2 === 1;
+          const eH = eIdx % 2 === 1;
+          const mid: number[] = sH && eH ? [(a[0] + b[0]) / 2, a[1], (a[0] + b[0]) / 2, b[1]] : !sH && !eH ? [a[0], (a[1] + b[1]) / 2, b[0], (a[1] + b[1]) / 2] : sH ? [b[0], a[1]] : [a[0], b[1]];
+          out.push({ k: 'poly', ...base, ...style, fc: null, fg: null, fi: null, p: [...a, ...mid, ...b] });
+        } else out.push({ k: 'line', ...base, ...style, p: [...a, ...b] });
+        // 연결선의 화살표는 종류에 적혀 있다 (STRAIGHT_ONEWAY, …BOTH)
+        if (name === 'connectLine') {
+          const it = out[out.length - 1];
+          if (/ONEWAY|BOTH/.test(ctype) && !it.ts) Object.assign(it, { ts: 'ARROW', tf: true, tz: [1, 1] });
+          if (/BOTH/.test(ctype) && !it.hs) Object.assign(it, { hs: 'ARROW', hf: true, hz: [1, 1] });
+        }
+        break;
+      }
+      case 'rect': {
+        const pts = ['pt0', 'pt1', 'pt2', 'pt3'].map((k) => kid(el, k));
+        const ratio = numAttr(el, 'ratio', 0);
+        // 꼭짓점이 상자 모서리와 다르면(기울인 사각형) 다각형으로
+        const corners = pts.every(Boolean) ? pts.map(pt) : null;
+        const boxLike = !corners || (Math.abs(corners[0][0]) < 0.5 && Math.abs(corners[0][1]) < 0.5 && Math.abs(corners[2][0] - w) < 0.5 && Math.abs(corners[2][1] - h) < 0.5 && Math.abs(corners[1][1]) < 0.5 && Math.abs(corners[3][0]) < 0.5);
+        if (boxLike) out.push({ k: 'rect', ...base, ...style, ...(ratio > 0 ? { r: Math.min(50, ratio) } : {}) });
+        else out.push({ k: 'poly', ...base, ...style, p: corners!.flat(), z: true });
+        break;
+      }
+      case 'ellipse':
+        out.push({ k: 'ellipse', ...base, ...style });
+        break;
+      case 'arc': {
+        const t = (attr(el, 'type') || 'NORMAL').toUpperCase();
+        out.push({ k: 'arc', ...base, ...style, at: t === 'PIE' || t === 'CHORD' ? t : 'NORMAL', p: [...pt(kid(el, 'center')), ...pt(kid(el, 'ax1')), ...pt(kid(el, 'ax2'))] });
+        break;
+      }
+      case 'polygon': {
+        const p = kids(el, 'pt').map(pt);
+        if (p.length < 2) return;
+        const closed = p.length > 2 && Math.abs(p[0][0] - p[p.length - 1][0]) < 0.01 && Math.abs(p[0][1] - p[p.length - 1][1]) < 0.01;
+        out.push({ k: 'poly', ...base, ...style, p: p.flat(), ...(closed ? { z: true } : {}) });
+        break;
+      }
+      case 'curve': {
+        const segs = kids(el, 'seg');
+        if (!segs.length) return;
+        const p: number[] = [hwpToPx(i32Attr(segs[0], 'x1', 0)), hwpToPx(i32Attr(segs[0], 'y1', 0))];
+        let seg = '';
+        for (const sg of segs) {
+          p.push(hwpToPx(i32Attr(sg, 'x2', 0)), hwpToPx(i32Attr(sg, 'y2', 0)));
+          seg += (attr(sg, 'type') || 'CURVE').toUpperCase() === 'LINE' ? 'L' : 'C';
+        }
+        out.push({ k: 'curve', ...base, ...style, p, seg });
+        break;
+      }
+      case 'textart': {
+        const text = (attr(el, 'text') || '').replace(/\r\n?/g, '\n');
+        if (!text.trim()) return;
+        const pr = kid(el, 'textartPr');
+        out.push({ k: 'art', ...base, text, font: attr(pr, 'fontName') || undefined, fc: style.fc || '#000000', sc: style.sc });
+        return;
+      }
+      default:
+        return;
+    }
+    // 도형 안의 글 (화면 전용: 도형의 개체 좌표 상자에 놓는다)
+    const dt = kid(el, 'drawText');
+    const ps = kids(kid(dt, 'subList'), 'p');
+    if (dt && ps.length && ps.some((p) => kids(p, 'run').some((run) => kids(run).length > 0))) {
+      const tm = kid(dt, 'textMargin');
+      const pad = ['top', 'right', 'bottom', 'left'].map((k) => r2(hwpToPx(numAttr(tm, k, 283))));
+      const content = this.convertParagraphs(ps, { inSub: true, width: w - pad[1] - pad[3] }).map(stripLayout);
+      const va = attr(kid(dt, 'subList'), 'vertAlign');
+      if (content.length) out.push({ k: 'text', m, w, h, content, pad, ...(va === 'CENTER' ? { va: 'middle' as const } : va === 'BOTTOM' ? { va: 'bottom' as const } : {}) });
+    }
+  }
+
+  /** 그리기 개체(묶음 포함) → 도형 노드. 그릴 것이 없으면 null */
+  shapeNode(el: Element, ctx: Ctx): JNode | null {
+    const items: ShapeItem[] = [];
+    try {
+      this.shapeItems(el, items, ctx);
+    } catch {
+      return null;
+    }
+    if (!items.length) return null;
+    const d: ShapeData = { items };
+    if (localName(el) === 'container') {
+      d.group = true;
+      d.raw = shapeMatrix(el).raw;
+    }
+    // 틀 크기: 문서에 놓인 크기(sz). 비율로 적힌 크기는 도형이 차지하는 범위로
+    const sz = kid(el, 'sz');
+    let w = (attr(sz, 'widthRelTo') || 'ABSOLUTE') === 'ABSOLUTE' ? hwpToPx(Math.abs(i32Attr(sz, 'width', 0))) : 0;
+    let h = (attr(sz, 'heightRelTo') || 'ABSOLUTE') === 'ABSOLUTE' ? hwpToPx(Math.abs(i32Attr(sz, 'height', 0))) : 0;
+    if (!(w > 0) || !(h > 0)) {
+      const b = shapeBounds(d);
+      if (!(w > 0)) w = b ? Math.max(1, b.x1) : 1;
+      if (!(h > 0)) h = b ? Math.max(1, b.y1) : 1;
+    }
+    return { type: 'shape', attrs: { width: r2(w), height: r2(h), d } };
+  }
+
   /** 글상자 등 도형 → 글상자 노드 (크기·테두리·배경을 가진 상자 안의 문단) */
   convertShape(shape: Element, floating = false): JNode[] {
     const dt = kid(shape, 'drawText');
@@ -1119,19 +1449,22 @@ export class HwpxConverter {
     const ls = kid(shape, 'lineShape');
     const lineStyle = attr(ls, 'style');
     const borderColor = ls && lineStyle !== 'NONE' && numAttr(ls, 'width', 1) > 0 ? normColor(attr(ls, 'color')) || '#000000' : null;
-    // 선 굵기 단위는 0.01mm
-    const borderWidth = borderColor ? Math.max(0.75, Math.min(8, numAttr(ls, 'width', 12) * 0.0378)) : null;
+    // 선 굵기 단위는 HWPUNIT (33 ≈ 0.12mm). 화면에서 가는 선도 보이게 바닥값을 둔다
+    const borderWidth = borderColor ? Math.max(0.75, Math.min(12, hwpToPx(numAttr(ls, 'width', 33)))) : null;
     const tm = kid(dt, 'textMargin');
     const padding = tm ? ['top', 'right', 'bottom', 'left'].map((k) => Math.round(hwpToPx(numAttr(tm, k, 283)))) : null;
     let radius: string | null = null;
     if (name === 'ellipse') radius = '50%';
     else {
       const ratio = numAttr(shape, 'ratio', 0);
-      if (ratio > 0 && w && h) radius = `${Math.round((Math.min(w, h) * Math.min(50, ratio)) / 200)}px`;
+      if (ratio > 0 && w && h) radius = `${Math.round((Math.min(w, h) * Math.min(50, ratio)) / 100)}px`;
     }
     const ib = kid(fill, 'imgBrush');
     const bgImage = ib ? this.images.get(attr(kid(ib, 'img'), 'binaryItemIDRef') || '') || null : null;
-    const attrs: Record<string, any> = { width: w, height: h, bg, bgImage, borderColor, borderWidth, radius, padding };
+    const grad = kid(fill, 'gradation');
+    const bgGradient = grad ? gradientCss((attr(grad, 'type') || 'LINEAR').toUpperCase() as any, numAttr(grad, 'angle', 0), numAttr(grad, 'centerX', 50), numAttr(grad, 'centerY', 50), kids(grad, 'color').map((c) => attr(c, 'value') || ''), numAttr(grad, 'stepCenter', 50)) : null;
+    const borderDash = borderColor && lineStyle && lineStyle !== 'SOLID' ? lineStyle : null;
+    const attrs: Record<string, any> = { width: w, height: h, bg, bgImage, bgGradient, borderColor, borderWidth, borderDash, radius, padding };
     if (va === 'CENTER') attrs.valign = 'middle';
     else if (va === 'BOTTOM') attrs.valign = 'bottom';
     return [{ type: 'textBox', attrs, content: content.length ? content : [paragraph()] }];

@@ -40,6 +40,7 @@ import { CommentMark } from './extensions/comments';
 import { HwpMetrics } from './extensions/hwpMetrics';
 import { TabFill } from './extensions/tabFill';
 import { Sections } from './extensions/sections';
+import { Shape } from './extensions/shape';
 
 /** 문서 스키마를 구성하는 확장 (편집기 없이 변환에도 사용) */
 export function getExtensions(): AnyExtension[] {
@@ -118,6 +119,7 @@ export function getExtensions(): AnyExtension[] {
     MathInline,
     TextBox,
     TabStop,
+    Shape,
     // 검토: 변경 내용(넣음/지움)과 메모
     Insertion,
     Deletion,

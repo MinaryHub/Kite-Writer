@@ -1,5 +1,40 @@
 import { latexToHwp } from '../math/hwpEq';
 import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type JMark, type JNode, formatNumber, normColor, toRoman } from './common';
+import { cleanShape, type ShapeData } from './shape';
+import type { FloatHw } from './hwpLayout';
+
+/** 떠 있는 개체의 자리 (px). hw 는 한글 문서에서 읽은 자리 값 (저장할 때 그대로 쓴다) */
+export interface FlatFloat {
+  x: number;
+  y: number;
+  behind?: boolean;
+  hw?: FloatHw | null;
+}
+
+/** 문서 노드의 float 속성 → FlatFloat (이상한 값은 null) */
+export function flatFloatOf(v: any): FlatFloat | null {
+  if (!v || typeof v !== 'object') return null;
+  const x = Number(v.x);
+  const y = Number(v.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const out: FlatFloat = { x, y };
+  if (v.behind === true) out.behind = true;
+  const h = v.hw;
+  if (h && typeof h === 'object' && [h.vo, h.ho].every((n: any) => Number.isFinite(+n))) {
+    const pick = (val: any, list: string[], def: string) => (list.includes(val) ? val : def);
+    out.hw = {
+      wrap: pick(h.wrap, ['SQUARE', 'TOP_AND_BOTTOM', 'BEHIND_TEXT', 'IN_FRONT_OF_TEXT'], 'IN_FRONT_OF_TEXT'),
+      vr: pick(h.vr, ['PAPER', 'PAGE', 'PARA'], 'PARA'),
+      hr: pick(h.hr, ['PAPER', 'PAGE', 'COLUMN', 'PARA'], 'COLUMN'),
+      va: pick(h.va, ['TOP', 'CENTER', 'BOTTOM', 'INSIDE', 'OUTSIDE'], 'TOP'),
+      ha: pick(h.ha, ['LEFT', 'CENTER', 'RIGHT', 'INSIDE', 'OUTSIDE'], 'LEFT'),
+      vo: Math.round(+h.vo),
+      ho: Math.round(+h.ho),
+      om: Array.isArray(h.om) && h.om.length === 4 ? h.om.map((n: any) => Math.max(0, Math.min(60000, Math.round(+n) || 0))) : [0, 0, 0, 0],
+    };
+  }
+  return out;
+}
 
 /**
  * 편집기 문서(JSON)를 한글/워드식 "문단 + 표" 구조로 평탄화한다.
@@ -67,7 +102,8 @@ export interface ReviewInfo {
 export type FlatInline =
   | { type: 'text'; text: string; style: CharStyle; link: string | null; tab?: TabInfo | null; review?: ReviewInfo; math?: { latex: string; hwp: string } }
   | { type: 'break' }
-  | { type: 'image'; src: string; width: number | null; height: number | null; style: CharStyle; crop: { t: number; r: number; b: number; l: number } | null }
+  | { type: 'image'; src: string; width: number | null; height: number | null; style: CharStyle; crop: { t: number; r: number; b: number; l: number } | null; float?: FlatFloat | null; rotate?: number | null }
+  | { type: 'shape'; width: number; height: number; d: ShapeData; float: FlatFloat | null; style: CharStyle }
   | { type: 'footnote'; text: string; style: CharStyle };
 
 export interface FlatPara {
@@ -129,6 +165,12 @@ export interface FlatBox {
   padding: number[] | null;
   blocks: FlatBlock[];
   pageBreakBefore: boolean;
+  /** 떠 있는 자리 (x 는 본문 왼쪽, y 는 뒤따르는 문단 상자 위쪽 기준) */
+  float?: FlatFloat | null;
+  /** 테두리 선 종류 (한글 값: DASH, DOT …) */
+  borderDash?: string | null;
+  /** 글의 세로 맞춤 */
+  valign?: 'middle' | 'bottom' | null;
 }
 
 export type FlatBlock = FlatPara | FlatTable | FlatBox;
@@ -464,7 +506,11 @@ function flattenPara(n: JNode, ctx: Ctx, level: number): FlatPara {
     } else if (c.type === 'hardBreak') inlines.push({ type: 'break' });
     else if (c.type === 'image') {
       const { style: cs } = applyMarks(base, c.marks);
-      inlines.push({ type: 'image', src: c.attrs?.src, width: c.attrs?.width || null, height: c.attrs?.height || null, style: cs, crop: c.attrs?.crop || null });
+      const rot = Number(c.attrs?.rotate);
+      inlines.push({ type: 'image', src: c.attrs?.src, width: c.attrs?.width || null, height: c.attrs?.height || null, style: cs, crop: c.attrs?.crop || null, float: flatFloatOf(c.attrs?.float), rotate: Number.isFinite(rot) && rot % 360 ? rot : null });
+    } else if (c.type === 'shape') {
+      const d = cleanShape(c.attrs?.d);
+      if (d) inlines.push({ type: 'shape', width: +c.attrs?.width || 1, height: +c.attrs?.height || 1, d, float: flatFloatOf(c.attrs?.float), style: applyMarks(base, c.marks).style });
     } else if (c.type === 'footnote') {
       inlines.push({ type: 'footnote', text: c.attrs?.text || '', style: applyMarks(base, c.marks).style });
     } else if (c.type === 'math') {
@@ -494,7 +540,15 @@ function flattenBox(n: JNode, ctx: Ctx): FlatBox {
     padding: pad,
     blocks: flattenBlocks(n.content || [], ctx),
     pageBreakBefore: false,
+    float: flatFloatOf(a.float),
+    borderDash: typeof a.borderDash === 'string' && /^[A-Z_]{3,20}$/.test(a.borderDash) ? a.borderDash : null,
+    valign: a.valign === 'middle' || a.valign === 'bottom' ? a.valign : null,
   };
+}
+
+/** 블록 JSON(도형 안의 글 등)을 평탄화한다 */
+export function flattenContent(nodes: JNode[]): FlatBlock[] {
+  return flattenBlocks(nodes, { indent: 0, baseChar: defaultChar(), quote: false, mono: false });
 }
 
 function flattenTable(n: JNode, ctx: Ctx): FlatTable {

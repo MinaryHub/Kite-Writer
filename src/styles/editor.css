@@ -690,6 +690,16 @@
 :is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) p {
   position: relative;
 }
+/* 편집기 밖에서 그리는 한글 문서의 글(머리말·꼬리말·바탕쪽·도형 안의 글)도 문단을 기준으로 개체를 띄운다 */
+.hf-rich p,
+.k-shape-text p,
+.master-page p {
+  position: relative;
+}
+.hf-rich,
+.master-page {
+  isolation: isolate;
+}
 /* 떠 있는 글상자: 높이 없는 자리 표시 안에서 제 위치에 뜬다 (뒤따르는 문단 상자의 위쪽이 기준) */
 .kdoc-content .k-float-anchor {
   position: relative;
@@ -712,6 +722,63 @@
 .kdoc-content .k-float-anchor > .k-float.behind {
   z-index: -1;
 }
+/* ----- 그리기 개체 (선·사각형·타원·다각형·곡선·묶음): 틀 안의 SVG + 도형 안의 글 ----- */
+.kdoc-content .k-shape,
+.print-page .k-shape {
+  display: inline-block;
+  position: relative;
+  line-height: 0;
+  vertical-align: bottom;
+  text-indent: 0;
+  user-select: none;
+}
+.k-shape > svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+}
+/* 화면에서는 가는 선(0.12mm)이 흐려지지 않게 바닥 굵기를 두고, 인쇄에서는 제 굵기로 */
+.kdoc-content .k-shape [style*='--sw'] {
+  stroke-width: max(0.8px, var(--sw));
+}
+.print-page .k-shape [style*='--sw'] {
+  stroke-width: var(--sw);
+}
+.kdoc-content .k-shape.k-float {
+  position: absolute;
+  z-index: 1;
+}
+.kdoc-content .k-shape.ProseMirror-selectednode {
+  outline: 1px dashed #2f6fd6;
+  outline-offset: 2px;
+}
+/* 도형 안의 글: 개체 좌표의 상자를 행렬로 제자리에 놓는다 */
+.k-shape .k-shape-text {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  transform-origin: 0 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  line-height: 1.6;
+  white-space: normal;
+  text-align: left;
+  overflow: visible;
+  pointer-events: none;
+}
+.k-shape .k-shape-text-in > :first-child {
+  margin-top: 0;
+}
+
+/* 글자처럼 취급하는 개체(그림·도형): 한글은 개체를 그 높이만 한 글자처럼 놓는다 — 기준선이 높이의 85% 자리이므로
+   개체의 아래 끝은 기준선보다 높이의 15% 만큼 아래에 온다 (줄에서 가장 큰 개체는 줄 맨 위에서 시작한다) */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(.k-image, .k-shape):not(.k-float) {
+  vertical-align: calc(var(--kh, 0px) * -0.15);
+}
+
 /* 한글이 놓은 줄: 줄 상자의 높이와 기준선을 줄 첫머리의 버팀대가 정한다 (문단 자체의 줄 높이는 0) */
 .kdoc-content .hwp-strut {
   display: inline-block;

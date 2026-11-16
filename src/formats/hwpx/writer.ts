@@ -1,8 +1,13 @@
 import JSZip from 'jszip';
 import type { HeaderFooter, KDocument } from '../../types';
 import { type JNode, mmToHwp, pxToHwp, ptToHwp, xmlEscape, parseBorderCss, normColor, safeIsoDate, FIXED_SPACE } from '../common';
-import { type CharStyle, type FlatBlock, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenDoc, paraKey, type FlatBox } from '../flatten';
+import { type CharStyle, type FlatBlock, type FlatFloat, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, type FlatBox } from '../flatten';
 import { prepareImage } from '../imageUtil';
+import { shapeImageSrcs, shapeXml } from './shapeWriter';
+
+const PT2PX = 96 / 72;
+/** 음수는 한글처럼 부호 없는 32비트로 */
+const u32s = (v: number) => (Math.round(v) >>> 0).toString();
 
 /**
  * HWPX(OWPML) 쓰기. 한글 2014 이상에서 열 수 있는 최소 구성 패키지를 만든다.
@@ -113,6 +118,52 @@ class SectionWriter {
     private bodyWidthHwp: number,
   ) {}
 
+  /**
+   * 개체의 자리 (본문과의 배치, hp:pos, hp:outMargin). 떠 있는 개체는 한글에서 읽은 자리 값(hw)을 그대로 되돌려 쓰고,
+   * 없으면 문단 기준 오프셋으로 쓴다 (paraLeft: 문단 상자 왼쪽, sb: 문단 위 간격 px). 떠 있지 않으면 글자처럼 취급
+   */
+  private place(fl: FlatFloat | null | undefined, paraLeft = 0, sb = 0, inlineAlign = 'LEFT'): { wrap: string; tail: string } {
+    if (!fl) {
+      return {
+        wrap: 'TOP_AND_BOTTOM',
+        tail:
+          `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="${inlineAlign}" vertOffset="0" horzOffset="0"/>` +
+          `<hp:outMargin left="0" right="0" top="0" bottom="0"/>`,
+      };
+    }
+    const hw = fl.hw || {
+      wrap: fl.behind ? 'BEHIND_TEXT' : 'IN_FRONT_OF_TEXT',
+      vr: 'PARA',
+      hr: 'COLUMN',
+      va: 'TOP',
+      ha: 'LEFT',
+      vo: Math.max(0, pxToHwp(fl.y - sb)),
+      ho: pxToHwp(fl.x + paraLeft),
+      om: [0, 0, 0, 0],
+    };
+    const om = hw.om || [0, 0, 0, 0];
+    const overlay = hw.wrap === 'IN_FRONT_OF_TEXT' || hw.wrap === 'BEHIND_TEXT';
+    return {
+      wrap: hw.wrap,
+      tail:
+        `<hp:pos treatAsChar="0" affectLSpacing="0" flowWithText="${overlay ? 0 : 1}" allowOverlap="${overlay ? 1 : 0}" holdAnchorAndSO="0" vertRelTo="${hw.vr}" horzRelTo="${hw.hr}" vertAlign="${hw.va}" horzAlign="${hw.ha}" vertOffset="${u32s(hw.vo)}" horzOffset="${u32s(hw.ho)}"/>` +
+        `<hp:outMargin left="${om[0]}" right="${om[1]}" top="${om[2]}" bottom="${om[3]}"/>`,
+    };
+  }
+
+  /** 그리기 개체 (선·사각형·타원·다각형·곡선·묶음) */
+  private shape(it: Extract<FlatPara['inlines'][number], { type: 'shape' }>, p: FlatPara): string {
+    const pl = this.place(it.float, (p.style.indentLeft + Math.max(0, -p.style.textIndent)) * PT2PX, p.style.spaceBefore * PT2PX);
+    const frame = `<hp:sz width="${pxToHwp(it.width)}" widthRelTo="ABSOLUTE" height="${pxToHwp(it.height)}" heightRelTo="ABSOLUTE" protect="0"/>${pl.tail}`;
+    return shapeXml(it.d, it.width, it.height, pl.wrap, frame, {
+      nextId,
+      zOrder: () => this.zOrder++,
+      image: (src) => this.images.get(src) || null,
+      textXml: (content) => this.blocks(flattenContent(content), true),
+      subList: (inner, va, w, h) => this.subList(inner, va, w, h),
+    });
+  }
+
   paragraph(p: FlatPara, opts: { sub: boolean; first?: boolean; extraRuns?: string }): string {
     const paraId = this.reg.para(p.style);
     const pid = opts.sub ? '2147483648' : '0';
@@ -202,7 +253,11 @@ class SectionWriter {
         const info = this.images.get(it.src);
         ensureRun(this.reg.char(it.style), null);
         closeT();
-        if (info) xml += this.pic(info, it.width, it.height, it.crop);
+        if (info) xml += this.pic(info, it.width, it.height, it.crop, it.float ? this.place(it.float, (p.style.indentLeft + Math.max(0, -p.style.textIndent)) * PT2PX, p.style.spaceBefore * PT2PX) : null, it.rotate || 0);
+      } else if (it.type === 'shape') {
+        ensureRun(this.reg.char(it.style), null);
+        closeT();
+        xml += this.shape(it, p);
       } else if (it.type === 'footnote') {
         ensureRun(this.reg.char(it.style), curLink);
         closeT();
@@ -213,11 +268,12 @@ class SectionWriter {
     return xml;
   }
 
-  private pic(info: { id: string; w: number; h: number }, wPx: number | null, hPx: number | null, crop: { t: number; r: number; b: number; l: number } | null = null): string {
+  private pic(info: { id: string; w: number; h: number }, wPx: number | null, hPx: number | null, crop: { t: number; r: number; b: number; l: number } | null = null, pl: { wrap: string; tail: string } | null = null, rotate = 0): string {
     let w = wPx ? pxToHwp(wPx) : pxToHwp(info.w);
     let h = hPx ? pxToHwp(hPx) : pxToHwp(info.h);
     if (!hPx && wPx) h = Math.round((w * info.h) / Math.max(1, info.w));
-    if (w > this.bodyWidthHwp) {
+    // 떠 있는 그림은 본문 폭을 넘을 수 있다 (종이 기준으로 놓인 배경 그림 등)
+    if (w > this.bodyWidthHwp && !pl) {
       h = Math.round((h * this.bodyWidthHwp) / w);
       w = this.bodyWidthHwp;
     }
@@ -228,17 +284,24 @@ class SectionWriter {
     const sy = (h / Math.max(1, oh * (1 - c.t - c.b))).toFixed(6);
     const clip = `left="${Math.round(ow * c.l)}" right="${Math.round(ow * (1 - c.r))}" top="${Math.round(oh * c.t)}" bottom="${Math.round(oh * (1 - c.b))}"`;
     const id = nextId();
+    const place = pl || this.place(null);
+    // 돌린 그림: 가운데를 중심으로 도는 회전 행렬
+    const rad = (rotate * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const cx = w / 2;
+    const cy = h / 2;
+    const rot = rotate ? `e1="${cos.toFixed(6)}" e2="${(-sin).toFixed(6)}" e3="${(cx - cos * cx + sin * cy).toFixed(3)}" e4="${sin.toFixed(6)}" e5="${cos.toFixed(6)}" e6="${(cy - sin * cx - cos * cy).toFixed(3)}"` : `e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"`;
     return (
-      `<hp:pic id="${id}" zOrder="${this.zOrder++}" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="${id - 1}" reverse="0">` +
+      `<hp:pic id="${id}" zOrder="${this.zOrder++}" numberingType="PICTURE" textWrap="${place.wrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="${id - 1}" reverse="0">` +
       `<hp:offset x="0" y="0"/><hp:orgSz width="${ow}" height="${oh}"/><hp:curSz width="${w}" height="${h}"/>` +
-      `<hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${Math.round(w / 2)}" centerY="${Math.round(h / 2)}" rotateimage="1"/>` +
-      `<hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="${sx}" e2="0" e3="0" e4="0" e5="${sy}" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo>` +
+      `<hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="${Math.round(rotate)}" centerX="${Math.round(w / 2)}" centerY="${Math.round(h / 2)}" rotateimage="1"/>` +
+      `<hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="${sx}" e2="0" e3="0" e4="0" e5="${sy}" e6="0"/><hc:rotMatrix ${rot}/></hp:renderingInfo>` +
       `<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${ow}" y="0"/><hc:pt2 x="${ow}" y="${oh}"/><hc:pt3 x="0" y="${oh}"/></hp:imgRect>` +
       `<hp:imgClip ${clip}/><hp:inMargin left="0" right="0" top="0" bottom="0"/>` +
       `<hp:imgDim dimwidth="${ow}" dimheight="${oh}"/><hc:img binaryItemIDRef="${info.id}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/>` +
       `<hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/>` +
-      `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
-      `<hp:outMargin left="0" right="0" top="0" bottom="0"/></hp:pic>`
+      `${place.tail}</hp:pic>`
     );
   }
 
@@ -278,7 +341,20 @@ class SectionWriter {
     return `<hp:ctrl><hp:footNote number="${n}" suffixChar="41" instId="${nextId()}">${this.subList(inner)}</hp:footNote></hp:ctrl>`;
   }
 
-  table(t: FlatTable, sub: boolean, first = false): string {
+  table(t: FlatTable, sub: boolean, first = false, extraRuns = ''): string {
+    const xml = this.tableXml(t);
+    const pp = defaultPara();
+    // 글자처럼 놓인 표의 줄: 줄 간격이 160% 면 표 아래에 글자 크기의 60% 만큼 빈자리가 더 생긴다
+    if (t.inline) pp.lineHeight = '1';
+    const paraId = this.reg.para(pp);
+    const pid = sub ? '2147483648' : '0';
+    // 문서가 표로 시작하면 구역 정의를 표가 든 문단에 함께 둔다 (따로 빈 문단을 두면 그 줄만큼 본문이 내려간다)
+    const sec = first ? this.secPrRun({ kind: 'para', style: pp, baseChar: defaultChar(), inlines: [], pageBreakBefore: false }) : '';
+    return `<hp:p id="${pid}" paraPrIDRef="${paraId}" styleIDRef="0" pageBreak="${t.pageBreakBefore && !sub ? 1 : 0}" columnBreak="0" merged="0">${sec}${extraRuns}<hp:run charPrIDRef="0">${xml}<hp:t/></hp:run></hp:p>`;
+  }
+
+  /** 표 개체 (hp:tbl). pl 이 있으면 그 자리에 떠 있는 표 */
+  private tableXml(t: FlatTable, pl: { wrap: string; tail: string } | null = null): string {
     const totalPx = t.colWidthsPx.reduce((a, b) => a + b, 0) || 1;
     const scale = Math.min(1, this.bodyWidthHwp / pxToHwp(totalPx));
     const colW = t.colWidthsPx.map((w) => Math.round(pxToHwp(w) * scale));
@@ -287,13 +363,17 @@ class SectionWriter {
     const rowHs = Array.from({ length: t.rows }, (_, i) => (t.rowHeightsPx?.[i] ? Math.max(283, pxToHwp(t.rowHeightsPx[i]!) + 282) : 1000));
     const spanH = (r: number, n: number) => rowHs.slice(r, r + n).reduce((a, b) => a + b, 0);
     const id = nextId();
-    let xml = `<hp:tbl id="${id}" zOrder="${this.zOrder++}" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="1" rowCnt="${t.rows}" colCnt="${t.cols}" cellSpacing="0" borderFillIDRef="3" noAdjust="0">`;
+    let xml = `<hp:tbl id="${id}" zOrder="${this.zOrder++}" numberingType="TABLE" textWrap="${pl ? pl.wrap : 'TOP_AND_BOTTOM'}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="1" rowCnt="${t.rows}" colCnt="${t.cols}" cellSpacing="0" borderFillIDRef="3" noAdjust="0">`;
     xml += `<hp:sz width="${tableW}" widthRelTo="ABSOLUTE" height="${spanH(0, t.rows)}" heightRelTo="ABSOLUTE" protect="0"/>`;
-    xml += `<hp:pos treatAsChar="${t.inline ? 1 : 0}" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="${t.align === 'center' ? 'CENTER' : t.align === 'right' ? 'RIGHT' : 'LEFT'}" vertOffset="0" horzOffset="0"/>`;
     const pad = pxToHwp(t.cellPadPx);
-    // 바깥 여백: 한글에서 읽은 표는 그 값, Kite 에서 만든 표는 화면과 같이 0 (HWP 와 같은 기본값)
-    const om = t.outMarginPx ? t.outMarginPx.map((v) => pxToHwp(v)) : [0, 0, 0, 0];
-    xml += `<hp:outMargin left="${om[0]}" right="${om[1]}" top="${om[2]}" bottom="${om[3]}"/><hp:inMargin left="${pad}" right="${pad}" top="141" bottom="141"/>`;
+    if (pl) xml += pl.tail;
+    else {
+      xml += `<hp:pos treatAsChar="${t.inline ? 1 : 0}" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="${t.align === 'center' ? 'CENTER' : t.align === 'right' ? 'RIGHT' : 'LEFT'}" vertOffset="0" horzOffset="0"/>`;
+      // 바깥 여백: 한글에서 읽은 표는 그 값, Kite 에서 만든 표는 화면과 같이 0 (HWP 와 같은 기본값)
+      const om = t.outMarginPx ? t.outMarginPx.map((v) => pxToHwp(v)) : [0, 0, 0, 0];
+      xml += `<hp:outMargin left="${om[0]}" right="${om[1]}" top="${om[2]}" bottom="${om[3]}"/>`;
+    }
+    xml += `<hp:inMargin left="${pad}" right="${pad}" top="141" bottom="141"/>`;
     for (const row of t.cells) {
       xml += '<hp:tr>';
       for (const cell of row) {
@@ -309,53 +389,87 @@ class SectionWriter {
       xml += '</hp:tr>';
     }
     xml += '</hp:tbl>';
-    const pp = defaultPara();
-    // 글자처럼 놓인 표의 줄: 줄 간격이 160% 면 표 아래에 글자 크기의 60% 만큼 빈자리가 더 생긴다
-    if (t.inline) pp.lineHeight = '1';
-    const paraId = this.reg.para(pp);
-    const pid = sub ? '2147483648' : '0';
-    // 문서가 표로 시작하면 구역 정의를 표가 든 문단에 함께 둔다 (따로 빈 문단을 두면 그 줄만큼 본문이 내려간다)
-    const sec = first ? this.secPrRun({ kind: 'para', style: pp, baseChar: defaultChar(), inlines: [], pageBreakBefore: false }) : '';
-    return `<hp:p id="${pid}" paraPrIDRef="${paraId}" styleIDRef="0" pageBreak="${t.pageBreakBefore && !sub ? 1 : 0}" columnBreak="0" merged="0">${sec}<hp:run charPrIDRef="0">${xml}<hp:t/></hp:run></hp:p>`;
+    return xml;
   }
 
   /** 글상자 → 사각형 도형(hp:rect) 안의 글 */
-  box(b: FlatBox, sub: boolean): string {
+  box(b: FlatBox, sub: boolean, extraRuns = ''): string {
+    const paraId = this.reg.para(defaultPara());
+    return `<hp:p id="${sub ? '2147483648' : '0'}" paraPrIDRef="${paraId}" styleIDRef="0" pageBreak="${b.pageBreakBefore && !sub ? 1 : 0}" columnBreak="0" merged="0">${extraRuns}<hp:run charPrIDRef="0">${this.boxXml(b)}<hp:t/></hp:run></hp:p>`;
+  }
+
+  /** 떠 있는 블록(글상자, 떠 있는 표를 담은 상자)을 뒤따르는 문단에 넣을 run 으로 */
+  private floatRun(b: FlatBox): string {
+    const pl = this.place(b.float);
+    // 선·바탕 없는 상자에 표 하나: 떠 있는 표 (글 앞·글 뒤로 놓인 표)
+    const only = b.blocks.length === 1 ? b.blocks[0] : null;
+    if (only && only.kind === 'table' && !b.borderColor && !b.bg && !b.bgImage) return `<hp:run charPrIDRef="0">${this.tableXml(only, pl)}</hp:run>`;
+    return `<hp:run charPrIDRef="0">${this.boxXml(b, pl)}</hp:run>`;
+  }
+
+  /** 사각형·타원 도형(hp:rect, hp:ellipse) 안의 글. pl 이 있으면 그 자리에 떠 있는 글상자 */
+  private boxXml(b: FlatBox, pl: { wrap: string; tail: string } | null = null): string {
     const W = Math.max(100, pxToHwp(b.width || 300));
     const H = Math.max(100, pxToHwp(b.height || 60));
     const id = nextId();
     const inner = this.blocks(b.blocks, true) || `<hp:p id="2147483648" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"/></hp:p>`;
     const pad = (b.padding || [4, 4, 4, 4]).map((v) => pxToHwp(v));
     const lineAttrs = `endCap="FLAT" headStyle="NORMAL" tailStyle="NORMAL" headfill="1" tailfill="1" headSz="SMALL_SMALL" tailSz="SMALL_SMALL" outlineStyle="NORMAL" alpha="0"`;
+    // 선 굵기는 HWPUNIT (33 ≈ 0.12mm)
     const line = b.borderColor
-      ? `<hp:lineShape color="${b.borderColor}" width="${Math.max(1, Math.round((b.borderWidth || 1) / 0.0378))}" style="SOLID" ${lineAttrs}/>`
+      ? `<hp:lineShape color="${b.borderColor}" width="${Math.max(1, pxToHwp(b.borderWidth && b.borderWidth > 0.8 ? b.borderWidth : 0.44))}" style="${b.borderDash || 'SOLID'}" ${lineAttrs}/>`
       : `<hp:lineShape color="#000000" width="0" style="NONE" ${lineAttrs}/>`;
     const img = b.bgImage ? this.images.get(b.bgImage) : null;
     let fill = '';
-    if (img) fill = `<hp:fillBrush><hc:imgBrush mode="STRETCH"><hc:img binaryItemIDRef="${img.id}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/></hc:imgBrush></hp:fillBrush>`;
-    else if (b.bg) fill = `<hp:fillBrush><hc:winBrush faceColor="${b.bg}" hatchColor="#FF000000" alpha="0"/></hp:fillBrush>`;
-    const ratio = b.radius && b.radius.endsWith('px') && b.width && b.height ? Math.min(50, Math.round((parseFloat(b.radius) * 200) / Math.min(b.width, b.height))) : b.radius === '50%' ? 50 : 0;
-    const xml =
-      `<hp:rect id="${id}" zOrder="${this.zOrder++}" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="${id - 1}" ratio="${ratio}">` +
+    if (img) fill = `<hc:fillBrush><hc:imgBrush mode="TOTAL"><hc:img binaryItemIDRef="${img.id}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/></hc:imgBrush></hc:fillBrush>`;
+    else if (b.bg) fill = `<hc:fillBrush><hc:winBrush faceColor="${b.bg}" hatchColor="#000000" alpha="0"/></hc:fillBrush>`;
+    const ellipse = b.radius === '50%';
+    // 모서리 곡률(%): 50 이 반원
+    const ratio = b.radius && b.radius.endsWith('px') && b.width && b.height ? Math.min(50, Math.round((parseFloat(b.radius) * 100) / Math.min(b.width, b.height))) : 0;
+    const place = pl || this.place(null);
+    const va = b.valign === 'middle' ? 'CENTER' : b.valign === 'bottom' ? 'BOTTOM' : 'TOP';
+    const common =
       `<hp:offset x="0" y="0"/><hp:orgSz width="${W}" height="${H}"/><hp:curSz width="${W}" height="${H}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${Math.round(W / 2)}" centerY="${Math.round(H / 2)}" rotateimage="1"/>` +
       `<hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo>` +
       line +
       fill +
-      `<hp:drawText lastWidth="${W}" name="" editable="0"><hp:textMargin left="${pad[3]}" right="${pad[1]}" top="${pad[0]}" bottom="${pad[2]}"/>${this.subList(inner, 'TOP', Math.max(0, W - pad[1] - pad[3]), Math.max(0, H - pad[0] - pad[2]))}</hp:drawText>` +
-      `<hp:sz width="${W}" widthRelTo="ABSOLUTE" height="${H}" heightRelTo="ABSOLUTE" protect="0"/>` +
-      `<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>` +
-      `<hp:outMargin left="0" right="0" top="0" bottom="0"/><hc:pt0 x="0" y="0"/><hc:pt1 x="${W}" y="0"/><hc:pt2 x="${W}" y="${H}"/><hc:pt3 x="0" y="${H}"/></hp:rect>`;
-    const paraId = this.reg.para(defaultPara());
-    return `<hp:p id="${sub ? '2147483648' : '0'}" paraPrIDRef="${paraId}" styleIDRef="0" pageBreak="${b.pageBreakBefore && !sub ? 1 : 0}" columnBreak="0" merged="0"><hp:run charPrIDRef="0">${xml}<hp:t/></hp:run></hp:p>`;
+      `<hp:shadow type="NONE" color="#B2B2B2" offsetX="0" offsetY="0" alpha="0"/>` +
+      `<hp:drawText lastWidth="${W}" name="" editable="0">${this.subList(inner, va, Math.max(0, W - pad[1] - pad[3]), Math.max(0, H - pad[0] - pad[2]))}<hp:textMargin left="${pad[3]}" right="${pad[1]}" top="${pad[0]}" bottom="${pad[2]}"/></hp:drawText>`;
+    const frame = `<hp:sz width="${W}" widthRelTo="ABSOLUTE" height="${H}" heightRelTo="ABSOLUTE" protect="0"/>${place.tail}`;
+    const head = `id="${id}" zOrder="${this.zOrder++}" numberingType="PICTURE" textWrap="${place.wrap}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="${id - 1}"`;
+    if (ellipse)
+      return (
+        `<hp:ellipse ${head} intervalDirty="0" hasArcPr="0" arcType="NORMAL">${common}` +
+        `<hc:center x="${Math.round(W / 2)}" y="${Math.round(H / 2)}"/><hc:ax1 x="${W}" y="${Math.round(H / 2)}"/><hc:ax2 x="${Math.round(W / 2)}" y="0"/><hc:start1 x="0" y="0"/><hc:end1 x="0" y="0"/><hc:start2 x="0" y="0"/><hc:end2 x="0" y="0"/>${frame}</hp:ellipse>`
+      );
+    return `<hp:rect ${head} ratio="${ratio}">${common}<hc:pt0 x="0" y="0"/><hc:pt1 x="${W}" y="0"/><hc:pt2 x="${W}" y="${H}"/><hc:pt3 x="0" y="${H}"/>${frame}</hp:rect>`;
   }
 
-  blocks(blocks: FlatBlock[], sub: boolean, firstExtra?: (p: FlatPara) => string): string {
+  /**
+   * 블록들을 쓴다. 떠 있는 블록(글상자·떠 있는 표)은 한글처럼 뒤따르는 문단 안의 개체로 넣는다 (따로 문단을 세우면 빈 줄이 생긴다).
+   * first: 첫 문단에 구역 정의를 넣는다 (본문 최상위)
+   */
+  blocks(blocks: FlatBlock[], sub: boolean, first = false): string {
     let xml = '';
-    blocks.forEach((b, i) => {
-      if (b.kind === 'para') xml += this.paragraph(b, { sub, first: !sub && i === 0 && !!firstExtra });
-      else if (b.kind === 'box') xml += this.box(b, sub);
-      else xml += this.table(b, sub);
-    });
+    let pending = '';
+    let begun = false;
+    for (const b of blocks) {
+      if (b.kind === 'box' && b.float) {
+        pending += this.floatRun(b);
+        continue;
+      }
+      const isFirst = first && !begun;
+      begun = true;
+      if (b.kind === 'para') xml += this.paragraph(b, { sub, first: isFirst, extraRuns: pending });
+      else if (b.kind === 'box') {
+        // 문서가 글상자로 시작하면 구역 정의를 담을 빈 문단을 앞에 둔다
+        if (isFirst) xml += this.paragraph({ kind: 'para', style: defaultPara(), baseChar: defaultChar(), inlines: [], pageBreakBefore: false }, { sub, first: true });
+        xml += this.box(b, sub, pending);
+      } else xml += this.table(b, sub, isFirst, pending);
+      pending = '';
+    }
+    // 뒤따르는 문단이 없는 떠 있는 블록: 빈 문단에 담는다
+    if (pending || (first && !begun)) xml += this.paragraph({ kind: 'para', style: defaultPara(), baseChar: defaultChar(), inlines: [], pageBreakBefore: false }, { sub, first: first && !begun, extraRuns: pending });
     return xml;
   }
 
@@ -538,7 +652,14 @@ function headerXml(reg: Registry): string {
 function collectImageSrcs(blocks: FlatBlock[], out: Set<string>) {
   for (const b of blocks) {
     if (b.kind === 'para') {
-      for (const i of b.inlines) if (i.type === 'image' && i.src) out.add(i.src);
+      for (const i of b.inlines) {
+        if (i.type === 'image' && i.src) out.add(i.src);
+        else if (i.type === 'shape') {
+          shapeImageSrcs(i.d, out);
+          // 도형 안 글에 든 그림
+          for (const it of i.d.items) if (it.k === 'text' && it.content) collectImageSrcs(flattenContent(it.content), out);
+        }
+      }
     } else if (b.kind === 'box') {
       if (b.bgImage) out.add(b.bgImage);
       collectImageSrcs(b.blocks, out);
@@ -574,10 +695,6 @@ function richHF(def: HeaderFooter): FlatBlock[] | null {
 
 export async function writeHwpx(doc: KDocument, opts: { pageCount?: number } = {}): Promise<Uint8Array> {
   const blocks = flattenDoc(doc.content as JNode);
-  if (!blocks.length || (blocks[0].kind !== 'para' && blocks[0].kind !== 'table')) {
-    const p: FlatPara = { kind: 'para', style: defaultPara(), baseChar: defaultChar(), inlines: [], pageBreakBefore: false };
-    blocks.unshift(p);
-  }
   const reg = new Registry();
   const pg = doc.settings.page;
   const pageW = pg.landscape ? Math.max(pg.width, pg.height) : pg.width;
@@ -604,12 +721,7 @@ export async function writeHwpx(doc: KDocument, opts: { pageCount?: number } = {
 
   const sw = new SectionWriter(reg, doc, imageInfo, bodyWidthHwp);
   sw.pageCount = opts.pageCount || 1;
-  let body = '';
-  blocks.forEach((b, i) => {
-    if (b.kind === 'para') body += sw.paragraph(b, { sub: false, first: i === 0 });
-    else if (b.kind === 'box') body += sw.box(b, false);
-    else body += sw.table(b, false, i === 0);
-  });
+  const body = sw.blocks(blocks, false, true);
   const section = XML_DECL + `<hs:sec ${NS}>${body}</hs:sec>`;
   const header = headerXml(reg);
 

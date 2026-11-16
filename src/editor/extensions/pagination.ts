@@ -237,7 +237,7 @@ function computeLayout(
   curBreaks: PageBreakInfo[] = [],
   /** 한글 자리에 맞춘 블록의 보정값 (블록 차례 → px): 셈한 배치와 실제 화면의 차이 (run 이 잰다) */
   corr: Map<number, number> | null = null,
-): { breaks: PageBreakInfo[]; result: LayoutResult; cache: LayoutCache; incremental: boolean; fixed: FixedBlock[] } | null {
+): { breaks: PageBreakInfo[]; result: LayoutResult; cache: LayoutCache; incremental: boolean; fixed: FixedBlock[]; tops: number[] } | null {
   const root = view.dom as HTMLElement;
   const s = viewState.zoom || 1;
   // 공간을 숨기면 스크롤이 조정되어 편집기 자체가 움직일 수 있으므로, 전환할 때마다 기준점을 다시 읽는다
@@ -1002,7 +1002,51 @@ function computeLayout(
     commit();
     result.pageSetups = pgs.slice(0, pageCount).map((x) => x.setup);
   }
-  return { breaks, result, cache: { doc, snaps, breaksLen: breaks.length, footnotes, pageStarts, pageCount, lastBottom }, incremental: useCache, fixed };
+  // 쪽마다 본문 맨 위 (편집기 좌표): 쪽·종이 기준으로 놓인 개체를 놓는 데 쓴다
+  const topsOut: number[] = [];
+  for (let k = 0; k < pageCount; k++) topsOut.push(T(k));
+  return { breaks, result, cache: { doc, snaps, breaksLen: breaks.length, footnotes, pageStarts, pageCount, lastBottom }, incremental: useCache, fixed, tops: topsOut };
+}
+
+/**
+ * 쪽·종이 기준으로 놓인 떠 있는 개체(data-py: 쪽 본문 맨 위에서의 세로 자리)를 그 자리에 놓는다. 개체가 달린 문단이 놓인 쪽을
+ * 찾아, 그 쪽 본문 맨 위에서 py 만큼 내려온 곳이 되도록 개체의 top(달린 상자 기준)을 정한다.
+ * 쪽 나누기가 끝난 뒤마다 부른다 (문단이 다른 쪽으로 넘어가면 개체도 그 쪽의 같은 자리로 간다)
+ */
+function placePageFloats(view: EditorView, tops: number[]) {
+  const root = view.dom as HTMLElement;
+  const els = root.querySelectorAll<HTMLElement>('[data-py]');
+  if (!els.length || !tops.length) return;
+  const z = viewState.zoom || 1;
+  const rootTop = root.getBoundingClientRect().top;
+  const obs = (view as any).domObserver;
+  const jobs: [HTMLElement, string][] = [];
+  for (const el of Array.from(els)) {
+    const py = parseFloat(el.getAttribute('data-py') || '');
+    const box = el.offsetParent as HTMLElement | null;
+    if (!Number.isFinite(py) || !box || !root.contains(box)) continue;
+    const boxTop = (box.getBoundingClientRect().top - rootTop) / z;
+    // 높이 없는 자리 표시(떠 있는 글상자)는 뒤따르는 문단의 쪽을 따른다 (쪽 끝에 걸리면 문단은 다음 쪽에 있다)
+    let ref: Element | null = box;
+    if (box.classList.contains('k-float-anchor')) {
+      ref = box.nextElementSibling;
+      while (ref && (ref.classList.contains('pg-spacer') || ref.classList.contains('k-float-anchor'))) ref = ref.nextElementSibling;
+      if (!ref) ref = box;
+    }
+    const refTop = (ref.getBoundingClientRect().top - rootTop) / z;
+    let k = 0;
+    while (k + 1 < tops.length && tops[k + 1] <= refTop + 0.5) k++;
+    const top = (tops[k] + py - boxTop).toFixed(2) + 'px';
+    if (el.style.top !== top) jobs.push([el, top]);
+  }
+  if (!jobs.length) return;
+  // 편집기가 이 스타일 변경을 문서 변경으로 읽지 않게 지켜보기를 잠시 멈춘다
+  obs?.stop();
+  try {
+    for (const [el, top] of jobs) el.style.top = top;
+  } finally {
+    obs?.start();
+  }
 }
 
 export interface PaginationStorage {
@@ -1165,6 +1209,12 @@ export const Pagination = Extension.create<{}, PaginationStorage>({
                 corrRuns++;
                 scheduleFull('snap');
               }
+            }
+            // 쪽·종이 기준으로 놓인 개체를 제 쪽의 제자리에
+            try {
+              placePageFloats(view, out.tops);
+            } catch {
+              /* 화면 배치 보정일 뿐이다 */
             }
             const key = JSON.stringify(out.result);
             storage.result = out.result;

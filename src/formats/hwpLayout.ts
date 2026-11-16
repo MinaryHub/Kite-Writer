@@ -13,7 +13,7 @@ import type { JNode } from './common';
 const PT2PX = 96 / 72;
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
-const INLINE_LEAVES = new Set(['image', 'hardBreak', 'footnote', 'math']);
+const INLINE_LEAVES = new Set(['image', 'hardBreak', 'footnote', 'math', 'shape']);
 const LEAF_BLOCKS = new Set(['pageBreak', 'horizontalRule']);
 function jsonSize(n: JNode): number {
   if (n.type === 'text') return (n.text || '').length;
@@ -56,6 +56,9 @@ export interface ObjPos {
   h: number;
   omT: number;
   omB: number;
+  /** 왼쪽·오른쪽 바깥 여백 (없으면 0) */
+  omL?: number;
+  omR?: number;
 }
 
 /** 용지 크기와 본문 자리 (px) */
@@ -84,10 +87,26 @@ export interface LayoutState {
   seq: number;
 }
 
+/** 한글 문서에 적힌 개체 자리 (저장할 때 그대로 되돌려 쓴다): 본문과의 배치, 세로·가로 기준과 맞춤, 오프셋·바깥 여백(HWPUNIT) */
+export interface FloatHw {
+  wrap: string;
+  vr: string;
+  hr: string;
+  va: string;
+  ha: string;
+  vo: number;
+  ho: number;
+  /** 바깥 여백 [왼, 오른, 위, 아래] */
+  om?: number[];
+}
+
 export interface FloatAt {
   x: number;
   y: number;
   behind?: boolean;
+  hw?: FloatHw;
+  /** 쪽·종이 기준으로 놓인 개체: 쪽 본문 맨 위에서의 세로 자리(px). 쪽 나누기가 끝난 뒤 그 자리에 놓는다 */
+  py?: number;
 }
 
 /** 문단 하나의 배치 셈 */
@@ -102,7 +121,7 @@ export class ParaLayout {
   constructor(
     /** 줄마다 [줄 위쪽, 줄 높이, 줄 아래 간격, 기준선] (px) */
     readonly segV: number[][],
-    private o: { inSub: boolean; width?: number; geom: () => PageGeomPx; hwpPage: boolean; pageBreak: boolean; pp: ParaBox; state: LayoutState },
+    private o: { inSub: boolean; width?: number; geom: () => PageGeomPx; hwpPage: boolean; pageBreak: boolean; pp: ParaBox; state: LayoutState; origin?: { x: number; y: number } },
   ) {
     this.prevEnd = o.hwpPage || o.pageBreak ? 0 : o.state.prevEndV;
     if (!o.inSub && segV.length) {
@@ -133,15 +152,23 @@ export class ParaLayout {
     const sb = pp.spaceBefore * PT2PX;
     const v0 = this.segV.length ? this.segV[0][0] : null;
     const g = this.o.geom();
-    const vRel = inSub ? 'PARA' : p.vRel;
+    // 칸·글상자 안의 개체는 문단 기준으로만 놓인다. 머리말·꼬리말·바탕쪽(origin)은 종이에서의 자리를 알므로 종이·쪽 기준도 된다
+    const origin = this.o.origin;
+    const vRel = inSub && !origin ? 'PARA' : p.vRel;
     let y: number;
-    if (vRel === 'PARA') y = p.wrap === 'TOP_AND_BOTTOM' && this.pushed(p.h, p.omB, p.vOff) ? sb - p.omB - p.h : sb + p.vOff;
+    let py: number | null = null;
+    if (vRel === 'PARA') y = p.wrap === 'TOP_AND_BOTTOM' && this.pushed(p.h, p.omB, p.vOff) ? sb - p.omB - p.h : sb + p.vOff + p.omT;
     else {
-      if (v0 == null) return null;
       const refH = vRel === 'PAPER' ? g.H : g.bodyH;
       const top = vRel === 'PAPER' ? -g.mt : 0;
-      const Y = top + (p.vAl === 'CENTER' ? (refH - p.h) / 2 + p.vOff : p.vAl === 'BOTTOM' ? refH - p.h - p.vOff : p.vOff);
-      y = Y - (v0 - sb);
+      // 바깥 여백: 개체는 여백 상자 안쪽에 놓인다
+      const Y = top + (p.vAl === 'CENTER' ? (refH - p.h) / 2 + p.vOff : p.vAl === 'BOTTOM' ? refH - p.h - p.vOff - p.omB : p.vOff + p.omT);
+      if (origin) y = Y + g.mt - origin.y - ((v0 ?? sb) - sb);
+      else {
+        // 본문: 문단 첫 줄의 쪽 안 위치를 알면 그것으로 어림하고, 쪽 나누기가 끝나면 쪽 기준 자리(py)에 놓는다
+        y = v0 != null ? Y - (v0 - sb) : 0;
+        py = Y;
+      }
     }
     const colW = inSub ? this.o.width ?? 0 : g.bodyW;
     let base = 0;
@@ -149,12 +176,17 @@ export class ParaLayout {
     if (p.hRel === 'PARA') {
       base = pp.indentLeft * PT2PX;
       refW = colW - (pp.indentLeft + pp.indentRight) * PT2PX;
-    } else if (p.hRel === 'PAPER' && !inSub) {
-      base = -g.ml;
+    } else if (p.hRel === 'PAPER' && (!inSub || origin)) {
+      base = -(origin ? origin.x : g.ml);
       refW = g.W;
+    } else if (p.hRel === 'PAGE' && origin) {
+      base = g.ml - origin.x;
+      refW = g.bodyW;
     }
-    const x = base + (!(refW > 0) ? p.hOff : p.hAl === 'CENTER' ? (refW - p.w) / 2 + p.hOff : p.hAl === 'RIGHT' ? refW - p.w - p.hOff : p.hOff);
-    return { x: r2(x), y: r2(y), ...(p.wrap === 'BEHIND_TEXT' ? { behind: true } : {}) };
+    const omL = p.omL || 0;
+    const x = base + (!(refW > 0) ? p.hOff + omL : p.hAl === 'CENTER' ? (refW - p.w) / 2 + p.hOff : p.hAl === 'RIGHT' ? refW - p.w - p.hOff - (p.omR || 0) : p.hOff + omL);
+    const hw: FloatHw = { wrap: p.wrap, vr: p.vRel, hr: p.hRel, va: p.vAl, ha: p.hAl, vo: Math.round(p.vOff * 75), ho: Math.round(p.hOff * 75), om: [p.omL || 0, p.omR || 0, p.omT, p.omB].map((v) => Math.round(v * 75)) };
+    return { x: r2(x), y: r2(y), ...(p.wrap === 'BEHIND_TEXT' ? { behind: true } : {}), ...(py != null ? { py: r2(py) } : {}), hw };
   }
 
   /** 문단 상자의 왼쪽 (CSS margin-left, px): 문단 안에 띄우는 그림의 x 는 이만큼 뺀다 */
