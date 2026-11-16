@@ -643,13 +643,14 @@ function computeLayout(
   };
 
   /** 한글 자리를 따르는 단위: 넘치는지 보지 않고 그대로 둔다 (쪽은 한글이 정했다) */
-  const placeFixed = (top: number, bottom: number, fnH: number, docPos: number) => {
+  const placeFixed = (top: number, bottom: number, fnH: number, docPos: number, trail = 0) => {
     if (!isFinite(top) || !isFinite(bottom)) return;
     markPageStart(docPos);
     if (blockStart < 0) blockStart = page;
     if (fnH > 0) fnUsed += fnH + (fnUsed === 0 ? FN_SEP : 0);
     lastBottom = Math.max(lastBottom, bottom + shift);
-    noteZone(Math.min(bottom + shift, T(page) + CHof(page)));
+    // 단 구분선은 마지막 줄의 글자 아래까지 (줄 아래 간격 trail 은 뺀다)
+    noteZone(Math.min(bottom + shift - trail, T(page) + CHof(page)));
   };
 
   const collectFootnotes = (el: HTMLElement, pos: number) => {
@@ -807,8 +808,10 @@ function computeLayout(
     const boxes = hwpLineBoxes(node, false);
     let jump = false;
     if (boxes && vs && lines && lines.length === vs.length) for (let i = 1; i < vs.length; i++) if (vs[i][0] < vs[i - 1][0] - 0.5) jump = true;
+    /** 마지막 줄 아래의 줄 간격 (단 구분선의 길이에서 뺀다) */
+    const trail = vs && vs.length ? Math.max(0, +vs[vs.length - 1][2] || 0) : 0;
     if (!jump || !boxes || !vs || !lines) {
-      placeFixed(top, bottom, fnTotal, pos);
+      placeFixed(top, bottom, fnTotal, pos, trail);
       pushFootnotes(fns);
       return;
     }
@@ -837,7 +840,7 @@ function computeLayout(
       y += boxes[i].pitch;
     }
     const restFns = fns.filter((f) => f.top >= segTop - 1);
-    placeFixed(segTop, bottom, restFns.reduce((a, f) => a + f.h, 0), pos);
+    placeFixed(segTop, bottom, restFns.reduce((a, f) => a + f.h, 0), pos, trail);
     pushFootnotes(restFns);
     endPara(pos + node.nodeSize);
   };

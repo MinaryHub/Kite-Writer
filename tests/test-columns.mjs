@@ -1,4 +1,4 @@
-// 다단: 다단 정의·단 나누기·다단 설정 나누기를 HWPX/HWP 로 쓰고 다시 읽어 그대로인지 본다.  node tests/test-columns.mjs [다단 표본.hwpx]
+// 다단: 다단 정의·단 나누기·다단 설정 나누기를 HWPX/HWP 로 쓰고 다시 읽어 그대로인지 본다.  node tests/test-columns.mjs [다단 표본.hwpx] [첫 글자 장식이 든 다단 표본.hwpx]
 import fs from 'node:fs';
 import { load } from './harness.mjs';
 const m = await load('tests/formats.entry.ts');
@@ -93,6 +93,14 @@ if (sample && fs.existsSync(sample)) {
   // 다시 쓰고 읽어도 같은 다단
   const again = (await m.readHwpx(await m.writeHwpx(d))).settings.page.columns;
   check('표본: 다시 써도 같은 다단', again && again.count === c.count && (!c.widths || (again.widths && again.widths.every((w, i) => near(w, c.widths[i], 0.3)))), JSON.stringify(again));
+}
+// 5. 어울림으로 놓인 개체(문단 첫 글자 장식) 옆으로 비켜 선 줄: 줄의 가로 시작 자리에서 문단 왼쪽 여백을 뺀 몫이 남는다
+const sample2 = process.argv[3];
+if (sample2 && fs.existsSync(sample2)) {
+  const d = await m.readHwpx(new Uint8Array(fs.readFileSync(sample2)));
+  const shifted = d.content.content.filter((n) => Array.isArray(n.attrs?.hwpLines) && n.attrs.hwpLines.some((l) => l[2] > 0));
+  check('표본2: 개체 옆으로 들어간 줄', shifted.length === 1 && shifted[0].attrs.hwpLines.every((l) => near(l[2], 5050 / 75, 0.5)), JSON.stringify(shifted[0]?.attrs?.hwpLines));
+  check('표본2: 두 단과 구분선', d.settings.page.columns?.count === 2 && !!d.settings.page.columns.line, JSON.stringify(d.settings.page.columns));
 }
 console.log(fail ? `\n실패 ${fail}건` : '\n모두 통과');
 process.exit(fail ? 1 : 0);

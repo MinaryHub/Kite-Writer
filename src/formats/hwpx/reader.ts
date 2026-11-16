@@ -758,7 +758,8 @@ export class HwpxConverter {
     const pageBreak = attr(p, 'pageBreak') === '1' || pp.pageBreakBefore;
     // 한글이 배치해 둔 줄: [줄 첫 글자 위치(textpos), 줄 폭(px)]. 화면에서 같은 자리에서 줄을 바꾸도록 문단에 넘긴다 (hwpMetrics)
     const segEls = kids(kid(p, 'linesegarray'), 'lineseg');
-    const lineSegs: [number, number][] = segEls.map((s) => [numAttr(s, 'textpos', 0), hwpToPx(numAttr(s, 'horzsize', 0))]);
+    // 셋째 값: 줄의 가로 시작 자리(horzpos)에서 문단 왼쪽 여백을 뺀 것 — 어울림으로 놓인 개체를 피해 들어간 몫
+    const lineSegs: [number, number, number][] = segEls.map((s) => [numAttr(s, 'textpos', 0), hwpToPx(numAttr(s, 'horzsize', 0)), hwpToPx(i32Attr(s, 'horzpos', 0)) - pp.indentLeft * PT2PX]);
     /** 한글이 놓은 줄마다의 세로 자리 (px): [줄 위쪽(쪽 본문·칸 안), 줄 높이, 줄 아래 간격, 기준선] */
     const segV: number[][] = segEls.map((s) => ['vertpos', 'vertsize', 'spacing', 'baseline'].map((k) => r2(hwpToPx(i32Attr(s, k, 0)))));
     /** 떠 있는 개체: 문단 앞에 놓는 블록(글상자·표)과 문단 뒤에 놓는 표 */
@@ -1010,7 +1011,7 @@ export class HwpxConverter {
     const one = paras.length === 1 ? paras[0] : null;
     if (one && one.type === 'paragraph' && segV.length && !floating) {
       const a: Record<string, any> = { ...one.attrs, hwpLen: jsonContentSize(one) };
-      if (lineSize && lineSegs.every((s) => track.at.has(s[0]))) a.hwpLines = lineSegs.map((s) => [track.at.get(s[0])!, r2(s[1])]);
+      if (lineSize && lineSegs.every((s) => track.at.has(s[0]))) a.hwpLines = lineSegs.map((s) => (s[2] > 2 ? [track.at.get(s[0])!, r2(s[1]), r2(s[2])] : [track.at.get(s[0])!, r2(s[1])]));
       // 줄 높이·기준선: 줄 자리를 모두 알거나 한 줄뿐인 문단 (빈 문단 포함)
       if (a.hwpLines || segV.length === 1) a.hwpVs = segV;
       one.attrs = a;

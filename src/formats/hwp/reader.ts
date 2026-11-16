@@ -543,8 +543,11 @@ class HwpConverter {
 
     // 한글이 배치해 둔 줄: [줄 첫 글자 위치, 줄 폭(px)]. 화면에서 같은 자리에서 줄을 바꾸도록 문단에 넘긴다 (hwpMetrics)
     const lineRec = p.children.find((c) => c.tag === T.PARA_LINE_SEG);
-    const lineSegs: [number, number][] = [];
-    if (lineRec) for (let o = 0; o + 36 <= lineRec.data.length; o += 36) lineSegs.push([u32(lineRec, o), hwpToPx(i32(lineRec, o + 28))]);
+    // 줄 정보 36바이트: 글자 위치, 세로 위치, 줄 높이, 글자 높이, 기준선, 줄 간격, 가로 시작 자리, 줄 폭, 속성.
+    // 셋째 값: 가로 시작 자리에서 문단 왼쪽 여백을 뺀 것 — 어울림으로 놓인 개체를 피해 들어간 몫
+    const lineSegs: [number, number, number][] = [];
+    const leftPx = (pp?.indentLeft || 0) * (96 / 72);
+    if (lineRec) for (let o = 0; o + 36 <= lineRec.data.length; o += 36) lineSegs.push([u32(lineRec, o), hwpToPx(i32(lineRec, o + 28)), hwpToPx(i32(lineRec, o + 24)) - leftPx]);
     const lineAt = new Map<number, number>();
     /** 한글이 놓은 줄마다의 세로 자리 (px): [줄 위쪽, 줄 높이, 줄 아래 간격, 기준선]. 줄 정보 36바이트: 글자 위치, 세로 위치, 줄 높이, 글자 높이, 기준선, 줄 간격 … */
     const segV: number[][] = [];
@@ -679,7 +682,9 @@ class HwpConverter {
     const floating = blocks.map(takeFloating).some(Boolean);
     // 줄 자리·쪽 안 위치·블록 차례를 달고 떠 있는 블록을 앞뒤에 놓는다 (hwpLayout)
     const lines: [number, number][] | null =
-      lineSize && lineSegs.length && lineSegs.every((s) => lineAt.has(s[0])) ? lineSegs.map((s) => [lineAt.get(s[0])!, Math.round(s[1] * 100) / 100]) : null;
+      lineSize && lineSegs.length && lineSegs.every((s) => lineAt.has(s[0]))
+        ? lineSegs.map((s) => (s[2] > 2 ? [lineAt.get(s[0])!, Math.round(s[1] * 100) / 100, Math.round(s[2] * 100) / 100] : [lineAt.get(s[0])!, Math.round(s[1] * 100) / 100]) as [number, number])
+        : null;
     const seq0 = this.layState.seq;
     const done = lay.finish(blocks, lines, floating);
     const out = placeCaptions(done.blocks, captions);
@@ -1436,7 +1441,7 @@ function fitLinesToCell(content: JNode[], innerPx: number) {
     const lines = p.attrs?.hwpLines as [number, number][] | undefined;
     if (p.type !== 'paragraph' || !lines) continue;
     const max = innerPx - ((+p.attrs!.indentLeft || 0) + (+p.attrs!.indentRight || 0)) * (96 / 72);
-    if (max > 0) p.attrs!.hwpLines = lines.map(([a, lw]) => [a, Math.min(lw, Math.round(max * 100) / 100)]);
+    if (max > 0) p.attrs!.hwpLines = lines.map(([a, lw, x]: number[]) => (x ? [a, Math.min(lw, Math.round(max * 100) / 100), x] : [a, Math.min(lw, Math.round(max * 100) / 100)]));
   }
 }
 

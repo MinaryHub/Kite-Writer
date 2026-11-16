@@ -237,12 +237,16 @@ export function hwpLineBoxes(node: PMNode, lastInBox: boolean): HwpLineBox[] | n
   return out;
 }
 
-/** 줄 첫머리의 버팀대: 줄 상자를 한글의 줄 높이로 만들고 글자 기준선을 한글의 기준선에 놓는다 */
-function lineStartWidget(box: HwpLineBox): () => HTMLElement {
+/**
+ * 줄 첫머리의 버팀대: 줄 상자를 한글의 줄 높이로 만들고 글자 기준선을 한글의 기준선에 놓는다.
+ * x: 줄이 시작하는 가로 자리 (어울림으로 놓인 개체 옆으로 비켜 선 줄: 문단 왼쪽에서 그만큼 들어가 시작한다)
+ */
+function lineStartWidget(box: HwpLineBox, x = 0): () => HTMLElement {
   return () => {
     const strut = document.createElement('span');
     strut.className = 'hwp-strut';
     strut.contentEditable = 'false';
+    if (x > 0) strut.style.marginLeft = x + 'px';
     // 빈 inline-block 의 기준선은 아래 끝: 기준선 아래로 (줄 높이 - 기준선)만큼 내리면 위 끝이 기준선 위 base 에 온다
     strut.style.height = box.pitch + 'px';
     strut.style.verticalAlign = (-(box.pitch - box.base)).toFixed(2) + 'px';
@@ -270,7 +274,9 @@ function lineDecos(node: PMNode, pos: number, pieces: Piece[] | null, out: Decor
     const br = k > 0 && !(before && before.type.name === 'hardBreak');
     // 차례: 줄 바꿈(-3) → 쪽 나누기의 줄 사이 공간(-2) → 줄 버팀대(-1)
     if (br) out.push(Decoration.widget(a, lineBreakWidget, { side: -3, key: 'hwp-lb', ignoreSelection: true }));
-    if (boxes && boxes[k]) out.push(Decoration.widget(a, lineStartWidget(boxes[k]), { side: -1, key: `hwp-ls-${boxes[k].pitch}-${boxes[k].base}`, ignoreSelection: true }));
+    // 줄의 가로 시작 자리 (한글이 개체를 피해 놓은 줄)
+    const x = Math.max(0, Math.min(4000, +(lines[k] as number[])[2] || 0));
+    if (boxes && boxes[k]) out.push(Decoration.widget(a, lineStartWidget(boxes[k], x), { side: -1, key: `hwp-ls-${boxes[k].pitch}-${boxes[k].base}-${x}`, ignoreSelection: true }));
     if (!pieces) continue;
     const ps = pieces.filter((p) => p.from >= a && p.to <= b && !p.hang);
     if (!ps.length) continue;
