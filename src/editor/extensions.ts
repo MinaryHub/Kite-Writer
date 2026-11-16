@@ -1,6 +1,5 @@
 import { getSchema, type AnyExtension } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
-import Underline from '@tiptap/extension-underline';
 import TextStyle from '@tiptap/extension-text-style';
 import Color from '@tiptap/extension-color';
 import FontFamily from '@tiptap/extension-font-family';
@@ -41,6 +40,7 @@ import { HwpMetrics } from './extensions/hwpMetrics';
 import { TabFill } from './extensions/tabFill';
 import { Sections } from './extensions/sections';
 import { Shape } from './extensions/shape';
+import { Compose, KStrike, KUnderline, Ruby } from './extensions/charMarks';
 
 /** 문서 스키마를 구성하는 확장 (편집기 없이 변환에도 사용) */
 export function getExtensions(): AnyExtension[] {
@@ -48,10 +48,15 @@ export function getExtensions(): AnyExtension[] {
     StarterKit.configure({
       bulletList: false,
       orderedList: false,
+      // 취소선은 종류·색을 가진 것으로 바꿔 쓴다 (KStrike)
+      strike: false,
       history: { depth: 1000, newGroupDelay: 600 },
       dropcursor: { color: '#2f6fd6', width: 2 },
     }),
-    Underline,
+    KUnderline,
+    KStrike,
+    Ruby,
+    Compose,
     TextStyle,
     Color,
     // 글꼴 이름은 그대로 저장하고, 화면에는 대체 글꼴 목록을 붙여 그린다

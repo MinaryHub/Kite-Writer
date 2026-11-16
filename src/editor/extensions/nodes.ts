@@ -876,6 +876,18 @@ export const KTable = Table.extend({
           return { 'data-out-margin': JSON.stringify(v), style: st.join('; ') };
         },
       },
+      /**
+       * 쪽 경계에서 표를 나누는 방식 (한글의 표 속성): 없으면 '나눔'(칸 안의 줄 단위로 나눈다), 'row' 는 '셀 단위로 나눔'(줄을 통째로 넘긴다),
+       * 'none' 은 '나누지 않음'(표를 통째로 다음 쪽으로)
+       */
+      pageSplit: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          const v = el.getAttribute('data-page-split');
+          return v === 'row' || v === 'none' ? v : null;
+        },
+        renderHTML: (a: Record<string, any>) => (a.pageSplit === 'row' || a.pageSplit === 'none' ? { 'data-page-split': a.pageSplit } : {}),
+      },
       /** 한글(HWP)에서 이 표가 새 쪽의 맨 위에서 시작했다 (쪽 나누기가 그 자리에서 쪽을 넘긴다). 화면 전용 */
       hwpPage: { default: false, parseHTML: () => false, renderHTML: () => ({}) },
       // 한글이 놓은 자리·차례·그때의 내용 크기 (화면 전용: 쪽 나누기가 쓴다)

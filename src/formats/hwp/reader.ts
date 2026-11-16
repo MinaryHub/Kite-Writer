@@ -28,7 +28,7 @@ import {
   type BorderSide,
   FIXED_SPACE,
 } from '../common';
-import { charMarks, paraAttrs, imgFillFit, langFontsOf, gradientCss, gradientOf, pageBorderOf, type CharPr, type ParaPr, type BorderFill, type Numbering } from '../hwpx/reader';
+import { charMarks, paraAttrs, paraBorderFrom, imgFillFit, langFontsOf, lineColorOf, gradientCss, gradientOf, pageBorderOf, type CharPr, type ParaPr, type BorderFill, type Numbering } from '../hwpx/reader';
 import { type Gradient, type Mat, type ShapeData, type ShapeItem, type ShapeRaw, HWP_ARROW_SIZES, HWP_ARROW_STYLES, HWP_LINE_STYLES, SHADOW_DEFAULT, SHADOW_UNIT_PX, arrowOf, arrowSizeOf, composeMats, matOfHwp, shapeBounds } from '../shape';
 
 /**
@@ -172,6 +172,11 @@ function decompress(data: Uint8Array, compressed: boolean): Uint8Array {
 /** 그림 채우기 방식 번호 → HWPX 이름 */
 const IMG_FILL_MODES = ['TILE', 'TILE_HORZ_TOP', 'TILE_HORZ_BOTTOM', 'TILE_VERT_LEFT', 'TILE_VERT_RIGHT', 'TOTAL', 'CENTER', 'CENTER_TOP', 'CENTER_BOTTOM', 'LEFT_CENTER', 'LEFT_TOP', 'LEFT_BOTTOM', 'RIGHT_CENTER', 'RIGHT_TOP', 'RIGHT_BOTTOM', 'ZOOM'];
 
+/** 글자 모양의 밑줄·취소선 모양 번호 → 이름 (0 실선은 따로 두지 않는다) */
+const LINE_SHAPE_NAMES = ['', 'DASH', 'DOT', 'DASH_DOT', 'DASH_DOT_DOT', 'LONG_DASH', 'CIRCLE', 'DOUBLE_SLIM', 'SLIM_THICK', 'THICK_SLIM', 'SLIM_THICK_SLIM', 'WAVE', 'DOUBLE_WAVE'];
+/** 글자 겹침의 테두리 모양 번호 → 이름 */
+const COMPOSE_SHAPE_NAMES = ['CHAR', 'SHAPE_CIRCLE', 'SHAPE_REVERSAL_CIRCLE', 'SHAPE_RECTANGLE', 'SHAPE_REVERSAL_RECTANGLE', 'SHAPE_TRIANGLE', 'SHAPE_REVERSAL_TIRANGLE', 'SHAPE_LIGHT', 'SHAPE_RHOMBUS', 'SHAPE_REVERSAL_RHOMBUS', 'SHAPE_ROUNDED_RECTANGLE'];
+
 // ---------- DocInfo ----------
 interface DocInfo {
   charPrs: CharPr[];
@@ -286,6 +291,14 @@ function parseDocInfo(recs: Rec[]): DocInfo {
           letterSpacing: spacing || undefined,
           fontWidth: ratio && ratio !== 100 ? ratio : undefined,
           textEffect: effect,
+          // 밑줄 모양(bit 4~7)·색, 취소선 모양(bit 26~29)·색, 강조점(bit 21~24), 글자 위치(언어별 1바이트, 한글 것)
+          ulShape: LINE_SHAPE_NAMES[(attr >>> 4) & 0xf] || null,
+          ulColor: lineColorOf(colorRefToHex(u32(r, 56)), colorRefToHex(color)),
+          ulPos: ulType === 3 ? 'top' : null,
+          stShape: LINE_SHAPE_NAMES[(attr >>> 26) & 0xf] || null,
+          stColor: r.data.length >= 74 ? lineColorOf(colorRefToHex(u32(r, 70)), colorRefToHex(color)) : null,
+          emphasis: ['', 'DOT_ABOVE', 'RING_ABOVE', 'CARON', 'TILDE', 'SIDE', 'COLON'][(attr >>> 21) & 0xf] || null,
+          offset: i8(r, 35) || undefined,
         });
         break;
       }
@@ -324,6 +337,8 @@ function parseDocInfo(recs: Rec[]): DocInfo {
           headingLevel: (a1 >>> 25) & 7,
           pageBreakBefore: false,
           bg: bfId ? info.borderFills[bfId - 1]?.bg || null : null,
+          // 문단 테두리: 테두리/배경 번호 뒤에 글과의 간격(왼·오른·위·아래, 각 2바이트), 속성1 bit 28 이어진 문단과 연결
+          border: paraBorderFrom(bfId ? info.borderFills[bfId - 1] : undefined, [34, 36, 38, 40].map((o) => r.dv.getInt16(o, true)), ((a1 >>> 28) & 1) === 1),
           // 속성1 bit 7: 줄 나눔 기준 한글 단위 (0 어절, 1 글자)
           breakChar: ((a1 >>> 7) & 1) === 1,
         });
@@ -689,6 +704,28 @@ class HwpConverter {
         this.linkHref = cmd.split(';')[0].replace(/\\:/g, ':') || null;
         return [];
       }
+      case 'tdut': {
+        // 덧말: 본말, 덧말, 위치(0 위, 1 아래) …
+        const main = wstr(ctrl, 4);
+        const sub = wstr(ctrl, main.end);
+        const marks = charMarks(this.charPr(shapeId), this.linkHref);
+        if (sub.s) marks.push({ type: 'ruby', attrs: { text: sub.s, pos: u32(ctrl, sub.end) === 1 ? 'bottom' : 'top' } });
+        const t = textNode(main.s || sub.s, marks);
+        if (t) inline.push(t);
+        return [];
+      }
+      case 'tcps': {
+        // 글자 겹침: 겹칠 글자, 테두리 모양(1), 안 글자 크기(1), 펼침(1), 글자 모양 수(1)와 번호들
+        const text = wstr(ctrl, 4);
+        if (!text.s) return [];
+        const shape = COMPOSE_SHAPE_NAMES[u8(ctrl, text.end)] || 'SHAPE_CIRCLE';
+        const n = u8(ctrl, text.end + 3);
+        const cid = n > 0 && ctrl.data.length >= text.end + 8 ? u32(ctrl, text.end + 4) : 0xffffffff;
+        const cp = cid !== 0xffffffff && this.info.charPrs[cid] ? this.info.charPrs[cid] : this.charPr(shapeId);
+        const t = textNode(text.s, [...charMarks(cp, this.linkHref), { type: 'compose', attrs: { shape } }]);
+        if (t) inline.push(t);
+        return [];
+      }
       case 'eqed': {
         const eq = ctrl.children.find((c) => c.tag === T.EQEDIT);
         const script = eq ? wstr(eq, 4).s : '';
@@ -894,6 +931,12 @@ class HwpConverter {
     solveSpanRows(rowH, spans, VM);
     const t = assembleTable(cells, nRowsDecl, nColsDecl, hwpToPx(u32(ctrl, 16)), rowH);
     if (tbl) t.attrs = { cellPadding: Math.round(hwpToPx((u16(tbl, 10) + u16(tbl, 12)) / 2) * 10) / 10 };
+    // 쪽 경계에서 나눔 (표 속성 bit 0~1): 0 나누지 않음, 1 셀 단위로 나눔(줄을 통째로 넘김), 2 나눔
+    if (tbl) {
+      const brk = u32(tbl, 0) & 3;
+      if (brk === 1) t.attrs = { ...t.attrs, pageSplit: 'row' };
+      else if (brk === 0) t.attrs = { ...t.attrs, pageSplit: 'none' };
+    }
     // 글자처럼 취급(개체 속성 bit 0): 쪽에서 나뉘지 않고 문단 정렬을 따른다. 저장할 때 되돌린다
     const objAttr = u32(ctrl, 4);
     if (objAttr & 1) t.attrs = { ...t.attrs, inline: true };

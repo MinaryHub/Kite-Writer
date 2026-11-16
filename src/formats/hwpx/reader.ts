@@ -8,6 +8,8 @@ import {
   type JMark,
   type JNode,
   parseBorderCss,
+  paraBorderSides,
+  type ParaBorder,
   attr,
   bytesToDataUrl,
   defaultSettings,
@@ -57,6 +59,23 @@ export interface CharPr {
   textEffect?: string | null;
   /** 한글 글꼴과 다른 언어별 글꼴 (영문·한자·기호) */
   langFonts?: LangFonts;
+  /** 밑줄: 선 종류(실선이 아닐 때), 색(검정·글자 색이 아닐 때), 위치(top: 글자 위) */
+  ulShape?: string | null;
+  ulColor?: string | null;
+  ulPos?: 'top' | null;
+  /** 취소선: 선 종류, 색 */
+  stShape?: string | null;
+  stColor?: string | null;
+  /** 강조점 (DOT_ABOVE, RING_ABOVE …) */
+  emphasis?: string | null;
+  /** 글자 위치 (%: 양수면 아래로) */
+  offset?: number;
+}
+
+/** 줄(밑줄·취소선)의 색: 검정이거나 글자 색과 같으면 따로 두지 않는다 */
+export function lineColorOf(c: string | null | undefined, textColor: string | null | undefined): string | null {
+  const v = normColor(c);
+  return v && v !== '#000000' && v !== (normColor(textColor) || '#000000') ? v : null;
 }
 
 export type LangFonts = { en?: string; hanja?: string; sym?: string };
@@ -85,6 +104,8 @@ export interface ParaPr {
   bg?: string | null;
   /** 한글 줄 나눔 단위가 글자 (기본은 어절) */
   breakChar?: boolean;
+  /** 문단 테두리 */
+  border?: ParaBorder | null;
 }
 
 export interface BorderFill {
@@ -273,6 +294,13 @@ export function parseHeader(doc: Document): HeaderInfo {
       letterSpacing: spacing || undefined,
       fontWidth: ratio !== 100 ? ratio : undefined,
       textEffect: effect,
+      ulShape: ul && attr(ul, 'shape') && attr(ul, 'shape') !== 'SOLID' ? attr(ul, 'shape') : null,
+      ulColor: lineColorOf(attr(ul, 'color'), attr(cp, 'textColor')),
+      ulPos: attr(ul, 'type') === 'TOP' ? 'top' : null,
+      stShape: stShape && stShape !== 'SOLID' && stShape !== 'NONE' && stShape !== '3D' ? stShape : null,
+      stColor: lineColorOf(attr(st, 'color'), attr(cp, 'textColor')),
+      emphasis: attr(cp, 'symMark') && attr(cp, 'symMark') !== 'NONE' ? attr(cp, 'symMark') : null,
+      offset: numAttr(kid(cp, 'offset'), 'hangul', 0) || undefined,
     });
   }
 
@@ -320,6 +348,7 @@ export function parseHeader(doc: Document): HeaderInfo {
       headingLevel: numAttr(heading, 'level', 0),
       pageBreakBefore: attr(brk, 'pageBreakBefore') === '1',
       bg: bfId ? info.borderFills.get(bfId)?.bg || null : null,
+      border: paraBorderFrom(bfId ? info.borderFills.get(bfId) : undefined, ['offsetLeft', 'offsetRight', 'offsetTop', 'offsetBottom'].map((k) => numAttr(border, k, 0)), attr(border, 'connect') === '1'),
       // 이름과 달리 한글은 KEEP_WORD 를 '글자' 단위(한글 기본값), BREAK_WORD 를 '어절' 단위로 쓴다
       // (한글이 저장한 줄 위치 lineseg 로 확인: KEEP_WORD 문단은 낱말 중간에서 줄이 바뀐다)
       breakChar: (attr(brk, 'breakNonLatinWord') || 'KEEP_WORD') === 'KEEP_WORD',
@@ -357,11 +386,20 @@ export function charMarks(cp: CharPr | undefined, link?: string | null, highligh
   if (cp.fontWidth) ts.fontWidth = cp.fontWidth;
   if (cp.textEffect) ts.textEffect = cp.textEffect;
   if (cp.langFonts) ts.langFonts = cp.langFonts;
+  if (cp.emphasis) ts.emphasis = cp.emphasis;
+  if (cp.offset) ts.offset = cp.offset;
   if (Object.keys(ts).length) marks.push({ type: 'textStyle', attrs: ts });
   if (cp.bold) marks.push({ type: 'bold' });
   if (cp.italic) marks.push({ type: 'italic' });
-  if (cp.underline) marks.push({ type: 'underline' });
-  if (cp.strike) marks.push({ type: 'strike' });
+  const lineAttrs = (shape?: string | null, color?: string | null, pos?: string | null) => {
+    const a: Record<string, any> = {};
+    if (shape) a.shape = shape;
+    if (color) a.color = color;
+    if (pos) a.pos = pos;
+    return Object.keys(a).length ? { attrs: a } : {};
+  };
+  if (cp.underline) marks.push({ type: 'underline', ...lineAttrs(cp.ulShape, cp.ulColor, cp.ulPos) });
+  if (cp.strike) marks.push({ type: 'strike', ...lineAttrs(cp.stShape, cp.stColor) });
   if (cp.sup) marks.push({ type: 'superscript' });
   else if (cp.sub) marks.push({ type: 'subscript' });
   const hl = highlightOverride || cp.highlight;
@@ -370,9 +408,20 @@ export function charMarks(cp: CharPr | undefined, link?: string | null, highligh
   return marks;
 }
 
+/** 문단 테두리: 테두리/배경 정의에 선이 있을 때. offsets 는 글과의 간격(HWPUNIT: 왼·오른·위·아래) */
+export function paraBorderFrom(bf: BorderFill | undefined, offsets: number[], connect: boolean): ParaBorder | null {
+  if (!bf || bf.noBorders.length >= 4) return null;
+  const pb = paraBorderSides(bf.noBorders, bf.css);
+  const o = offsets.map((v) => Math.round(hwpToPx(v) * 100) / 100);
+  if (o.some((v) => v)) pb.o = o;
+  if (connect) pb.c = true;
+  return pb;
+}
+
 export function paraAttrs(pp: ParaPr | undefined): Record<string, any> {
   if (!pp) return {};
   const a: Record<string, any> = {};
+  if (pp.border) a.paraBorder = pp.border;
   if (pp.align && pp.align !== 'justify') a.textAlign = pp.align;
   if (pp.lineHeight) a.lineHeight = pp.lineHeight;
   if (pp.indentLeft) a.indentLeft = round(pp.indentLeft);
@@ -869,8 +918,20 @@ export class HwpxConverter {
               this.addCaption(child, captions, fp, before);
             } else if (name === 'fieldBegin' || name === 'fieldEnd') {
               this.handleField(child);
-            } else if (name === 'compose' || name === 'dutmal') {
-              const t = textNode(child.textContent || '', charMarks(cp, this.linkHref));
+            } else if (name === 'dutmal') {
+              // 덧말: 본말 위(아래)에 작은 글
+              const sub = kid(child, 'subText')?.textContent || '';
+              const main = kid(child, 'mainText')?.textContent || '';
+              const marks = charMarks(cp, this.linkHref);
+              if (sub) marks.push({ type: 'ruby', attrs: { text: sub, pos: attr(child, 'posType') === 'BOTTOM' ? 'bottom' : 'top' } });
+              const t = textNode(main || sub, marks);
+              if (t) inline.push(t);
+            } else if (name === 'compose') {
+              // 글자 겹침: 글자들을 한 글자 자리에 겹쳐 쓰고 원·네모 등으로 두른다 (글자 모양은 첫 글자의 것)
+              const text = attr(child, 'composeText') || child.textContent || '';
+              const cid = attr(kid(child, 'charPr'), 'prIDRef');
+              const ccp = cid && this.h.charPrs.get(cid) ? this.h.charPrs.get(cid) : cp;
+              const t = textNode(text, [...charMarks(ccp, this.linkHref), { type: 'compose', attrs: { shape: attr(child, 'circleType') || 'SHAPE_CIRCLE' } }]);
               if (t) inline.push(t);
             }
         }
@@ -1669,6 +1730,10 @@ export class HwpxConverter {
     const inM = kid(tbl, 'inMargin');
     const tAttrs: Record<string, any> = {};
     if (inM) tAttrs.cellPadding = Math.round(hwpToPx((numAttr(inM, 'left', 510) + numAttr(inM, 'right', 510)) / 2) * 10) / 10;
+    // 쪽 경계에서 나눔: 한글은 '나눔'을 CELL 로, '셀 단위로 나눔'(줄을 통째로 넘김)을 TABLE 로 적는다 (한글의 미리 보기 그림으로 확인)
+    const pbk = (attr(tbl, 'pageBreak') || 'CELL').toUpperCase();
+    if (pbk === 'TABLE') tAttrs.pageSplit = 'row';
+    else if (pbk === 'NONE') tAttrs.pageSplit = 'none';
     const pos = kid(tbl, 'pos');
     if (attr(pos, 'treatAsChar') === '1') tAttrs.inline = true;
     const outM = kid(tbl, 'outMargin');

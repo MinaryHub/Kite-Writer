@@ -1,5 +1,5 @@
 import { latexToHwp } from '../math/hwpEq';
-import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type JMark, type JNode, formatNumber, normColor, toRoman } from './common';
+import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type JMark, type JNode, type ParaBorder, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
 import { cleanShape, type ShapeData } from './shape';
 import type { FloatHw } from './hwpLayout';
 
@@ -57,6 +57,15 @@ export interface CharStyle {
   effect: string | null;
   /** 한글 글꼴과 다른 언어별 글꼴 (한글 문서에서 온 것): 영문·한자·기호 */
   langFonts?: { en?: string; hanja?: string; sym?: string } | null;
+  /** 밑줄의 선 종류(한글 이름)·색·위치(top: 글자 위), 취소선의 선 종류·색 */
+  ulShape?: string | null;
+  ulColor?: string | null;
+  ulPos?: 'top' | null;
+  stShape?: string | null;
+  stColor?: string | null;
+  /** 강조점 (한글 이름), 글자 위치 (%) */
+  emphasis?: string | null;
+  offset?: number | null;
 }
 
 /** 언어 7개(한글·영문·한자·일어·기타·기호·사용자)의 글꼴 번호. font 는 글꼴 이름 → 번호 */
@@ -81,6 +90,8 @@ export interface ParaStyle {
   heading: number; // 0 = 본문
   /** 한글 줄 나눔 단위가 글자 */
   breakChar: boolean;
+  /** 문단 테두리 */
+  border?: ParaBorder | null;
 }
 
 /** 탭 하나의 정보 (한글 문서의 탭은 폭·채움·종류를 가진다) */
@@ -100,7 +111,7 @@ export interface ReviewInfo {
 }
 
 export type FlatInline =
-  | { type: 'text'; text: string; style: CharStyle; link: string | null; tab?: TabInfo | null; review?: ReviewInfo; math?: { latex: string; hwp: string } }
+  | { type: 'text'; text: string; style: CharStyle; link: string | null; tab?: TabInfo | null; review?: ReviewInfo; math?: { latex: string; hwp: string }; ruby?: { text: string; pos: string } | null; compose?: string | null }
   | { type: 'break' }
   | { type: 'image'; src: string; width: number | null; height: number | null; style: CharStyle; crop: { t: number; r: number; b: number; l: number } | null; float?: FlatFloat | null; rotate?: number | null }
   | { type: 'shape'; width: number; height: number; d: ShapeData; float: FlatFloat | null; style: CharStyle }
@@ -148,6 +159,8 @@ export interface FlatTable {
   inline?: boolean;
   /** 줄 높이 (px, 최소 높이). 없으면 null */
   rowHeightsPx: (number | null)[];
+  /** 쪽 경계에서 나누는 방식: 없으면 나눔, row 셀 단위로 나눔, none 나누지 않음 */
+  pageSplit?: 'row' | 'none' | null;
 }
 
 /** 글상자 (도형 안의 문단들) */
@@ -235,19 +248,28 @@ export function cleanMargins(v: any): number[] | null {
 }
 
 export function charKey(c: CharStyle): string {
-  return [c.font, c.size, c.color, +c.bold, +c.italic, +c.underline, +c.strike, +c.sup, +c.sub, c.highlight, c.letterSpacing, c.fontWidth, c.effect, c.langFonts ? JSON.stringify(c.langFonts) : ''].join('|');
+  return [c.font, c.size, c.color, +c.bold, +c.italic, +c.underline, +c.strike, +c.sup, +c.sub, c.highlight, c.letterSpacing, c.fontWidth, c.effect, c.langFonts ? JSON.stringify(c.langFonts) : '', c.ulShape || '', c.ulColor || '', c.ulPos || '', c.stShape || '', c.stColor || '', c.emphasis || '', c.offset || ''].join('|');
 }
 
 export function paraKey(p: ParaStyle): string {
-  return [p.align, p.indentLeft, p.indentRight, p.textIndent, p.spaceBefore, p.spaceAfter, p.lineHeight, p.bg, +p.borderBottom, +p.breakChar].join('|');
+  return [p.align, p.indentLeft, p.indentRight, p.textIndent, p.spaceBefore, p.spaceAfter, p.lineHeight, p.bg, +p.borderBottom, +p.breakChar, p.border ? JSON.stringify(p.border) : ''].join('|');
 }
 
-function applyMarks(base: CharStyle, marks: JMark[] | undefined): { style: CharStyle; link: string | null; tab: TabInfo | null } {
+function applyMarks(base: CharStyle, marks: JMark[] | undefined): { style: CharStyle; link: string | null; tab: TabInfo | null; ruby: { text: string; pos: string } | null; compose: string | null } {
   const s = { ...base };
   let link: string | null = null;
   let tab: TabInfo | null = null;
+  let ruby: { text: string; pos: string } | null = null;
+  let compose: string | null = null;
+  const shapeOf = (v: unknown) => (typeof v === 'string' && /^[A-Z_]{3,20}$/.test(v) && v !== 'SOLID' ? v : null);
   for (const m of marks || []) {
     switch (m.type) {
+      case 'ruby':
+        if (m.attrs?.text) ruby = { text: String(m.attrs.text).slice(0, 200), pos: m.attrs.pos === 'bottom' ? 'bottom' : 'top' };
+        break;
+      case 'compose':
+        compose = typeof m.attrs?.shape === 'string' && /^[A-Z_]{3,40}$/.test(m.attrs.shape) ? m.attrs.shape : 'SHAPE_CIRCLE';
+        break;
       case 'tab':
         tab = { width: m.attrs?.width ? +m.attrs.width : null, leader: +(m.attrs?.leader || 0), type: +(m.attrs?.type || 0) };
         break;
@@ -259,9 +281,14 @@ function applyMarks(base: CharStyle, marks: JMark[] | undefined): { style: CharS
         break;
       case 'underline':
         s.underline = true;
+        s.ulShape = shapeOf(m.attrs?.shape);
+        s.ulColor = normColor(m.attrs?.color);
+        s.ulPos = m.attrs?.pos === 'top' ? 'top' : null;
         break;
       case 'strike':
         s.strike = true;
+        s.stShape = shapeOf(m.attrs?.shape);
+        s.stColor = normColor(m.attrs?.color);
         break;
       case 'superscript':
         s.sup = true;
@@ -296,11 +323,13 @@ function applyMarks(base: CharStyle, marks: JMark[] | undefined): { style: CharS
         if (a.letterSpacing) s.letterSpacing = +a.letterSpacing;
         if (a.fontWidth) s.fontWidth = +a.fontWidth;
         if (a.textEffect) s.effect = a.textEffect;
+        if (typeof a.emphasis === 'string' && /^[A-Z_]{3,20}$/.test(a.emphasis)) s.emphasis = a.emphasis;
+        if (Number.isFinite(+a.offset) && +a.offset) s.offset = Math.max(-100, Math.min(100, Math.round(+a.offset)));
         break;
       }
     }
   }
-  return { style: s, link, tab };
+  return { style: s, link, tab, ruby, compose };
 }
 
 /** 글자의 변경 내용·메모 표시 */
@@ -482,6 +511,7 @@ function flattenPara(n: JNode, ctx: Ctx, level: number): FlatPara {
   style.spaceBefore = a.spaceBefore || 0;
   style.spaceAfter = a.spaceAfter || 0;
   style.bg = normColor(a.paraBg);
+  style.border = cleanParaBorder(a.paraBorder);
   style.heading = level;
   style.breakChar = !!a.breakChar;
   const base: CharStyle = { ...ctx.baseChar };
@@ -497,12 +527,12 @@ function flattenPara(n: JNode, ctx: Ctx, level: number): FlatPara {
   const inlines: FlatInline[] = [];
   for (const c of n.content || []) {
     if (c.type === 'text') {
-      const { style: cs, link, tab } = applyMarks(base, c.marks);
+      const { style: cs, link, tab, ruby, compose } = applyMarks(base, c.marks);
       const review = reviewOf(c.marks);
       const prev = inlines[inlines.length - 1];
-      // 탭 정보가 붙은 글자는 따로 둔다 (탭 하나짜리 텍스트)
-      if (!tab && prev && prev.type === 'text' && !prev.tab && !prev.math && charKey(prev.style) === charKey(cs) && prev.link === link && reviewKey(prev.review) === reviewKey(review)) prev.text += c.text || '';
-      else inlines.push({ type: 'text', text: c.text || '', style: cs, link, tab, ...(review ? { review } : {}) });
+      // 탭 정보가 붙은 글자는 따로 둔다 (탭 하나짜리 텍스트). 덧말·글자 겹침이 붙은 글자도 따로
+      if (!tab && !ruby && !compose && prev && prev.type === 'text' && !prev.tab && !prev.math && !prev.ruby && !prev.compose && charKey(prev.style) === charKey(cs) && prev.link === link && reviewKey(prev.review) === reviewKey(review)) prev.text += c.text || '';
+      else inlines.push({ type: 'text', text: c.text || '', style: cs, link, tab, ...(review ? { review } : {}), ...(ruby ? { ruby } : {}), ...(compose ? { compose } : {}) });
     } else if (c.type === 'hardBreak') inlines.push({ type: 'break' });
     else if (c.type === 'image') {
       const { style: cs } = applyMarks(base, c.marks);
@@ -610,5 +640,5 @@ function flattenTable(n: JNode, ctx: Ctx): FlatTable {
   for (const row of cells) for (const cell of row) if (!cell.widthPx) cell.widthPx = colWidthsPx.slice(cell.col, cell.col + cell.colspan).reduce((a, b) => a + b, 0);
   const cellPadPx = n.attrs?.cellPadding != null ? +n.attrs.cellPadding : 6.8;
   const rowHeightsPx = rowsJ.map((r) => ((r.attrs?.height ?? 0) > 0 ? +r.attrs!.height : null));
-  return { kind: 'table', rows: rowsJ.length, cols: maxCols, colWidthsPx, cells, pageBreakBefore: false, align: n.attrs?.align || 'left', cellPadPx, rowHeightsPx, outMarginPx: cleanMargins(n.attrs?.outMargin), inline: n.attrs?.inline === true };
+  return { kind: 'table', rows: rowsJ.length, cols: maxCols, colWidthsPx, cells, pageBreakBefore: false, align: n.attrs?.align || 'left', cellPadPx, rowHeightsPx, outMarginPx: cleanMargins(n.attrs?.outMargin), inline: n.attrs?.inline === true, pageSplit: n.attrs?.pageSplit === 'row' || n.attrs?.pageSplit === 'none' ? n.attrs.pageSplit : null };
 }

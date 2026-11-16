@@ -112,7 +112,7 @@ function piecesFor(node: PMNode, pos: number, parent: PMNode, cuts: number[]): P
     if (n === 'textStyle') ts = m.attrs;
     else if (n === 'bold') bold = true;
     else if (n === 'italic') italic = true;
-    else if (n === 'superscript' || n === 'subscript' || n === 'tab') return null;
+    else if (n === 'superscript' || n === 'subscript' || n === 'tab' || n === 'compose') return null;
   }
   // 제목 문단처럼 글자 크기를 문단 모양이 정하는 경우는 잴 수 없으므로 건드리지 않는다
   const sizePt = +(ts?.fontSize || parent.attrs?.fontSize || (parent.type.name === 'heading' ? 0 : DEFAULT_FONT_SIZE));

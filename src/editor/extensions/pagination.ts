@@ -808,6 +808,13 @@ function computeLayout(
       pushFootnotes(fns);
       return;
     }
+    // '나누지 않음'인 표: 한 쪽에 들어가는 크기면 통째로 다음 쪽으로 넘긴다
+    const split = node.attrs?.pageSplit;
+    if (split === 'none' && bottom - top <= CHof(p) - fnTotal - (fnTotal ? FN_SEP : 0)) {
+      place(top, bottom, fnTotal, () => pos, 'block', pos);
+      pushFootnotes(fns);
+      return;
+    }
     const rows: { pos: number; el: HTMLElement }[] = [];
     node.forEach((row, offset) => {
       const rp = pos + 1 + offset;
@@ -828,8 +835,10 @@ function computeLayout(
       tableHead = headN && i >= headN && headH > 0 && headH < CHof(page) / 3 ? { table: pos, h: headH } : null;
       const uBottom = i === rows.length - 1 ? bottom : rel(rr.bottom);
       // 한글 기본(셀 단위 나눔)처럼, 넘치는 줄은 셀 내용을 쪽 경계에서 나눈다 (짧은 줄은 통째로 넘김)
+      // '셀 단위로 나눔'인 표는 줄을 쪼개지 않고 통째로 넘긴다 (한 쪽보다 긴 줄만 어쩔 수 없이 나눈다)
       const pp = pageAtY(uTop + shift + 0.5, page);
-      if (uBottom + shift > T(pp) + CHof(pp) + 0.5 && uBottom - uTop > 60) {
+      const whole = (split === 'row' || split === 'none') && uBottom - uTop <= CHof(pp) - (tableHead ? tableHead.h : 0);
+      if (!whole && uBottom + shift > T(pp) + CHof(pp) + 0.5 && uBottom - uTop > 60) {
         const rowNode = node.child(i);
         splitRow(rowNode, row.pos, uTop, uBottom);
         return;
@@ -838,8 +847,11 @@ function computeLayout(
       const fnH = rowFns.reduce((a, f) => a + f.h, 0);
       const nb = breaks.length;
       const pg0 = page;
+      const shift0 = shift;
       if (i === 0) place(uTop, uBottom, fnH, () => pos, 'block', pos);
       else place(uTop, uBottom, fnH, () => row.pos, 'row', row.pos);
+      // 줄이 통째로 다음 쪽으로 넘어갔으면 앞 쪽에서는 표를 그 자리에서 닫는다 (넘긴 줄의 세로선이 빈자리까지 이어지지 않게)
+      if (i > 0 && breaks.length > nb && page > pg0) breaks[breaks.length - 1].cut = { table: pos, page: pg0, y: Math.round((uTop + shift0 - T(pg0)) * 100) / 100 };
       // 이 줄이 다음 쪽으로 넘어갔으면 그 쪽 맨 위에 제목 줄 자리를 비운다
       if (tableHead && breaks.length > nb && page > pg0) {
         const b = breaks[breaks.length - 1];

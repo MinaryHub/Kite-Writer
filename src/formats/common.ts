@@ -643,3 +643,55 @@ export function hwpxBorderStyle(type: string): BorderSide['s'] {
   if (/DOUBLE|THICK|THIN/.test(type) && type !== 'SOLID') return 'double';
   return 'solid';
 }
+
+// ---------- 문단 테두리 ----------
+/** 문단 테두리: 변마다 '굵기mm 종류 색'(없는 변은 그리지 않는다), 글과의 간격(px: 왼·오른·위·아래), 이어진 문단과 한 상자로 */
+export interface ParaBorder {
+  l?: string;
+  r?: string;
+  t?: string;
+  b?: string;
+  o?: number[];
+  c?: boolean;
+}
+
+const PB_SIDE = /^([\d.]+)mm (solid|dashed|dotted|double) (#[0-9A-Fa-f]{6})$/;
+
+/** 문단 테두리 값 검사 (문서·붙여넣기에서 온 값): 그릴 변이 없으면 null */
+export function cleanParaBorder(v: any): ParaBorder | null {
+  if (!v || typeof v !== 'object') return null;
+  const out: ParaBorder = {};
+  for (const k of ['l', 'r', 't', 'b'] as const) {
+    const m = typeof v[k] === 'string' ? PB_SIDE.exec(v[k].trim()) : null;
+    if (m) out[k] = `${Math.max(0.1, Math.min(10, parseFloat(m[1])))}mm ${m[2]} ${m[3].toUpperCase()}`;
+  }
+  if (!out.l && !out.r && !out.t && !out.b) return null;
+  if (Array.isArray(v.o) && v.o.length === 4 && v.o.every((x: any) => Number.isFinite(+x))) {
+    const o = v.o.map((x: any) => Math.max(-50, Math.min(200, Math.round(+x * 100) / 100)));
+    if (o.some((x: number) => x)) out.o = o;
+  }
+  if (v.c) out.c = true;
+  return out;
+}
+
+/** 테두리/배경 정의의 선 → 문단 테두리의 변 값들 (noBorders: 선이 없는 변, css: 기본과 다른 선) */
+export function paraBorderSides(noBorders: string[], css: string | null | undefined): ParaBorder {
+  const det = parseBorderCss(css);
+  const out: ParaBorder = {};
+  for (const k of ['l', 'r', 't', 'b'] as const) {
+    if (noBorders.includes(k)) continue;
+    const d = det[k];
+    out[k] = d ? `${Math.max(0.1, d.w)}mm ${d.s} ${d.c}` : '0.12mm solid #000000';
+  }
+  return out;
+}
+
+/** 문단 테두리의 변 값들 → 테두리/배경 정의의 선 (없는 변 목록과 선 값) */
+export function paraBorderToFill(pb: ParaBorder): { noBorders: string[]; css: string } {
+  const noBorders = (['l', 'r', 't', 'b'] as const).filter((k) => !pb[k]);
+  const css = (['t', 'b', 'l', 'r'] as const)
+    .filter((k) => pb[k])
+    .map((k) => `${k}:${pb[k]}`)
+    .join(';');
+  return { noBorders, css };
+}

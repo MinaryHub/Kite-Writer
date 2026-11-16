@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 import type { HeaderFooter, KDocument } from '../../types';
-import { type JNode, mmToHwp, pxToHwp, ptToHwp, xmlEscape, parseBorderCss, normColor, safeIsoDate, FIXED_SPACE } from '../common';
+import { type JNode, mmToHwp, pxToHwp, ptToHwp, xmlEscape, parseBorderCss, paraBorderToFill, normColor, safeIsoDate, FIXED_SPACE } from '../common';
 import { type CharStyle, type FlatBlock, type FlatFloat, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, type FlatBox } from '../flatten';
 import { prepareImage } from '../imageUtil';
 import { shapeImageSrcs, shapeXml } from './shapeWriter';
@@ -90,7 +90,10 @@ class Registry {
     let id = this.paraIds.get(k);
     if (id === undefined) {
       let bfId = 2;
-      if (p.bg || p.borderBottom)
+      if (p.border) {
+        const f = paraBorderToFill(p.border);
+        bfId = this.borderFill({ bg: p.bg, noBorders: f.noBorders, borders: f.noBorders.length < 4, css: f.css });
+      } else if (p.bg || p.borderBottom)
         bfId = this.borderFill({ bg: p.bg, noBorders: p.borderBottom ? ['l', 'r', 't'] : ['l', 'r', 't', 'b'], borders: p.borderBottom });
       id = this.paras.length;
       this.paras.push({ ...p, bfId });
@@ -227,6 +230,17 @@ class SectionWriter {
         ensureRun(this.reg.char({ ...it.style, italic: false }), it.link);
         closeT();
         xml += this.equation(it.math.hwp, it.style.size || 10, it.style.color || '#000000');
+      } else if (it.type === 'text' && it.ruby) {
+        // 덧말: 본말 위(아래)의 작은 글
+        ensureRun(this.reg.char(it.style), it.link);
+        closeT();
+        xml += `<hp:dutmal posType="${it.ruby.pos === 'bottom' ? 'BOTTOM' : 'TOP'}" szRatio="0" option="0" styleIDRef="0" align="CENTER"><hp:mainText>${xmlEscape(it.text)}</hp:mainText><hp:subText>${xmlEscape(it.ruby.text)}</hp:subText></hp:dutmal>`;
+      } else if (it.type === 'text' && it.compose) {
+        // 글자 겹침: 겹칠 글자와 테두리 모양, 글자 모양 (열 칸 가운데 첫 칸만 쓴다)
+        const cid = this.reg.char(it.style);
+        ensureRun(cid, it.link);
+        closeT();
+        xml += `<hp:compose circleType="${it.compose}" charSz="-3" composeType="SPREAD" charPrCnt="10" composeText="${xmlEscape(it.text)}"><hp:charPr prIDRef="${cid}"/>${'<hp:charPr prIDRef="4294967295"/>'.repeat(9)}</hp:compose>`;
       } else if (it.type === 'text') {
         ensureRun(this.reg.char(it.style), it.link);
         openT();
@@ -365,7 +379,7 @@ class SectionWriter {
     const rowHs = Array.from({ length: t.rows }, (_, i) => (t.rowHeightsPx?.[i] ? Math.max(283, pxToHwp(t.rowHeightsPx[i]!) + 282) : 1000));
     const spanH = (r: number, n: number) => rowHs.slice(r, r + n).reduce((a, b) => a + b, 0);
     const id = nextId();
-    let xml = `<hp:tbl id="${id}" zOrder="${this.zOrder++}" numberingType="TABLE" textWrap="${pl ? pl.wrap : 'TOP_AND_BOTTOM'}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="1" rowCnt="${t.rows}" colCnt="${t.cols}" cellSpacing="0" borderFillIDRef="3" noAdjust="0">`;
+    let xml = `<hp:tbl id="${id}" zOrder="${this.zOrder++}" numberingType="TABLE" textWrap="${pl ? pl.wrap : 'TOP_AND_BOTTOM'}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="${t.pageSplit === 'row' ? 'TABLE' : t.pageSplit === 'none' ? 'NONE' : 'CELL'}" repeatHeader="1" rowCnt="${t.rows}" colCnt="${t.cols}" cellSpacing="0" borderFillIDRef="3" noAdjust="0">`;
     xml += `<hp:sz width="${tableW}" widthRelTo="ABSOLUTE" height="${spanH(0, t.rows)}" heightRelTo="ABSOLUTE" protect="0"/>`;
     const pad = pxToHwp(t.cellPadPx);
     if (pl) xml += pl.tail;
@@ -615,12 +629,15 @@ function headerXml(reg: Registry): string {
   const charXml = reg.chars
     .map((c, i) => {
       const ids = langFontIds(c, (n) => reg.font(n));
-      let x = `<hh:charPr id="${i}" height="${ptToHwp(c.size)}" textColor="${normColor(c.color) || '#000000'}" shadeColor="${normColor(c.highlight) || 'none'}" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="2">`;
-      x += `<hh:fontRef ${LANG_ATTRS.map((l, k) => `${l}="${ids[k]}"`).join(' ')}/><hh:ratio ${langAttrs(c.fontWidth || 100)}/><hh:spacing ${langAttrs(Math.max(-50, Math.min(50, Math.round(c.letterSpacing || 0))))}/><hh:relSz ${langAttrs(100)}/><hh:offset ${langAttrs(0)}/>`;
+      const sym = c.emphasis && /^[A-Z_]{3,20}$/.test(c.emphasis) ? c.emphasis : 'NONE';
+      let x = `<hh:charPr id="${i}" height="${ptToHwp(c.size)}" textColor="${normColor(c.color) || '#000000'}" shadeColor="${normColor(c.highlight) || 'none'}" useFontSpace="0" useKerning="0" symMark="${sym}" borderFillIDRef="2">`;
+      x += `<hh:fontRef ${LANG_ATTRS.map((l, k) => `${l}="${ids[k]}"`).join(' ')}/><hh:ratio ${langAttrs(c.fontWidth || 100)}/><hh:spacing ${langAttrs(Math.max(-50, Math.min(50, Math.round(c.letterSpacing || 0))))}/><hh:relSz ${langAttrs(100)}/><hh:offset ${langAttrs(Math.max(-100, Math.min(100, Math.round(c.offset || 0))))}/>`;
       if (c.italic) x += '<hh:italic/>';
       if (c.bold) x += '<hh:bold/>';
-      x += `<hh:underline type="${c.underline ? 'BOTTOM' : 'NONE'}" shape="SOLID" color="#000000"/>`;
-      x += `<hh:strikeout shape="${c.strike ? 'SOLID' : 'NONE'}" color="#000000"/>`;
+      // 밑줄·취소선: 선 종류와 색 (색이 없으면 글자 색)
+      const lineShape = (v: string | null | undefined) => (v && /^[A-Z_]{3,20}$/.test(v) ? v : 'SOLID');
+      x += `<hh:underline type="${c.underline ? (c.ulPos === 'top' ? 'TOP' : 'BOTTOM') : 'NONE'}" shape="${lineShape(c.ulShape)}" color="${normColor(c.ulColor) || (c.underline ? normColor(c.color) : null) || '#000000'}"/>`;
+      x += `<hh:strikeout shape="${c.strike ? lineShape(c.stShape) : 'NONE'}" color="${normColor(c.stColor) || (c.strike ? normColor(c.color) : null) || '#000000'}"/>`;
       x += `<hh:outline type="${c.effect === 'outline' ? 'SOLID' : 'NONE'}"/>`;
       x += `<hh:shadow type="${c.effect === 'shadow' ? 'DROP' : 'NONE'}" color="#B2B2B2" offsetX="10" offsetY="10"/>`;
       if (c.effect === 'emboss') x += '<hh:emboss/>';
@@ -649,7 +666,7 @@ function headerXml(reg: Registry): string {
         `<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="${p.breakChar ? 'KEEP_WORD' : 'BREAK_WORD'}" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/>` +
         `<hh:autoSpacing eAsianEng="0" eAsianNum="0"/>` +
         `<hp:switch><hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">${margin(1)}${spacing}</hp:case><hp:default>${margin(2)}${spacing}</hp:default></hp:switch>` +
-        `<hh:border borderFillIDRef="${p.bfId}" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>`
+        `<hh:border borderFillIDRef="${p.bfId}" offsetLeft="${pxToHwp(p.border?.o?.[0] || 0)}" offsetRight="${pxToHwp(p.border?.o?.[1] || 0)}" offsetTop="${pxToHwp(p.border?.o?.[2] || 0)}" offsetBottom="${pxToHwp(p.border?.o?.[3] || 0)}" connect="${p.border?.c ? 1 : 0}" ignoreMargin="0"/></hh:paraPr>`
       );
     })
     .join('');
