@@ -1535,6 +1535,9 @@ export class HwpxConverter {
     const rowH: number[] = [];
     /** 여러 줄을 합친 칸: 첫 줄, 줄 수, 칸 높이(HWPUNIT). 낱칸이 없는 줄의 높이를 여기서 거꾸로 셈한다 */
     const spans: { row: number; rs: number; h: number; need: number; last: JNode | null }[] = [];
+    /** 표의 기본 안 여백 [왼, 오른, 위, 아래] (HWPUNIT) */
+    const inM0 = kid(tbl, 'inMargin');
+    const tblMargin = inM0 ? ['left', 'right', 'top', 'bottom'].map((k) => numAttr(inM0, k, k === 'top' || k === 'bottom' ? 141 : 510)) : [510, 510, 141, 141];
     kids(tbl, 'tr').forEach((tr, ri) => {
       kids(tr, 'tc').forEach((tc, ci) => {
         const addr = kid(tc, 'cellAddr');
@@ -1549,8 +1552,11 @@ export class HwpxConverter {
         if (rs === 1) rowH[row] = Math.max(rowH[row] || 0, hwpToPx(numAttr(sz, 'height', 0) - CELL_VMARGIN_HWP));
         else spans.push({ row, rs, h: numAttr(sz, 'height', 0), need: 0, last: null });
         const bf = this.h.borderFills.get(attr(tc, 'borderFillIDRef') || '');
-        const cmw = kid(tc, 'cellMargin');
-        let content = this.convertParagraphs(kids(sub, 'p'), { inSub: true, width: w - hwpToPx(numAttr(cmw, 'left', 510) + numAttr(cmw, 'right', 510)) });
+        // 칸의 안 여백: '칸 여백 지정'(hasMargin)이 켜진 칸만 제 값을 쓰고, 아니면 표의 기본 안 여백을 쓴다
+        const cmEl = kid(tc, 'cellMargin');
+        const ownMargin = attr(tc, 'hasMargin') === '1' && !!cmEl;
+        const cmv = ownMargin ? ['left', 'right', 'top', 'bottom'].map((k) => numAttr(cmEl, k, 0)) : tblMargin;
+        let content = this.convertParagraphs(kids(sub, 'p'), { inSub: true, width: w - hwpToPx(cmv[0] + cmv[1]) });
         content = content.filter((n) => n.type !== 'pageBreak');
         if (!content.length) content = [paragraph()];
         // 적힌 칸 높이가 글(마지막 줄의 글자 높이까지)보다 작으면 한글은 칸 높이를 내용으로 새로 셈하고, 그때는 마지막 줄 간격과
@@ -1558,9 +1564,11 @@ export class HwpxConverter {
         {
           const lastP = content[content.length - 1];
           const vs = lastP.type === 'paragraph' ? (lastP.attrs?.hwpVs as number[][] | undefined) : undefined;
-          if (vs && vs.length) {
+          // 빈 문단 하나뿐인 칸(색 띠로 쓰는 낮은 칸 등)은 줄 높이만큼만 차지한다 (한글의 미리 보기 그림으로 확인)
+          const emptyOnly = content.length === 1 && lastP.type === 'paragraph' && !(lastP.content || []).length;
+          if (vs && vs.length && !emptyOnly) {
             const l = vs[vs.length - 1];
-            const vm = hwpToPx(numAttr(cmw, 'top', 141) + numAttr(cmw, 'bottom', 141));
+            const vm = hwpToPx(cmv[2] + cmv[3]);
             const textOnly = l[0] + l[1] + vm;
             if (hwpToPx(numAttr(sz, 'height', 0)) < textOnly - 1) {
               lastP.attrs = { ...lastP.attrs, hwpTrail: true };
@@ -1584,8 +1592,8 @@ export class HwpxConverter {
         if (bf?.css) attrs.borderCss = bf.css;
         if (va === 'TOP') attrs.verticalAlign = 'top';
         else if (va === 'BOTTOM') attrs.verticalAlign = 'bottom';
-        const cm = kid(tc, 'cellMargin');
-        if (attr(tc, 'hasMargin') === '1' && cm) attrs.margins = ['left', 'right', 'top', 'bottom'].map((k) => Math.round(hwpToPx(numAttr(cm, k, 0)) * 10) / 10);
+        // 칸 자체 여백, 또는 표의 기본 안 여백이 위·아래 0.5mm 가 아닐 때 (화면의 기본 위·아래 여백은 0.5mm)
+        if (ownMargin || Math.abs(tblMargin[2] - 141) > 2 || Math.abs(tblMargin[3] - 141) > 2) attrs.margins = cmv.map((v) => Math.round(hwpToPx(v) * 10) / 10);
         // 제목 칸이고 표가 제목 줄을 되풀이하면 제목 칸으로 (쪽이 바뀌면 되풀이된다)
         const head = attr(tbl, 'repeatHeader') === '1' && attr(tc, 'header') === '1';
         cells.push({ row, col, cs, rs, w, node: { type: head ? 'tableHeader' : 'tableCell', attrs, content } });

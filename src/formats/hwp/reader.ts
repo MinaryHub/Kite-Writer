@@ -840,8 +840,11 @@ class HwpConverter {
       if (rs === 1) rowH[row] = Math.max(rowH[row] || 0, hwpToPx(u32(lh, 20) - CELL_VMARGIN_HWP));
       const bfId = u16(lh, 32);
       const bf = bfId ? this.info.borderFills[bfId - 1] : undefined;
-      const cellVm = hwpToPx(u16(lh, 28) + u16(lh, 30));
-      let content = this.convertParagraphs(cur.paras, true, null, w - hwpToPx(u16(lh, 24) + u16(lh, 26))).filter((n) => n.type !== 'pageBreak');
+      // 칸의 안 여백: '칸 여백 지정'(속성 뒤 2바이트의 bit 0)이 켜진 칸만 제 값을 쓰고, 아니면 표의 기본 안 여백을 쓴다
+      const ownMargin = (u16(lh, 6) & 1) === 1;
+      const cmv = ownMargin || !tbl ? [u16(lh, 24), u16(lh, 26), u16(lh, 28), u16(lh, 30)] : [u16(tbl, 10), u16(tbl, 12), u16(tbl, 14), u16(tbl, 16)];
+      const cellVm = hwpToPx(cmv[2] + cmv[3]);
+      let content = this.convertParagraphs(cur.paras, true, null, w - hwpToPx(cmv[0] + cmv[1])).filter((n) => n.type !== 'pageBreak');
       if (!content.length) content = [paragraph()];
       // 적힌 칸 높이가 글보다 작으면 한글은 칸 높이를 내용으로 새로 셈한다 (마지막 줄 간격·문단 아래 간격 포함)
       const need = markCellTrail(content, hwpToPx(u32(lh, 20)), cellVm);
@@ -855,7 +858,8 @@ class HwpConverter {
       const fillSrc = bf?.img ? this.images.get(+bf.img.id) : null;
       if (fillSrc && bf?.img) attrs.bgImages = [{ src: fillSrc, fit: imgFillFit(bf.img.mode) }];
       // 칸 자체 안 여백 (속성 뒤 2바이트의 bit 0 이 켜진 칸만; 아니면 표의 기본 여백)
-      if (u16(lh, 6) & 1) attrs.margins = [u16(lh, 24), u16(lh, 26), u16(lh, 28), u16(lh, 30)].map((v) => Math.round(hwpToPx(v) * 10) / 10);
+      // (표의 기본 안 여백이 위·아래 0.5mm 가 아닐 때도 넣는다: 화면의 기본 위·아래 여백은 0.5mm)
+      if (ownMargin || Math.abs(cmv[2] - 141) > 2 || Math.abs(cmv[3] - 141) > 2) attrs.margins = cmv.map((v) => Math.round(hwpToPx(v) * 10) / 10);
       if (va === 0) attrs.verticalAlign = 'top';
       else if (va === 2) attrs.verticalAlign = 'bottom';
       // 제목 칸(속성 뒤 2바이트의 bit 2)이고 표가 '제목 줄 자동 반복'(표 속성 bit 2)이면 제목 칸으로: 쪽이 바뀌면 되풀이된다

@@ -297,6 +297,8 @@ export function markCellTrail(content: JNode[], cellHeightPx: number, vMarginPx:
   const lastP = content[content.length - 1];
   const vs = lastP && lastP.type === 'paragraph' ? (lastP.attrs?.hwpVs as number[][] | undefined) : undefined;
   if (!vs || !vs.length) return 0;
+  // 빈 문단 하나뿐인 칸(색 띠로 쓰는 낮은 칸 등)은 줄 높이만큼만 차지한다
+  if (content.length === 1 && !(lastP.content || []).length) return 0;
   const l = vs[vs.length - 1];
   const textOnly = l[0] + l[1] + vMarginPx;
   if (cellHeightPx >= textOnly - 1) return 0;

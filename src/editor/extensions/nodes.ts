@@ -634,7 +634,10 @@ const cellAttrs = {
         .split(';')
         .map((p: string) => {
           const [k, v] = p.split(':');
-          return names[k] && v ? `border-${names[k]}: ${v}` : '';
+          if (!names[k] || !v) return '';
+          // 이중선: 한글은 두 줄이 보이게 그린다 (적힌 굵기의 두 배 남짓). 화면에서 3px 는 되어야 두 줄로 보인다
+          const m = /^([\d.]+)mm double (#[0-9A-Fa-f]{6})$/.exec(v.trim());
+          return m ? `border-${names[k]}: max(3px, ${Math.round(parseFloat(m[1]) * 240) / 100}mm) double ${m[2]}` : `border-${names[k]}: ${v}`;
         })
         .filter(Boolean)
         .join('; ');
