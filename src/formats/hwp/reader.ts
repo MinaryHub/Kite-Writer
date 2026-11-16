@@ -2,7 +2,7 @@ import { ParaLayout, estimateMissingLines, gapInBox, jsonContentSize, markCellTr
 import { hwpToLatex } from '../../math/hwpEq';
 import * as CFB from 'cfb';
 import { Inflate } from 'pako';
-import type { LoadedDoc, PageSetup } from '../../types';
+import type { DocSettings, LoadedDoc, PageSetup } from '../../types';
 import {
   type JNode,
   applyNumFormat,
@@ -28,7 +28,7 @@ import {
   type BorderSide,
   FIXED_SPACE,
 } from '../common';
-import { charMarks, paraAttrs, imgFillFit, langFontsOf, gradientCss, gradientOf, type CharPr, type ParaPr, type BorderFill, type Numbering } from '../hwpx/reader';
+import { charMarks, paraAttrs, imgFillFit, langFontsOf, gradientCss, gradientOf, pageBorderOf, type CharPr, type ParaPr, type BorderFill, type Numbering } from '../hwpx/reader';
 import { type Gradient, type Mat, type ShapeData, type ShapeItem, type ShapeRaw, HWP_ARROW_SIZES, HWP_ARROW_STYLES, HWP_LINE_STYLES, SHADOW_DEFAULT, SHADOW_UNIT_PX, arrowOf, arrowSizeOf, composeMats, matOfHwp, shapeBounds } from '../shape';
 
 /**
@@ -56,6 +56,7 @@ const T = {
   CTRL_HEADER: 71,
   LIST_HEADER: 72,
   PAGE_DEF: 73,
+  PAGE_BORDER_FILL: 75,
   SHAPE_COMPONENT: 76,
   TABLE: 77,
   SHAPE_COMPONENT_LINE: 78,
@@ -728,11 +729,58 @@ class HwpConverter {
     pg.gutter = round(hwpToMm(u32(pd, 32)), 1);
     pg.landscape = (u32(pd, 36) & 1) === 1;
     // 첫 구역의 용지가 문서 용지, 다음 구역부터는 구역 나누기에 담는다 (readHwp)
+    const firstSec = !this.settingsSet;
     if (!this.settingsSet) {
       this.settingsSet = true;
       this.settings.page = pg;
     }
     if (!this.sectionPage) this.sectionPage = pg;
+    if (!firstSec) return;
+    // 구역 속성: bit 2 첫 쪽에 바탕쪽 감춤, 3 테두리 감춤, 4 배경 감춤, 8 첫 쪽에만 테두리, 9 첫 쪽에만 배경
+    const sp = u32(ctrl, 4);
+    // 쪽 테두리/배경 (양쪽·짝수·홀수 차례로 세 개: 양쪽 것을 쓴다). 속성: bit 0 위치 기준, 1 머리말 포함, 2 꼬리말 포함, 3~4 채울 영역
+    const pbf = ctrl.children.find((c) => c.tag === T.PAGE_BORDER_FILL);
+    if (pbf && pbf.data.length >= 14) {
+      const a = u32(pbf, 0);
+      const bf = this.info.borderFills[u16(pbf, 12) - 1];
+      const image = bf?.img ? this.images.get(+bf.img.id) || null : null;
+      const pb = pageBorderOf(bf, {
+        paperBasis: (a & 1) === 1,
+        offsetHwp: [u16(pbf, 4), u16(pbf, 6), u16(pbf, 8), u16(pbf, 10)],
+        headerInside: !!(a & 2),
+        footerInside: !!(a & 4),
+        fillArea: ['PAPER', 'PAGE', 'BORDER'][(a >>> 3) & 3] || 'PAPER',
+        image: image && /^data:image\//.test(image) ? image : null,
+      });
+      if (pb) {
+        if (sp & (1 << 8)) pb.borderOn = 'first';
+        else if (sp & (1 << 3)) pb.borderOn = 'notFirst';
+        if (sp & (1 << 9)) pb.fillOn = 'first';
+        else if (sp & (1 << 4)) pb.fillOn = 'notFirst';
+        this.settings.pageBorder = pb;
+      }
+    }
+    if (sp & (1 << 2)) this.settings.hideFirst = { ...this.settings.hideFirst, masterPage: true };
+    // 바탕쪽: 구역 정의 아래의 문단 목록들 (양쪽·짝수·홀수 차례)
+    const masters: NonNullable<DocSettings['masterPages']> = [];
+    let cur: Rec[] | null = null;
+    const lists: Rec[][] = [];
+    for (const c of ctrl.children) {
+      if (c.tag === T.LIST_HEADER) lists.push((cur = []));
+      else if (c.tag === T.PARA_HEADER && cur) cur.push(c);
+    }
+    const g = this.pageGeom();
+    lists.slice(0, 3).forEach((paras, i) => {
+      if (!paras.some((p) => paraHasContent(p))) return;
+      this.inHF = true;
+      try {
+        const content = this.convertParagraphs(paras, true, undefined, g.bodyW, { x: g.ml, y: g.mt }).map(stripLayoutAttrs);
+        if (content.length) masters.push({ content: content as any, type: (['both', 'even', 'odd'] as const)[i] });
+      } finally {
+        this.inHF = false;
+      }
+    });
+    if (masters.length) this.settings.masterPages = masters;
   }
 
   /** 머리말/각주 등 하위 문단의 텍스트 */
@@ -970,8 +1018,8 @@ class HwpConverter {
         }
         content.push(...paras);
       }
-      // 글의 세로 맞춤: LIST_HEADER 속성 bit 5~6 (0 위, 1 가운데, 2 아래)
-      const va = hd.data.length >= 8 ? (u32(hd, 2) >>> 5) & 3 : 0;
+      // 글의 세로 맞춤: LIST_HEADER 의 속성(문단 수 4바이트 뒤) bit 5~6 (0 위, 1 가운데, 2 아래)
+      const va = hd.data.length >= 8 ? (u32(hd, 4) >>> 5) & 3 : 0;
       blocks.push({
         type: 'textBox',
         attrs: {
@@ -1125,7 +1173,7 @@ class HwpConverter {
         // LIST_HEADER(글상자): 문단 수(2) 속성(4) 예비(2) 왼쪽·오른쪽·위·아래 여백(각 2)
         const pad = hd.data.length >= 16 ? [u16(hd, 12), u16(hd, 10), u16(hd, 14), u16(hd, 8)].map((v) => Math.round(hwpToPx(v) * 100) / 100) : [3.77, 3.77, 3.77, 3.77];
         const content = this.convertParagraphs(paras, true, undefined, w - pad[1] - pad[3]).map(stripLayoutAttrs);
-        const va = hd.data.length >= 8 ? (u32(hd, 2) >>> 5) & 3 : 0;
+        const va = hd.data.length >= 8 ? (u32(hd, 4) >>> 5) & 3 : 0;
         if (content.length) out.push({ k: 'text', m, w, h, content, pad, ...(va === 1 ? { va: 'middle' as const } : va === 2 ? { va: 'bottom' as const } : {}) });
       }
     }

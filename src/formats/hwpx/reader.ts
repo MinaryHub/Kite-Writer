@@ -2,11 +2,12 @@ import { indentByBlanks, type FloatHw } from '../hwpLayout';
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
 import { CELL_VMARGIN_HWP, FLOATING, HwpPageMarks, assembleTable, fitTableLines, placeCaptions, takeFloating, type Caption, type Captions } from '../hwp/reader';
-import type { DocMeta, DocSettings, LoadedDoc, PageSetup } from '../../types';
+import type { DocMeta, DocSettings, LoadedDoc, MasterPage, PageBorder, PageSetup } from '../../types';
 import { type Gradient, type Mat, type ShapeData, type ShapeItem, type ShapeRaw, IDENTITY, SHADOW_DEFAULT, SHADOW_UNIT_PX, arrowOf, arrowSizeOf, composeMats, gradientToCss, matOfHwp, shapeBounds } from '../shape';
 import {
   type JMark,
   type JNode,
+  parseBorderCss,
   attr,
   bytesToDataUrl,
   defaultSettings,
@@ -1179,6 +1180,52 @@ export class HwpxConverter {
     if (!pg) return;
     this.settingsSet = true;
     this.settings.page = pg;
+    // 쪽 테두리/배경: 양쪽 쪽에 적용되는 것 (첫 구역)
+    const pbf = kids(sec, 'pageBorderFill').find((e) => (attr(e, 'type') || 'BOTH') === 'BOTH') || kid(sec, 'pageBorderFill');
+    if (pbf) {
+      const bf = this.h.borderFills.get(attr(pbf, 'borderFillIDRef') || '');
+      const off = kid(pbf, 'offset');
+      const image = bf?.img ? this.images.get(bf.img.id) || null : null;
+      const pb = pageBorderOf(bf, {
+        paperBasis: (attr(pbf, 'textBorder') || 'PAPER') === 'PAPER',
+        offsetHwp: ['left', 'right', 'top', 'bottom'].map((k) => numAttr(off, k, 1417)),
+        headerInside: attr(pbf, 'headerInside') === '1',
+        footerInside: attr(pbf, 'footerInside') === '1',
+        fillArea: attr(pbf, 'fillArea') || 'PAPER',
+        image: image && /^data:image\//.test(image) ? image : null,
+      });
+      if (pb) {
+        const vis = kid(sec, 'visibility');
+        const on = (v: string | null) => (v === 'HIDE_FIRST' ? 'notFirst' : v === 'SHOW_FIRST' ? 'first' : null);
+        const bo = on(attr(vis, 'border'));
+        const fo = on(attr(vis, 'fill'));
+        if (bo) pb.borderOn = bo;
+        if (fo) pb.fillOn = fo;
+        this.settings.pageBorder = pb;
+      }
+    }
+    if (attr(kid(sec, 'visibility'), 'hideFirstMasterPage') === '1') this.settings.hideFirst = { ...this.settings.hideFirst, masterPage: true };
+  }
+
+  /** 바탕쪽 (Contents/masterpageN.xml): 본문 영역의 왼쪽 위를 기준으로 그릴 블록들 */
+  masterPage(root: Element): MasterPage | null {
+    const t = (attr(root, 'type') || 'BOTH').toUpperCase();
+    // 양쪽·짝수·홀수 쪽 바탕쪽만 (마지막 쪽·임의 쪽 바탕쪽은 그리지 않는다)
+    const type = t === 'BOTH' ? 'both' : t === 'EVEN' ? 'even' : t === 'ODD' ? 'odd' : null;
+    if (!type) return null;
+    const ps = kids(kid(root, 'subList'), 'p');
+    if (!ps.length) return null;
+    const g = this.pageGeom();
+    this.inHF++;
+    let content: JNode[] = [];
+    try {
+      content = this.convertParagraphs(ps, { inSub: true, width: g.bodyW, origin: { x: g.ml, y: g.mt } }).map(stripLayout);
+    } finally {
+      this.inHF--;
+    }
+    // 빈 문단뿐인 바탕쪽은 그릴 것이 없다
+    const visible = (n: JNode): boolean => (n.type === 'text' ? !!(n.text || '').trim() : ['image', 'shape', 'table', 'textBox', 'math'].includes(n.type) || (n.content || []).some(visible));
+    return content.some(visible) ? { content: content as any, type } : null;
   }
 
   private sizedPlaceholder(el: Element, label: string): JNode {
@@ -1653,6 +1700,41 @@ function pageOfSecPr(sec: Element, base: PageSetup): PageSetup | null {
   return pg;
 }
 
+/**
+ * 쪽 테두리/배경 값. 테두리/배경 정의(bf)의 선과 채우기에 위치 기준·간격·채울 영역을 더한다. 그릴 것이 없으면 null.
+ * paperBasis: 문서에 '종이'(HWPX 의 PAPER, HWP 의 bit 0 = 1)로 적힌 것 — 한글은 이것을 본문 영역에서 바깥으로 잰다
+ * (기본값인 5mm 가 본문에서 5mm 바깥에 그려진다: 한글의 미리 보기 그림으로 확인)
+ */
+export function pageBorderOf(
+  bf: BorderFill | undefined,
+  o: { paperBasis: boolean; offsetHwp: number[]; headerInside: boolean; footerInside: boolean; fillArea: string; image: string | null },
+): PageBorder | null {
+  if (!bf) return null;
+  const sides: NonNullable<PageBorder['sides']> = {};
+  const css = parseBorderCss(bf.css || '');
+  for (const k of ['l', 'r', 't', 'b'] as const) {
+    if (bf.noBorders.includes(k)) continue;
+    const b = css[k];
+    sides[k] = b ? { w: b.w, c: b.c, s: b.s } : { w: 0.12, c: '#000000', s: 'solid' };
+  }
+  const hasFill = !!(bf.bg || bf.gradient || o.image);
+  if (!Object.keys(sides).length && !hasFill) return null;
+  const out: PageBorder = { body: o.paperBasis, offset: o.offsetHwp.map((v) => round(hwpToMm(v), 2)) };
+  if (Object.keys(sides).length) out.sides = sides;
+  if (o.headerInside) out.headerInside = true;
+  if (o.footerInside) out.footerInside = true;
+  if (hasFill) {
+    if (bf.bg) out.bg = bf.bg;
+    if (bf.gradient) out.gradient = bf.gradient;
+    if (o.image) {
+      out.image = o.image;
+      out.imageMode = bf.img?.mode || 'TOTAL';
+    }
+    out.fillArea = o.fillArea === 'BORDER' ? 'border' : o.fillArea === 'PAGE' ? 'page' : 'paper';
+  }
+  return out;
+}
+
 // ---------------- 패키지 ----------------
 async function zipText(zip: JSZip, path: string): Promise<string | null> {
   let f = zip.file(path);
@@ -1741,6 +1823,20 @@ export async function readHwpx(data: Uint8Array): Promise<LoadedDoc> {
     blocks.push(...conv.convertParagraphs(kids(sec, 'p'), { inSub: false }));
   }
   while (blocks.length && blocks[0].type === 'pageBreak') blocks.shift();
+  // 바탕쪽
+  const masters: MasterPage[] = [];
+  const masterPaths = [...items.values()].filter((i) => /masterpage\d*\.xml$/i.test(i.href)).map((i) => resolve(i.href));
+  for (const n of Object.keys(zip.files)) if (/Contents\/masterpage\d*\.xml$/i.test(n) && !masterPaths.includes(n)) masterPaths.push(n);
+  for (const path of masterPaths.slice(0, 8)) {
+    try {
+      const xml = await zipText(zip, path);
+      const mp = xml ? conv.masterPage(parseXml(xml).documentElement) : null;
+      if (mp) masters.push(mp);
+    } catch {
+      /* 바탕쪽을 읽지 못해도 본문은 연다 */
+    }
+  }
+  if (masters.length) settings.masterPages = masters;
   return { content: docNode(blocks), settings, meta, warnings: dedupe(warnings) };
 }
 

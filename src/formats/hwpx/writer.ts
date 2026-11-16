@@ -28,6 +28,8 @@ interface BorderFillDef {
   borders: boolean; // false면 모든 선 없음
   bottomOnly?: boolean;
   css?: string | null;
+  /** 그림 채우기: BinData id 와 채우는 방식 (쪽 배경) */
+  img?: { id: string; mode: string } | null;
 }
 
 class Registry {
@@ -480,16 +482,46 @@ class SectionWriter {
     const w = mmToHwp(pg.width);
     const h = mmToHwp(pg.height);
     const charId = this.reg.char(p.baseChar);
-    let xml = `<hp:run charPrIDRef="${charId}"><hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="1" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="0">`;
+    // 쪽 테두리/배경과 바탕쪽
+    const pb = s.pageBorder;
+    const vis = (v: 'first' | 'notFirst' | null | undefined) => (v === 'first' ? 'SHOW_FIRST' : v === 'notFirst' ? 'HIDE_FIRST' : 'SHOW_ALL');
+    this.masterXml = [];
+    for (const mp of s.masterPages || []) {
+      const blocks = flattenContent((mp.content || []) as any);
+      const inner = blocks.length ? this.blocks(blocks, true) : '';
+      if (!inner) continue;
+      const id = `masterpage${this.masterXml.length}`;
+      const pgH = pg.landscape ? Math.min(pg.width, pg.height) : pg.height;
+      const bodyH = mmToHwp(pgH - pg.marginTop - pg.marginBottom - pg.marginHeader - pg.marginFooter);
+      this.masterXml.push({ id, xml: `<masterPage ${NS} id="${id}" type="${mp.type === 'even' ? 'EVEN' : mp.type === 'odd' ? 'ODD' : 'BOTH'}" pageNumber="0" pageDuplicate="0" pageFront="0">${this.subList(inner, 'TOP', this.bodyWidthHwp, bodyH)}</masterPage>` });
+    }
+    let xml = `<hp:run charPrIDRef="${charId}"><hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="1" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="${this.masterXml.length}">`;
     xml += `<hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="${s.pageNumber.start !== 1 ? s.pageNumber.start : 0}" pic="0" tbl="0" equation="0"/>`;
-    xml += `<hp:visibility hideFirstHeader="0" hideFirstFooter="0" hideFirstMasterPage="0" border="SHOW_ALL" fill="SHOW_ALL" hideFirstPageNum="0" hideFirstEmptyLine="0" showLineNumber="0"/>`;
+    xml += `<hp:visibility hideFirstHeader="${s.hideFirst?.header ? 1 : 0}" hideFirstFooter="${s.hideFirst?.footer ? 1 : 0}" hideFirstMasterPage="${s.hideFirst?.masterPage ? 1 : 0}" border="${vis(pb?.borderOn)}" fill="${vis(pb?.fillOn)}" hideFirstPageNum="${s.hideFirst?.pageNum ? 1 : 0}" hideFirstEmptyLine="0" showLineNumber="0"/>`;
     xml += `<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>`;
     xml += `<hp:pagePr landscape="${pg.landscape ? 'NARROWLY' : 'WIDELY'}" width="${w}" height="${h}" gutterType="LEFT_ONLY">`;
     xml += `<hp:margin header="${mmToHwp(pg.marginHeader)}" footer="${mmToHwp(pg.marginFooter)}" gutter="${mmToHwp(pg.gutter)}" left="${mmToHwp(pg.marginLeft)}" right="${mmToHwp(pg.marginRight)}" top="${mmToHwp(pg.marginTop)}" bottom="${mmToHwp(pg.marginBottom)}"/></hp:pagePr>`;
     xml += `<hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="283" belowLine="567" aboveLine="850"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr>`;
     xml += `<hp:endNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="14692344" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="0" belowLine="567" aboveLine="850"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="END_OF_DOCUMENT" beneathText="0"/></hp:endNotePr>`;
+    // 쪽 테두리/배경: 양쪽 쪽에 적용. 위치 기준은 한글이 쓰는 값 그대로 (본문 기준이 PAPER 로 적힌다: 리더의 pageBorderOf)
+    let pbId = 1;
+    let pbAttrs = `textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"`;
+    let pbOff = [1417, 1417, 1417, 1417];
+    if (pb) {
+      const sides = pb.sides || {};
+      const noBorders = (['l', 'r', 't', 'b'] as const).filter((k) => !sides[k]);
+      const css = (['t', 'b', 'l', 'r'] as const)
+        .filter((k) => sides[k])
+        .map((k) => `${k}:${Math.max(0.1, +sides[k]!.w || 0.12)}mm ${sides[k]!.s} ${normColor(sides[k]!.c) || '#000000'}`)
+        .join(';');
+      const img = pb.image ? this.images.get(pb.image) : null;
+      pbId = this.reg.borderFill({ bg: normColor(pb.bg), noBorders, borders: noBorders.length < 4, css: css || null, img: img ? { id: img.id, mode: pb.imageMode || 'TOTAL' } : null }, 'page');
+      pbAttrs = `textBorder="${pb.body ? 'PAPER' : 'CONTENT'}" headerInside="${pb.headerInside ? 1 : 0}" footerInside="${pb.footerInside ? 1 : 0}" fillArea="${pb.fillArea === 'border' ? 'BORDER' : pb.fillArea === 'page' ? 'PAGE' : 'PAPER'}"`;
+      pbOff = [0, 1, 2, 3].map((i) => Math.max(0, mmToHwp(+pb.offset?.[i] || 0)));
+    }
     for (const t of ['BOTH', 'EVEN', 'ODD'])
-      xml += `<hp:pageBorderFill type="${t}" borderFillIDRef="1" textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"><hp:offset left="1417" right="1417" top="1417" bottom="1417"/></hp:pageBorderFill>`;
+      xml += `<hp:pageBorderFill type="${t}" borderFillIDRef="${t === 'BOTH' ? pbId : 1}" ${t === 'BOTH' ? pbAttrs : 'textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"'}><hp:offset left="${t === 'BOTH' ? pbOff[0] : 1417}" right="${t === 'BOTH' ? pbOff[1] : 1417}" top="${t === 'BOTH' ? pbOff[2] : 1417}" bottom="${t === 'BOTH' ? pbOff[3] : 1417}"/></hp:pageBorderFill>`;
+    for (const m of this.masterXml) xml += `<hp:masterPage idRef="${m.id}"/>`;
     xml += `</hp:secPr><hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl></hp:run>`;
 
     const bodyW = this.bodyWidthHwp;
@@ -539,6 +571,8 @@ class SectionWriter {
   }
 
   pageCount = 1;
+  /** 바탕쪽 파일들 (구역 정의를 쓸 때 채운다) */
+  masterXml: { id: string; xml: string }[] = [];
 }
 
 function headerXml(reg: Registry): string {
@@ -567,7 +601,12 @@ function headerXml(reg: Registry): string {
       let x = `<hh:borderFill id="${i + 1}" threeD="0" shadow="0" centerLine="NONE" breakCellSeparateLine="0"><hh:slash type="NONE" Crooked="0" isCounter="0"/><hh:backSlash type="NONE" Crooked="0" isCounter="0"/>`;
       x += side('leftBorder', 'l') + side('rightBorder', 'r') + side('topBorder', 't') + side('bottomBorder', 'b');
       x += `<hh:diagonal type="SOLID" width="0.1 mm" color="#000000"/>`;
-      if (b.bg) x += `<hc:fillBrush><hc:winBrush faceColor="${normColor(b.bg) || 'none'}" hatchColor="#999999" alpha="0"/></hc:fillBrush>`;
+      if (b.bg || b.img)
+        x +=
+          `<hc:fillBrush>` +
+          (b.bg ? `<hc:winBrush faceColor="${normColor(b.bg) || 'none'}" hatchColor="#999999" alpha="0"/>` : '') +
+          (b.img ? `<hc:imgBrush mode="${/^[A-Z_]{3,20}$/.test(b.img.mode) ? b.img.mode : 'TOTAL'}"><hc:img binaryItemIDRef="${b.img.id}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/></hc:imgBrush>` : '') +
+          `</hc:fillBrush>`;
       else if (i === 1) x += `<hc:fillBrush><hc:winBrush faceColor="none" hatchColor="#999999" alpha="0"/></hc:fillBrush>`;
       return x + '</hh:borderFill>';
     })
@@ -704,6 +743,8 @@ export async function writeHwpx(doc: KDocument, opts: { pageCount?: number } = {
   const srcs = new Set<string>();
   collectImageSrcs(blocks, srcs);
   for (const hf of [doc.settings.header, doc.settings.footer]) collectImageSrcs(richHF(hf) || [], srcs);
+  if (doc.settings.pageBorder?.image) srcs.add(doc.settings.pageBorder.image);
+  for (const mp of doc.settings.masterPages || []) collectImageSrcs(flattenContent((mp.content || []) as any), srcs);
   const imageInfo = new Map<string, { id: string; w: number; h: number } | null>();
   let imgNo = 0;
   for (const src of srcs) {
@@ -730,6 +771,7 @@ export async function writeHwpx(doc: KDocument, opts: { pageCount?: number } = {
   const manifestItems =
     `<opf:item id="header" href="Contents/header.xml" media-type="application/xml"/>` +
     reg.images.map((im) => `<opf:item id="${im.id}" href="${im.path}" media-type="${im.mime}" isEmbeded="1"/>`).join('') +
+    sw.masterXml.map((m) => `<opf:item id="${m.id}" href="Contents/${m.id}.xml" media-type="application/xml"/>`).join('') +
     `<opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/>` +
     `<opf:item id="settings" href="settings.xml" media-type="application/xml"/>`;
   const hpf =
@@ -753,6 +795,7 @@ export async function writeHwpx(doc: KDocument, opts: { pageCount?: number } = {
   );
   zip.file('Contents/header.xml', header);
   zip.file('Contents/section0.xml', section);
+  for (const m of sw.masterXml) zip.file(`Contents/${m.id}.xml`, XML_DECL + m.xml);
   zip.file('Preview/PrvText.txt', previewText(blocks));
   zip.file(
     'settings.xml',

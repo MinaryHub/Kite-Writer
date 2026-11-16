@@ -1,6 +1,6 @@
 import type { Node as PMNode } from '@tiptap/pm/model';
 import type { DocSettings, HeaderFooter, PageSetup } from './types';
-import { hfRichHtml } from './hfRich';
+import { blocksHtml, hfRichHtml } from './hfRich';
 import type { DocTab } from './doc/docTab';
 import { PX_PER_MM, formatPageNumber, xmlEscape } from './formats/common';
 import { FN_FONT_PX, FN_LINE, FN_SEP } from './editor/extensions/pagination';
@@ -169,6 +169,72 @@ export function pageBackgroundStyle(s: DocSettings, k: number, dy = 0): Record<s
   };
 }
 
+const SAFE_IMG = /^data:image\/(png|jpeg|gif|webp|bmp);base64,[A-Za-z0-9+/=]+$/;
+const SAFE_GRADIENT = /^(linear|radial|conic)-gradient\([\w\s%.,#()-]{1,400}\)$/;
+
+/**
+ * k 번째 쪽의 바탕 그림 HTML: 쪽 테두리/배경과 바탕쪽. 종이의 왼쪽 위를 (0,0) 으로 하는 종이 크기의 층이며 본문 뒤에 깔린다.
+ * 화면(PageView)의 용지와 쪽 경계 가리개, 인쇄용 쪽이 같은 것을 쓴다. 그릴 것이 없으면 빈 문자열
+ */
+export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number): string {
+  const pb = s.pageBorder;
+  const first = k === 0;
+  let html = '';
+  const on = (v: 'first' | 'notFirst' | null | undefined) => !v || (v === 'first' ? first : !first);
+  if (pb && typeof pb === 'object') {
+    const off = (Array.isArray(pb.offset) ? pb.offset : []).map((v) => (Number.isFinite(+v) ? Math.max(-100, Math.min(200, +v)) * PX_PER_MM : 0));
+    const p = s.page;
+    // 테두리 상자: 본문 기준은 본문 영역에서 바깥으로(머리말·꼬리말을 넣으면 그 영역까지), 종이 기준은 종이 끝에서 안으로
+    const bx = pb.body
+      ? { x0: g.ml - (off[0] || 0), x1: g.W - g.mr + (off[1] || 0), y0: (pb.headerInside ? p.marginTop * PX_PER_MM : g.mt) - (off[2] || 0), y1: g.H - (pb.footerInside ? p.marginBottom * PX_PER_MM : g.mb) + (off[3] || 0) }
+      : { x0: off[0] || 0, x1: g.W - (off[1] || 0), y0: off[2] || 0, y1: g.H - (off[3] || 0) };
+    const color = (c: unknown) => (typeof c === 'string' && /^#[0-9A-Fa-f]{6}$/.test(c) ? c : null);
+    const bg = color(pb.bg);
+    const grad = typeof pb.gradient === 'string' && SAFE_GRADIENT.test(pb.gradient) && !/url|var|expression/i.test(pb.gradient) ? pb.gradient : null;
+    const img = typeof pb.image === 'string' && SAFE_IMG.test(pb.image) ? pb.image : null;
+    if ((bg || grad || img) && on(pb.fillOn)) {
+      const area = pb.fillArea === 'border' ? bx : pb.fillArea === 'page' ? { x0: g.ml, x1: g.W - g.mr, y0: g.mt, y1: g.H - g.mb } : { x0: 0, x1: g.W, y0: 0, y1: g.H };
+      const st = [`position:absolute`, `left:${area.x0}px`, `top:${area.y0}px`, `width:${Math.max(0, area.x1 - area.x0)}px`, `height:${Math.max(0, area.y1 - area.y0)}px`];
+      if (bg) st.push(`background-color:${bg}`);
+      if (img) {
+        const mode = String(pb.imageMode || 'TOTAL');
+        st.push(`background-image:url('${img}')`);
+        if (mode === 'TOTAL') st.push('background-size:100% 100%', 'background-repeat:no-repeat');
+        else if (mode === 'ZOOM') st.push('background-size:contain', 'background-repeat:no-repeat', 'background-position:center');
+        else if (mode.startsWith('TILE')) st.push('background-repeat:repeat');
+        else st.push('background-repeat:no-repeat', `background-position:${mode.includes('LEFT') ? 'left' : mode.includes('RIGHT') ? 'right' : 'center'} ${mode.includes('TOP') ? 'top' : mode.includes('BOTTOM') ? 'bottom' : 'center'}`);
+      } else if (grad) st.push(`background-image:${grad}`);
+      html += `<div class="pg-fill" style="${st.join(';')}"></div>`;
+    }
+    const sides = pb.sides || {};
+    if (on(pb.borderOn) && (sides.l || sides.r || sides.t || sides.b)) {
+      const names = { l: 'left', r: 'right', t: 'top', b: 'bottom' } as const;
+      const st = [`position:absolute`, `box-sizing:border-box`, `left:${bx.x0}px`, `top:${bx.y0}px`, `width:${Math.max(0, bx.x1 - bx.x0)}px`, `height:${Math.max(0, bx.y1 - bx.y0)}px`];
+      for (const k2 of ['l', 'r', 't', 'b'] as const) {
+        const b = sides[k2];
+        const c = b ? color(b.c) : null;
+        if (!b || !c) continue;
+        const w = Math.max(0.1, Math.min(10, +b.w || 0.12));
+        const style = ['solid', 'dashed', 'dotted', 'double'].includes(b.s) ? b.s : 'solid';
+        // 가는 선도 화면에서 보이게 (이중선은 세 배 굵기가 있어야 두 줄로 보인다)
+        st.push(`border-${names[k2]}:max(${style === 'double' ? 3 : 1}px, ${w}mm) ${style} ${c}`);
+      }
+      html += `<div class="pg-border" style="${st.join(';')}"></div>`;
+    }
+  }
+  // 바탕쪽: 본문 영역의 왼쪽 위를 기준으로 그린다 (개체는 종이·쪽 기준 자리에 놓여 있다)
+  const mps = Array.isArray(s.masterPages) ? s.masterPages : [];
+  if (mps.length && !(first && s.hideFirst?.masterPage)) {
+    const even = pageNumAt(s, k) % 2 === 0;
+    for (const mp of mps) {
+      if (!mp || (mp.type === 'even' && !even) || (mp.type === 'odd' && even)) continue;
+      const inner = blocksHtml(mp.content);
+      if (inner) html += `<div class="kdoc-content master-page${s.hwpMetrics ? ' hwp-metrics' : ''}" style="position:absolute;left:${g.ml}px;top:${g.mt}px;width:${g.contentW}px;height:${g.contentH}px">${inner}</div>`;
+    }
+  }
+  return html ? `<div class="pg-paint" style="position:absolute;left:0;top:0;width:${g.W}px;height:${g.H}px;pointer-events:none">${html}</div>` : '';
+}
+
 /**
  * k 번째 쪽 맨 위에 되풀이할 표 제목 줄의 HTML. 쪽 나누기가 그 자리를 비워 두었으므로(LayoutResult.repeats)
  * 편집 화면의 표에서 제목 줄만 복제해 본문 맨 위에 놓는다. 편집 대상은 아니다.
@@ -288,6 +354,13 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
   (page.style as any).page = pageName(g);
   const bg = pageBackgroundStyle(tab.settings, k);
   if (bg) Object.assign(page.style, bg);
+  // 쪽 테두리/배경·바탕쪽 (본문 뒤에)
+  const paint = pagePaintHtml(plan.settings, g, k);
+  if (paint) {
+    const holder = document.createElement('div');
+    holder.innerHTML = paint;
+    while (holder.firstChild) page.appendChild(holder.firstChild);
+  }
   const body = document.createElement('div');
   body.className = 'print-body';
   Object.assign(body.style, { left: `${g.ml}px`, top: `${g.mt}px`, width: `${g.contentW}px`, height: `${g.contentH}px` });

@@ -56,6 +56,16 @@ async function roundtrip(name, data, reader) {
   const fa = boxesOf(doc).map((n) => [Math.round(n.attrs.float.x), Math.round(n.attrs.float.py ?? n.attrs.float.y)].join(','));
   const fb = boxesOf(back).map((n) => [Math.round(n.attrs.float.x), Math.round(n.attrs.float.py ?? n.attrs.float.y)].join(','));
   check(`${name}: 떠 있는 글상자의 자리`, JSON.stringify(fa) === JSON.stringify(fb), `${fa} → ${fb}`);
+  // HWP(바이너리)로 쓰고 다시 읽기: 글맵시는 쓰지 않고, 글이 든 사각형·타원은 글상자로 읽힌다
+  const hwp = await m.readHwp(await m.writeHwp(doc));
+  const want = a.filter((s) => s.attrs.d.items.every((it) => it.k !== 'art'));
+  const c = shapesOf(hwp);
+  check(`${name}: HWP 로 쓴 도형 수`, want.length === c.length, `${want.length} → ${c.length}`);
+  for (let i = 0; i < Math.min(want.length, c.length); i++) {
+    const x = JSON.stringify(sig(want[i]));
+    const y = JSON.stringify(sig(c[i]));
+    check(`${name}: HWP 도형 ${i + 1} (${want[i].attrs.d.items.map((t) => t.k).join(',')})`, x === y, x === y ? '' : `\n   읽음   ${x.slice(0, 700)}\n   다시   ${y.slice(0, 700)}`);
+  }
   return { doc, back, out };
 }
 
@@ -112,6 +122,20 @@ if (files.length) {
   check('묶음: 세 도형', g && g.group && g.items.length === 3, JSON.stringify(g?.items.map((t) => t.k)));
   const pm = g?.items[0].m;
   check('묶음 안 다각형: 크기·자리 행렬', pm && Math.abs(pm[0] - 0.5) < 1e-3 && Math.abs(pm[4] - 10) < 0.1 && Math.abs(pm[5] - 10) < 0.1, JSON.stringify(pm));
+  // HWP(바이너리)로 쓰고 다시 읽기
+  const h = shapesOf(await m.readHwp(await m.writeHwp(doc)));
+  check('HWP: 도형 수가 같다', h.length === a.length, `${a.length} → ${h.length}`);
+  const hr = h[0]?.attrs.d.items[0];
+  check('HWP 사각형: 선 색·점선·채우기·곡률', hr && hr.sc === '#FF0000' && hr.sd === 'DASH' && hr.fc === '#FFFF00' && hr.r === 20, JSON.stringify(hr)?.slice(0, 300));
+  check('HWP 사각형: 떠 있는 자리', h[0]?.attrs.float && Math.abs(h[0].attrs.float.x - 40) < 1 && Math.abs(h[0].attrs.float.y - 20) < 1, JSON.stringify(h[0]?.attrs.float));
+  const hl = h[1]?.attrs.d.items[0];
+  check('HWP 선: 끝 화살표·점', hl && hl.ts === 'ARROW' && !hl.hs && hl.p.map(Math.round).join() === '0,0,120,60', JSON.stringify(hl)?.slice(0, 300));
+  const he = h[2]?.attrs.d.items[0];
+  check('HWP 타원: 그러데이션·글 뒤로', he && he.fg && he.fg.c.join() === '#FFFFFF,#4B87CB' && he.fg.cy === 50 && h[2].attrs.float?.behind === true, JSON.stringify(he?.fg));
+  const hg = h[3]?.attrs.d;
+  check('HWP 묶음: 다각형·곡선·호', hg && hg.group && hg.items.map((t) => t.k).join() === 'poly,curve,arc' && hg.items[1].seg === 'CCC' && hg.items[2].at === 'PIE', JSON.stringify(hg?.items.map((t) => [t.k, t.seg, t.at])));
+  const hm = hg?.items[0].m;
+  check('HWP 묶음 안 다각형: 크기·자리 행렬', hm && Math.abs(hm[0] - 0.5) < 1e-3 && Math.abs(hm[4] - 10) < 0.1 && Math.abs(hm[5] - 10) < 0.1, JSON.stringify(hm));
 }
 console.log(fail ? `\n실패 ${fail}건` : '\n모두 통과');
 process.exit(fail ? 1 : 0);

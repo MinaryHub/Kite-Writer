@@ -4,7 +4,7 @@ import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
 import type { PageSetup } from '../types';
 import { useApp } from '../app/hooks';
-import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
+import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, pagePaintHtml, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
 import { sectionsKey } from '../editor/extensions/sections';
 import { formatPageNumber, splitExt } from '../formats/common';
 import { applyFormatPainter, insertImagesFromFiles } from '../app/commands';
@@ -190,19 +190,29 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     const top = pl.top;
     const left = pl.left;
     const z = hfZones(pl.settings, g);
+    // 쪽 테두리/배경·바탕쪽: 용지와, 용지를 덮는 쪽 경계 가리개에 같은 그림을 깐다
+    const paint = pagePaintHtml(pl.settings, g, k);
+    const next = plans[k + 1];
+    const nextPaint = next ? pagePaintHtml(next.settings, next.g, k + 1) : '';
     pages.push(
       <div key={k} className="paper" style={{ top, left, width: g.W, height: g.H, ...(pageBackgroundStyle(s, k) || {}) }}>
+        {paint && <div className="pg-paint-host" dangerouslySetInnerHTML={{ __html: paint }} />}
         <Corners g={g} />
       </div>,
     );
     // 쪽 경계 가리개 (본문 끝 → 다음 쪽 본문 시작). 다음 쪽의 용지가 다를 수 있다
     const maskTop = top + g.mt + g.contentH;
-    const next = plans[k + 1];
     chrome.push(
       <div key={'m' + k} className="mask" style={{ top: maskTop, width: W, height: next ? next.top + next.g.mt - maskTop : g.mb }}>
-        <div className="m-paper" style={{ top: 0, left, width: g.W, height: g.mb, ...(pageBackgroundStyle(s, k, g.mt + g.contentH) || {}) }} />
+        <div className="m-paper" style={{ top: 0, left, width: g.W, height: g.mb, ...(pageBackgroundStyle(s, k, g.mt + g.contentH) || {}) }}>
+          {paint && <div className="pg-paint-host" style={{ top: -(g.mt + g.contentH) }} dangerouslySetInnerHTML={{ __html: paint }} />}
+        </div>
         {next && <div className="m-gap" style={{ top: g.mb, height: g.gap }} />}
-        {next && <div className="m-paper" style={{ top: next.top - maskTop, left: next.left, width: next.g.W, height: next.g.mt, ...(pageBackgroundStyle(s, k + 1) || {}) }} />}
+        {next && (
+          <div className="m-paper" style={{ top: next.top - maskTop, left: next.left, width: next.g.W, height: next.g.mt, ...(pageBackgroundStyle(s, k + 1) || {}) }}>
+            {nextPaint && <div className="pg-paint-host" dangerouslySetInnerHTML={{ __html: nextPaint }} />}
+          </div>
+        )}
       </div>,
     );
     const num = pageNumAt(s, k);

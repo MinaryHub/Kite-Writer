@@ -625,6 +625,14 @@ input[type='number'] {
   left: 0;
   right: 0;
   background: #fff;
+  overflow: hidden;
+}
+/* 쪽 테두리/배경·바탕쪽: 종이 왼쪽 위 기준의 층 (가리개에서는 그 쪽 안의 자리만큼 올려 같은 그림이 이어지게 한다) */
+.pg-paint-host {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
 }
 .mask .m-gap {
   position: absolute;

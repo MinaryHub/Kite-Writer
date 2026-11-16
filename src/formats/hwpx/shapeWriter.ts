@@ -24,7 +24,7 @@ const f6 = (v: number) => (Number.isFinite(v) ? +v.toFixed(6) : 0).toString();
 const matXml = (name: string, e: number[]) => `<hc:${name} e1="${f6(e[0])}" e2="${f6(e[1])}" e3="${f6(e[2])}" e4="${f6(e[3])}" e5="${f6(e[4])}" e6="${f6(e[5])}"/>`;
 
 /** 저장할 한글 값: 읽은 값이 있으면 그대로, 없으면 행렬(m)에서 만든다 (이동 + 크기 행렬 하나, 묶음 안이면 묶음 몫의 단위 행렬 쌍을 앞에) */
-function rawOf(it: { m: Mat; w: number; h: number; raw?: ShapeRaw }, lvl: number): ShapeRaw {
+export function rawOf(it: { m: Mat; w: number; h: number; raw?: ShapeRaw }, lvl: number): ShapeRaw {
   const r = it.raw;
   // 읽은 값은 묶음 깊이가 같을 때만 그대로 쓴다 (겹친 묶음을 한 겹으로 풀어 쓰면 행렬 쌍의 수가 달라진다)
   if (r && r.lvl === lvl && r.mats.length === 1 + 2 * (lvl + 1)) return r;
@@ -166,8 +166,8 @@ function itemXml(it: ShapeItem, text: ShapeItem | null, lvl: number, wrap: strin
  * 그리기 개체 전체의 XML. frame 은 최상위 개체의 크기·자리(hp:sz, hp:pos, hp:outMargin), wrap 은 본문과의 배치.
  * 도형 하나면 그 도형으로, 여럿이면 묶은 개체(hp:container)로 쓴다
  */
-export function shapeXml(d: ShapeData, width: number, height: number, wrap: string, frame: string, ctx: ShapeWriteCtx): string {
-  // 도형과 바로 뒤의 글(같은 자리)을 한 개체로
+/** 도형과 바로 뒤의 글(같은 자리)을 한 개체로 묶는다 */
+export function shapeObjects(d: ShapeData): { it: ShapeItem; text: ShapeItem | null }[] {
   const objs: { it: ShapeItem; text: ShapeItem | null }[] = [];
   for (const it of d.items) {
     const last = objs[objs.length - 1];
@@ -177,6 +177,11 @@ export function shapeXml(d: ShapeData, width: number, height: number, wrap: stri
       else objs.push({ it: { k: 'rect', m: it.m, w: it.w, h: it.h }, text: it });
     } else objs.push({ it, text: null });
   }
+  return objs;
+}
+
+export function shapeXml(d: ShapeData, width: number, height: number, wrap: string, frame: string, ctx: ShapeWriteCtx): string {
+  const objs = shapeObjects(d);
   if (!objs.length) return '';
   if (!d.group && objs.length === 1) return itemXml(objs[0].it, objs[0].text, 0, wrap, frame, ctx);
   const W = u(width);
