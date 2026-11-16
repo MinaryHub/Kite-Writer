@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
-import type { KDocument } from '../../types';
-import { type JNode, mmToTwip, xmlEscape, parseBorderCss, normColor, safeIsoDate } from '../common';
+import type { Columns, KDocument } from '../../types';
+import { type JNode, mmToTwip, xmlEscape, parseBorderCss, normColor, safeIsoDate, cleanColumns } from '../common';
 import { type CharStyle, type FlatBlock, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, flattenDoc } from '../flatten';
 import { prepareImage } from '../imageUtil';
 
@@ -165,6 +165,8 @@ function drawing(ctx: Ctx, info: { rid: string; w: number; h: number; name: stri
 
 function paragraphXml(ctx: Ctx, p: FlatPara): string {
   let x = '<w:p>' + pPr(p.style, p.pageBreakBefore, p.inlines.length ? undefined : p.baseChar);
+  // 단 나누기
+  if (p.columnBreakBefore) x += '<w:r><w:br w:type="column"/></w:r>';
   let linkOpen: string | null = null;
   const closeLink = () => {
     if (linkOpen) {
@@ -249,6 +251,7 @@ function tableXml(ctx: Ctx, t: FlatTable): string {
   });
   x += '</w:tbl>';
   if (t.pageBreakBefore) x = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>' + x;
+  else if (t.columnBreakBefore) x = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>' + x;
   return x;
 }
 
@@ -356,7 +359,7 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
     `<w:sectPr>${sectRefs}<w:pgSz w:w="${mmToTwip(pageW)}" w:h="${mmToTwip(pageH)}"${pg.landscape ? ' w:orient="landscape"' : ''}/>` +
     `<w:pgMar w:top="${top}" w:right="${mmToTwip(pg.marginRight)}" w:bottom="${bottom}" w:left="${mmToTwip(pg.marginLeft)}" w:header="${mmToTwip(pg.marginTop)}" w:footer="${mmToTwip(pg.marginBottom)}" w:gutter="${mmToTwip(pg.gutter)}"/>` +
     (s.pageNumber.start !== 1 ? `<w:pgNumType w:start="${s.pageNumber.start}"/>` : '') +
-    `<w:cols w:space="425"/><w:docGrid w:linePitch="360"/></w:sectPr>`;
+    `${colsXml(pg.columns)}<w:docGrid w:linePitch="360"/></w:sectPr>`;
 
   const documentXml = DECL + `<w:document ${W_NS}><w:body>${body}${sectPr}</w:body></w:document>`;
 
@@ -454,4 +457,16 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
   for (const [p, x] of files) zip.file(p, x);
   for (const m of ctx.media) zip.file(m.path, m.bytes);
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+}
+
+/** 구역의 다단 (w:cols): 단 수·간격·구분선, 너비가 다른 단은 단마다 너비와 간격 */
+function colsXml(c: Columns | null | undefined): string {
+  const v = cleanColumns(c);
+  if (!v || v.count < 2) return '<w:cols w:space="425"/>';
+  const sep = v.line ? ' w:sep="1"' : '';
+  if (v.widths && v.gaps) {
+    const each = v.widths.map((w, i) => `<w:col w:w="${mmToTwip(w)}" w:space="${i < v.count - 1 ? mmToTwip(v.gaps![i]) : 0}"/>`).join('');
+    return `<w:cols w:num="${v.count}"${sep} w:space="${mmToTwip(v.gaps[0] || 0)}" w:equalWidth="0">${each}</w:cols>`;
+  }
+  return `<w:cols w:num="${v.count}"${sep} w:space="${mmToTwip(v.gap)}"/>`;
 }

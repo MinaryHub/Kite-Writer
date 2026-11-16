@@ -579,9 +579,13 @@ class DocxReader {
     this.collectInline(kids(pEl), baseR, null, inline, after);
     // 쪽 나누기로 분할
     const segments: JNode[][] = [[]];
+    /** 조각 앞의 나누기가 단 나누기인가 (아니면 쪽 나누기) */
+    const colBreak: boolean[] = [false];
     for (const n of inline) {
-      if (n.type === '__pagebreak') segments.push([]);
-      else segments[segments.length - 1].push(n);
+      if (n.type === '__pagebreak') {
+        segments.push([]);
+        colBreak.push(!!n.attrs?.column);
+      } else segments[segments.length - 1].push(n);
     }
     const blocks: { node: JNode; list?: any }[] = [];
     if (p.pageBreakBefore) blocks.push({ node: { type: 'pageBreak' } });
@@ -602,7 +606,7 @@ class DocxReader {
       }
     }
     segments.forEach((seg, i) => {
-      if (i > 0) blocks.push({ node: { type: 'pageBreak' } });
+      if (i > 0) blocks.push({ node: { type: colBreak[i] ? 'columnBreak' : 'pageBreak' } });
       if (i > 0 && !seg.length) return;
       let node: JNode;
       if (heading) {
@@ -721,6 +725,7 @@ class DocxReader {
         }
         case 'br':
           if (attr(c, 'type') === 'page') out.push({ type: '__pagebreak' });
+          else if (attr(c, 'type') === 'column') out.push({ type: '__pagebreak', attrs: { column: true } });
           else out.push({ type: 'hardBreak' });
           break;
         case 'cr':
@@ -980,6 +985,24 @@ class DocxReader {
       pg.marginHeader = round(Math.max(0, top - header), 1);
       pg.marginBottom = round(Math.min(footer, bottom), 1);
       pg.marginFooter = round(Math.max(0, bottom - footer), 1);
+    }
+    // 다단: 단 수·간격·구분선, 너비가 다른 단
+    const cols = kid(sectPr, 'cols');
+    const n = cols ? Math.round(parseFloat(attr(cols, 'num') || '1')) : 1;
+    if (cols && n > 1) {
+      const c: NonNullable<typeof pg.columns> = { count: Math.min(20, n), gap: round(twipToMm(parseFloat(attr(cols, 'space') || '720')), 2) };
+      const each = kids(cols, 'col');
+      if (attr(cols, 'equalWidth') === '0' && each.length === c.count) {
+        c.widths = each.map((e) => round(twipToMm(parseFloat(attr(e, 'w') || '0')), 2));
+        c.gaps = each.map((e, i) => (i < c.count - 1 ? round(twipToMm(parseFloat(attr(e, 'space') || '0')), 2) : 0));
+        c.gap = 0;
+        if (c.widths.some((w) => !(w > 0))) {
+          delete c.widths;
+          delete c.gaps;
+        }
+      }
+      if (attr(cols, 'sep') === '1' || attr(cols, 'sep') === 'true') c.line = { w: 0.12, c: '#000000', s: 'solid' };
+      pg.columns = c;
     }
     const ref = (tag: string) => {
       const refs = kids(sectPr, tag);

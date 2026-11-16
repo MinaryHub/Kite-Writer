@@ -57,6 +57,22 @@ for (const [fmt, write, read] of [
   check(`${fmt}: 없으면 없다`, !plain.settings.page.columns && !plain.content.content.some((n) => n.type === 'columnBreak'), JSON.stringify(plain.settings.page.columns));
 }
 
+// DOCX: 구역의 다단과 단 나누기
+{
+  const doc = {
+    content: { type: 'doc', content: [para('첫 단'), { type: 'columnBreak' }, para('둘째 단')] },
+    settings: { ...base, page: { ...page, columns: { count: 2, gap: 8, line: { w: 0.12, c: '#000000', s: 'solid' } } } },
+    meta: {},
+  };
+  const back = await m.readDocx(await m.writeDocx(doc));
+  const c = back.settings.page.columns;
+  check('DOCX: 두 단·간격·구분선', c && c.count === 2 && near(c.gap, 8, 0.1) && !!c.line, JSON.stringify(c));
+  const kinds = back.content.content.map((n) => (n.type === 'paragraph' ? text(n) : n.type));
+  check('DOCX: 단 나누기', kinds.includes('columnBreak') && kinds.indexOf('columnBreak') > kinds.indexOf('첫 단') && kinds.indexOf('columnBreak') < kinds.indexOf('둘째 단'), JSON.stringify(kinds));
+  const c2 = (await m.readDocx(await m.writeDocx({ ...doc, settings: { ...base, page: { ...page, columns: { count: 2, gap: 0, widths: [50, 92], gaps: [8, 0] } } } }))).settings.page.columns;
+  check('DOCX: 너비가 다른 단', c2 && c2.widths && near(c2.widths[0], 50, 0.2) && near(c2.widths[1], 92, 0.2) && near(c2.gaps[0], 8, 0.2), JSON.stringify(c2));
+}
+
 // Kite 가 쓴 HWP 의 줄 정보는 형식뿐이다 (문단마다 세로 위치 0): 다시 읽을 때 한글 배치로 따르면 문단이 모두 쪽 맨 위에 겹친다
 {
   const doc = { content: { type: 'doc', content: [para('하나'), para('둘'), para('셋')] }, settings: { ...base, page }, meta: {} };
