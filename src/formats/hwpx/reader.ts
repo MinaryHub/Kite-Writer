@@ -1,4 +1,4 @@
-import { LineSegStats, dropHwpLayout, indentByBlanks, type FloatHw } from '../hwpLayout';
+import { LineSegStats, dropHwpLayout, floatOverhang, indentByBlanks, type FloatHw } from '../hwpLayout';
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
 import { CELL_VMARGIN_HWP, FLOATING, HwpPageMarks, assembleTable, fitTableLines, placeCaptions, takeFloating, type Caption, type Captions } from '../hwp/reader';
@@ -1628,6 +1628,9 @@ export class HwpxConverter {
     const attrs: Record<string, any> = { width: w, height: h, bg, bgImage, bgGradient, borderColor, borderWidth, borderDash, radius, padding };
     if (va === 'CENTER') attrs.valign = 'middle';
     else if (va === 'BOTTOM') attrs.valign = 'bottom';
+    // 세로 맞춤은 떠 있는 개체까지 넣은 내용 높이로: 글 아래로 나온 개체만큼 아래 안 여백을 늘린다
+    const over = attrs.valign ? floatOverhang(content) : 0;
+    if (over > 0) attrs.padding = (padding || [4, 4, 4, 4]).map((v, i) => (i === 2 ? v + over : v));
     return [{ type: 'textBox', attrs, content: content.length ? content : [paragraph()] }];
   }
 

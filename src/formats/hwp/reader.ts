@@ -1,4 +1,4 @@
-import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, gapInBox, isBreakBlock, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
+import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, floatOverhang, gapInBox, isBreakBlock, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
 import { hwpToLatex } from '../../math/hwpEq';
 import * as CFB from 'cfb';
 import { Inflate } from 'pako';
@@ -1130,6 +1130,8 @@ class HwpConverter {
       }
       // 글의 세로 맞춤: LIST_HEADER 의 속성(문단 수 4바이트 뒤) bit 5~6 (0 위, 1 가운데, 2 아래)
       const va = hd.data.length >= 8 ? (u32(hd, 4) >>> 5) & 3 : 0;
+      // 세로 맞춤은 떠 있는 개체까지 넣은 내용 높이로: 글 아래로 나온 개체만큼 아래 안 여백을 늘린다
+      const over = va === 1 || va === 2 ? floatOverhang(content) : 0;
       blocks.push({
         type: 'textBox',
         attrs: {
@@ -1142,7 +1144,7 @@ class HwpConverter {
           borderWidth: st.borderWidth,
           borderDash: st.dash,
           radius,
-          padding,
+          padding: over > 0 ? (Array.isArray(padding) ? padding : [4, 4, 4, 4]).map((v: number, i: number) => (i === 2 ? v + over : v)) : padding,
           ...(va === 1 ? { valign: 'middle' } : va === 2 ? { valign: 'bottom' } : {}),
           ...(fp ? { float: fp } : {}),
         },

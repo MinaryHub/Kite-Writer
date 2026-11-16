@@ -414,3 +414,32 @@ export class LineSegStats {
     return this.paras >= 2 && this.zero === this.paras;
   }
 }
+
+/**
+ * 글상자 안에서 떠 있는 개체가 글 아래로 나온 높이 (px). 한글은 글의 세로 맞춤(가운데·아래)을 떠 있는 개체까지 넣은
+ * 내용 높이로 한다: 글 아래로 나온 만큼을 상자의 아래 안 여백에 더하면 같은 자리에 온다.
+ * 줄 자리(hwpVs)를 모르는 문단이 있으면 셈하지 않는다 (0)
+ */
+export function floatOverhang(content: JNode[]): number {
+  let textBottom = 0;
+  let floatBottom = 0;
+  /** 뒤따르는 문단을 기다리는 떠 있는 상자 (자리는 그 문단 상자의 위쪽 기준) */
+  const waiting: JNode[] = [];
+  const num = (v: any) => (Number.isFinite(+v) ? +v : 0);
+  for (const b of content) {
+    if (b.attrs?.float && b.type !== 'paragraph') {
+      waiting.push(b);
+      continue;
+    }
+    if (b.type !== 'paragraph') return 0;
+    const vs = b.attrs?.hwpVs as number[][] | undefined;
+    if (!Array.isArray(vs) || !vs.length) return 0;
+    const top = vs[0][0] - num(b.attrs?.spaceBefore) * PT2PX;
+    const last = vs[vs.length - 1];
+    textBottom = Math.max(textBottom, last[0] + last[1]);
+    for (const w of waiting.splice(0)) floatBottom = Math.max(floatBottom, top + num(w.attrs!.float.y) + num(w.attrs!.height));
+    for (const n of b.content || []) if (n.attrs?.float) floatBottom = Math.max(floatBottom, top + num(n.attrs.float.y) + num(n.attrs.height));
+  }
+  const d = floatBottom - textBottom;
+  return d > 0.5 && d < 5000 ? r2(d) : 0;
+}
