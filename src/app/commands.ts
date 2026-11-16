@@ -352,6 +352,9 @@ export const commands: Record<string, Command> = {
   'page.setup': { label: '편집 용지...', icon: 'FileText', shortcut: 'F7', keys: ['F7'], run: () => app.openDialog('pageSetup'), enabled: hasDoc },
   'page.headerFooter': { label: '머리말/꼬리말...', icon: 'PanelTop', shortcut: 'Ctrl+N,H', run: () => app.openDialog('headerFooter'), enabled: hasDoc },
   'page.number': { label: '쪽 번호 매기기...', icon: 'Hash', shortcut: 'Ctrl+N,P', run: () => app.openDialog('pageNumber'), enabled: hasDoc },
+  'page.columns': { label: '다단 설정...', icon: 'Columns2', run: () => app.openDialog('columns'), enabled: hasDoc },
+  'page.border': { label: '쪽 테두리/배경...', icon: 'Frame', run: () => app.openDialog('pageBorder'), enabled: hasDoc },
+  'insert.columnBreak': { label: '단 나누기', icon: 'Columns2', shortcut: 'Ctrl+Shift+Enter', run: () => chain().setColumnBreak().run(), enabled: hasDoc },
   'page.orientation': {
     label: '용지 방향 바꾸기 (가로/세로)',
     icon: 'RectangleHorizontal',

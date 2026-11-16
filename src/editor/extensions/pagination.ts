@@ -4,8 +4,10 @@ import { Mapping } from '@tiptap/pm/transform';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { viewState } from '../viewState';
-import type { PageSetup } from '../../types';
+import type { Columns, PageSetup } from '../../types';
+import { columnGeom, type ColGeom } from '../../formats/common';
 import { hwpLineBoxes } from './hwpMetrics';
+import { ownMargins } from './sections';
 
 /**
  * 쪽 나누기(페이지네이션) 엔진.
@@ -26,6 +28,8 @@ export interface PageGeometry {
   contentWidth: number;
   /** 본문 위 여백(px) = 위쪽 + 머리말 (구역마다 용지가 다를 때 쪽 위치를 잇는 데 쓴다) */
   mt?: number;
+  /** 다단 (문서 용지의 것. 구역마다의 다단은 resolve 가 돌려준다) */
+  columns?: Columns | null;
   /** 구역 나누기(쪽 나누기의 sectionPage)의 용지 → 그 구역의 쪽 기하 */
   resolve?: (p: PageSetup) => PageGeometry;
 }
@@ -33,14 +37,24 @@ export interface PageGeometry {
 function sameGeometry(a: PageGeometry | null, b: PageGeometry | null): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
-  return a.pageHeight === b.pageHeight && a.gap === b.gap && a.contentHeight === b.contentHeight && a.contentWidth === b.contentWidth && a.mt === b.mt;
+  return a.pageHeight === b.pageHeight && a.gap === b.gap && a.contentHeight === b.contentHeight && a.contentWidth === b.contentWidth && a.mt === b.mt && JSON.stringify(a.columns || null) === JSON.stringify(b.columns || null);
 }
 
 export interface PageBreakInfo {
   pos: number;
   height: number;
-  /** grow: 칸 안에서 나뉜 표 줄의 높이를 그 값으로 (자연 높이 + 끼운 공간: 칸 아래 남는 자리를 지킨다) */
-  kind: 'block' | 'row' | 'line' | 'grow';
+  /**
+   * grow: 칸 안에서 나뉜 표 줄의 높이를 그 값으로 (자연 높이 + 끼운 공간: 칸 아래 남는 자리를 지킨다)
+   * col: 다단에서 블록이 놓인 단 (x 만큼 오른쪽으로, 오른쪽 여백을 r 로). seg: 다른 단·쪽으로 넘어간 문단 안 줄들(pos~end)을
+   * 제자리에서 (dx, height) 만큼 옮겨 그린다
+   */
+  kind: 'block' | 'row' | 'line' | 'grow' | 'col' | 'seg';
+  x?: number;
+  r?: number;
+  /** col: 목록 등 안쪽 블록 (가로로만 옮긴다) */
+  inner?: boolean;
+  end?: number;
+  dx?: number;
   /** 표가 이어지는 쪽의 맨 위에 되풀이할 제목 줄: 표 위치, 그 쪽 번호(0부터), 제목 줄 높이(px). 높이만큼 공간에 더해 둔다 */
   head?: RepeatHead;
   /** 표의 줄이 칸 안에서 나뉜 자리: 그 쪽에서 표가 끝나는 곳에 닫는 선을 긋는다 (한글처럼) */
@@ -67,6 +81,17 @@ export interface FootnoteInfo {
   pos: number;
 }
 
+/** 단 구분선: 쪽(0부터), 본문 왼쪽에서의 가로 자리, 본문 맨 위에서의 세로 범위(px), 굵기(mm)·색·종류 */
+export interface ColLine {
+  page: number;
+  x: number;
+  y1: number;
+  y2: number;
+  w: number;
+  c: string;
+  s: string;
+}
+
 export interface LayoutResult {
   pageCount: number;
   footnotes: FootnoteInfo[];
@@ -78,6 +103,8 @@ export interface LayoutResult {
   cuts?: TableCut[];
   /** 쪽마다의 편집 용지 (구역마다 용지가 다른 문서만. null 은 문서 용지) */
   pageSetups?: (PageSetup | null)[];
+  /** 다단의 단 구분선 */
+  colLines?: ColLine[];
 }
 
 interface PState {
@@ -133,6 +160,17 @@ function buildDecos(doc: PMNode, breaks: PageBreakInfo[]): DecorationSet {
       decos.push(Decoration.node(b.pos, b.pos + node.nodeSize, { class: 'pg-push-row', style: `--pg-push: ${b.height}px` }));
       continue;
     }
+    if (b.kind === 'col') {
+      const node = doc.nodeAt(b.pos);
+      if (!node || !node.isBlock) continue;
+      decos.push(Decoration.node(b.pos, b.pos + node.nodeSize, b.inner ? { class: 'pg-col-in', style: `--col-dx: ${b.x || 0}px` } : { class: 'pg-col', style: `--col-x: ${b.x || 0}px; --col-r: ${b.r || 0}px` }));
+      continue;
+    }
+    if (b.kind === 'seg') {
+      const end = Math.min(b.end ?? b.pos, doc.content.size);
+      if (end > b.pos) decos.push(Decoration.inline(b.pos, end, { class: 'pg-seg', style: `left: ${b.dx || 0}px; top: ${b.height}px` }));
+      continue;
+    }
     const block = b.kind === 'block';
     decos.push(
       Decoration.widget(
@@ -173,6 +211,7 @@ function sameBreaks(a: PageBreakInfo[], b: PageBreakInfo[]) {
   for (let i = 0; i < a.length; i++) {
     if (a[i].pos !== b[i].pos || a[i].kind !== b[i].kind || Math.abs(a[i].height - b[i].height) > 0.6) return false;
     if (a[i].head?.table !== b[i].head?.table || a[i].head?.page !== b[i].head?.page) return false;
+    if (Math.abs((a[i].x || 0) - (b[i].x || 0)) > 0.1 || Math.abs((a[i].r || 0) - (b[i].r || 0)) > 0.1 || Math.abs((a[i].dx || 0) - (b[i].dx || 0)) > 0.1 || (a[i].end ?? -1) !== (b[i].end ?? -1)) return false;
   }
   return true;
 }
@@ -271,6 +310,35 @@ function computeLayout(
     if (n.type.name === 'pageBreak' && n.attrs?.sectionPage) multi = true;
   });
   if (multi) cache = null;
+  // ---- 다단 ----
+  /** 지금 다단 (없으면 한 단), 지금 구역의 본문 폭, 지금 단 */
+  let cols: ColGeom | null = columnGeom(g.columns, g.contentWidth);
+  let colW = g.contentWidth;
+  let col = 0;
+  /** 다단 문서: 블록마다의 단 상태까지 이어 가야 하므로 증분 배치를 쓰지 않는다 */
+  let hasCols = !!cols;
+  view.state.doc.forEach((n) => {
+    if (n.type.name === 'columnBreak' || (n.type.name === 'pageBreak' && n.attrs?.sectionPage?.columns)) hasCols = true;
+  });
+  if (hasCols) cache = null;
+  /** 지금 다단이 시작한 쪽과 그 쪽 본문 안 세로 자리 (다른 쪽에서는 맨 위부터) */
+  let zonePage = 0;
+  let zoneTop = 0;
+  let zoneId = 0;
+  /** 단 나누기를 지났다: 다음 블록은 다음 단으로 */
+  let forceCol = false;
+  /** 다단 설정 나누기·구역 나누기를 지났다: 다음 블록부터 그 다단으로 (w: 그 구역의 본문 폭) */
+  let pendingZone: { cols: ColGeom | null; w?: number } | null = null;
+  /** 지금 최상위 블록이 시작한 단과 그때의 다단·본문 폭, 지금 말단 블록이 시작한 단 */
+  let blockCol = -1;
+  let blockCols: ColGeom | null = null;
+  let blockCW = 0;
+  let leafCol = -1;
+  /** 쪽마다 다단이 차지한 세로 범위 (단 구분선을 긋는다) */
+  const zones = new Map<string, { page: number; id: number; top: number; bottom: number; cols: ColGeom }>();
+  /** 줄 단위로 놓는 중인 문단: 끝 위치, 시작한 단, 다른 단·쪽으로 넘긴 줄들을 옮겨 그린 만큼 */
+  let curPara: { end: number; startCol: number; rel: boolean; dy: number; seg: PageBreakInfo | null } | null = null;
+  const r2 = (v: number) => Math.round(v * 100) / 100;
   const MAX_PAGES = 20000;
   /** k 쪽 본문 맨 위 (아직 없는 쪽은 앞으로 생길 쪽의 기하로) */
   const T = (k: number): number => {
@@ -375,6 +443,55 @@ function computeLayout(
     if (el.textContent !== String(i + 1)) el.textContent = String(i + 1);
   });
 
+  const zTop = () => (page === zonePage ? zoneTop : 0);
+  const noteZone = (bottom: number) => {
+    if (!cols) return;
+    const key = page + ':' + zoneId;
+    const z = zones.get(key);
+    const b = bottom - T(page);
+    if (z) z.bottom = Math.max(z.bottom, b);
+    else zones.set(key, { page, id: zoneId, top: zTop(), bottom: b, cols });
+  };
+  /** 다단 설정 나누기·구역 나누기 뒤의 첫 블록에서 새 다단으로 바꾼다 */
+  const startZone = () => {
+    if (!pendingZone) return false;
+    cols = pendingZone.cols;
+    if (pendingZone.w != null) colW = pendingZone.w;
+    col = 0;
+    zoneId++;
+    pendingZone = null;
+    return true;
+  };
+  const noteBlockCol = () => {
+    if (blockCol < 0) {
+      blockCol = col;
+      blockCols = cols;
+      blockCW = colW;
+    }
+    if (leafCol < 0) leafCol = col;
+  };
+  /**
+   * 단위를 h 만큼 옮긴다: 블록·줄 앞에 공간을 끼운다 (음수면 끌어올린다). 다른 단으로 가는 문단 안 줄은 공간으로는 옮길 수 없으므로
+   * 그 줄부터 문단 끝까지를 제자리에서 옮겨 그리고(seg), 문단이 끝난 뒤에 그만큼의 공간을 끼운다 (endPara)
+   */
+  const moveBy = (h: number, pos: number, kind: PageBreakInfo['kind'], newCol: number) => {
+    const para = curPara;
+    if (kind === 'line' && para && (para.rel || newCol !== para.startCol || h < 0)) {
+      para.rel = true;
+      para.dy += h;
+      if (para.seg) para.seg.end = pos;
+      const seg: PageBreakInfo = { pos, end: para.end, kind: 'seg', height: r2(para.dy), dx: r2((cols ? cols.x[newCol] : 0) - (cols ? cols.x[para.startCol] : 0)) };
+      breaks.push(seg);
+      para.seg = seg;
+    } else if (Math.abs(h) > 0.004) breaks.push({ pos, height: h, kind });
+    shift += h;
+  };
+  const endPara = (after: number) => {
+    const p = curPara;
+    curPara = null;
+    if (p && p.rel && Math.abs(p.dy) > 0.004) breaks.push({ pos: after, height: r2(p.dy), kind: 'block' });
+  };
+
   const normalize = (top: number) => {
     if (!isFinite(top)) return;
     const target = pageAtY(top + 0.5, page);
@@ -402,30 +519,69 @@ function computeLayout(
     if (!isFinite(top) || !isFinite(bottom)) return;
     top += shift;
     bottom += shift;
-    normalize(top);
-    const pageTop = T(page);
-    const overflow = bottom > limitFor(fnH) + 0.5 || top > pageTop + CHof(page);
-    if ((forceNext || softNext || overflow) && (forceNext || top > pageTop + 0.5)) {
-      const pos = getPos();
-      if (pos != null) {
-        const h = Math.round((T(page + 1) - top) * 100) / 100;
-        if (h > 0) {
+    let newZone = false;
+    if (pendingZone && kind === 'block') {
+      // 다단 설정 나누기: 앞 다단의 가장 긴 단 아래에서 새 다단을 시작한다
+      const z = zones.get(page + ':' + zoneId);
+      const target = z ? T(page) + z.bottom : -Infinity;
+      if (col > 0 && !forceNext && target > top + 0.5) {
+        const pos = getPos();
+        if (pos != null) {
+          const h = r2(target - top);
           breaks.push({ pos, height: h, kind });
           shift += h;
           top += h;
           bottom += h;
         }
+      }
+      newZone = startZone();
+    }
+    // 다단: 넘치는 블록·줄은 다음 단으로 (마지막 단이면 다음 쪽으로). 표의 줄은 단을 넘기지 못한다
+    const mayCol = !!cols && col < cols.n - 1 && (kind === 'block' || kind === 'line');
+    if (!cols) normalize(top);
+    const pageTop = T(page);
+    const colTop = pageTop + zTop();
+    const overflow = bottom > limitFor(fnH) + 0.5 || top > pageTop + CHof(page);
+    if (!forceNext && !softNext && (forceCol || overflow) && mayCol) {
+      if (forceCol || top > colTop + 0.5) {
+        const pos = getPos();
+        if (pos != null) {
+          const h = r2(colTop - top);
+          moveBy(h, pos, kind, col + 1);
+          top += h;
+          bottom += h;
+          col++;
+        }
+      }
+    } else if ((forceNext || softNext || forceCol || overflow) && (forceNext || forceCol || top > pageTop + 0.5)) {
+      const pos = getPos();
+      if (pos != null) {
+        const h = Math.round((T(page + 1) - top) * 100) / 100;
+        if (h > 0) {
+          moveBy(h, pos, kind, 0);
+          top += h;
+          bottom += h;
+        }
         page++;
         fnUsed = 0;
+        // 표의 줄이 넘어간 쪽에서는 표가 놓인 단에서 이어 간다
+        if (kind === 'block' || kind === 'line') col = 0;
         commit();
         normalize(top);
       }
     }
     forceNext = false;
     softNext = false;
+    forceCol = false;
+    if (newZone) {
+      zonePage = page;
+      zoneTop = Math.max(0, r2(top - T(page)));
+    }
     markPageStart(docPos);
     if (blockStart < 0) blockStart = page;
+    noteBlockCol();
     if (fnH > 0) fnUsed += fnH + (fnUsed === 0 ? FN_SEP : 0);
+    noteZone(Math.min(bottom, T(page) + CHof(page)));
     if (bottom > T(page) + CHof(page) + 0.5) {
       const endPage = Math.min(MAX_PAGES, pageAtY(bottom - 0.5, page));
       if (endPage > page) {
@@ -444,15 +600,24 @@ function computeLayout(
    * 공간을 끼운다 (위로 올려야 하면 음수). 쪽 나누기·한글의 새 쪽 표시가 있으면 다음 쪽의 그 자리로
    */
   const fixed: FixedBlock[] = [];
-  const snapTo = (el: HTMLElement, pos: number, want: number, seq = 0) => {
+  const snapTo = (el: HTMLElement, pos: number, want: number, seq = 0, hwpCol = 0) => {
     // 표는 감싼 상자가 아니라 표 자체(테두리 상자)의 위쪽을 맞춘다: 표의 위 바깥 여백은 감싼 상자 안에 있다
     const box = (el.matches('table') ? el : el.querySelector(':scope > table')) || el;
     const top = rel(box.getBoundingClientRect().top) + shift;
+    const newZone = startZone();
     if (forceNext || (softNext && top > T(page) + 0.5)) {
       page = Math.min(page + 1, MAX_PAGES);
       fnUsed = 0;
       commit();
     }
+    // 단은 한글이 놓은 대로 (리더가 줄 자리로 세어 둔 것)
+    col = cols ? Math.max(0, Math.min(cols.n - 1, hwpCol)) : 0;
+    forceCol = false;
+    if (newZone) {
+      zonePage = page;
+      zoneTop = Math.max(0, want);
+    }
+    noteBlockCol();
     // 셈한 밀림(shift)은 칸 안에서 나뉜 표 줄 뒤에서 실제 화면과 1px 남짓 어긋날 수 있다. 지난번에 잰 차이만큼 보정한다
     const d = Math.round((T(page) + want - top) * 100) / 100;
     // 보정값은 끼우는 공간에만 더한다: 셈한 밀림은 그대로 두어야 이 블록부터 셈과 화면이 다시 맞는다
@@ -484,6 +649,7 @@ function computeLayout(
     if (blockStart < 0) blockStart = page;
     if (fnH > 0) fnUsed += fnH + (fnUsed === 0 ? FN_SEP : 0);
     lastBottom = Math.max(lastBottom, bottom + shift);
+    noteZone(Math.min(bottom + shift, T(page) + CHof(page)));
   };
 
   const collectFootnotes = (el: HTMLElement, pos: number) => {
@@ -592,10 +758,10 @@ function computeLayout(
     // 그대로 들어가는지 확인
     const sTop = top + shift;
     const sBottom = bottom + shift;
-    const p = pageAtY(sTop + 0.5, page);
+    const p = cols ? page : pageAtY(sTop + 0.5, page);
     const fnUsedHere = p === page ? fnUsed : 0;
     const limit = T(p) + CHof(p) - fnUsedHere - (fnTotal > 0 && fnUsedHere === 0 ? FN_SEP : 0) - fnTotal;
-    if (forceNext || sBottom <= limit + 0.5) {
+    if (forceNext || forceCol || sBottom <= limit + 0.5) {
       place(top, bottom, fnTotal, () => pos, 'block', pos);
       pushFootnotes(fns);
       return;
@@ -607,6 +773,7 @@ function computeLayout(
       return;
     }
     const n = lines.length;
+    curPara = { end: pos + node.nodeSize - 1, startCol: col, rel: false, dy: 0, seg: null };
     for (let i = 0; i < n; i++) {
       const uTop = i === 0 ? top : (lines[i - 1].bottom + lines[i].top) / 2;
       const uBottom = i === n - 1 ? bottom : (lines[i].bottom + lines[i + 1].top) / 2;
@@ -614,12 +781,15 @@ function computeLayout(
       const fnH = lineFns.reduce((a, f) => a + f.h, 0);
       if (i === 0) {
         place(uTop, uBottom, fnH, () => pos, 'block', pos);
+        // 문단 상자는 첫 줄이 놓인 단에 선다
+        curPara.startCol = col;
       } else {
         const line = lines[i];
         place(uTop, uBottom, fnH, () => posAtLineStart(el, line, pos, pos + node.nodeSize), 'line', pos);
       }
       pushFootnotes(lineFns);
     }
+    endPara(pos + node.nodeSize);
   };
 
   /**
@@ -644,19 +814,23 @@ function computeLayout(
     }
     let y = top + pxOf(getComputedStyle(el).paddingTop);
     let segTop = top;
+    curPara = { end: pos + node.nodeSize - 1, startCol: col, rel: false, dy: 0, seg: null };
     for (let i = 0; i < vs.length; i++) {
       if (i > 0 && vs[i][0] < vs[i - 1][0] - 0.5) {
         const segFns = fns.filter((f) => f.top >= segTop - 1 && f.top < y);
         placeFixed(segTop, y, segFns.reduce((a, f) => a + f.h, 0), pos);
         pushFootnotes(segFns);
-        page = Math.min(page + 1, MAX_PAGES);
-        fnUsed = 0;
-        commit();
-        const h = Math.round((T(page) + vs[i][0] - (y + shift)) * 100) / 100;
-        if (h > 0) {
-          breaks.push({ pos: pos + 1 + lines[i][0], height: h, kind: 'line' });
-          shift += h;
+        // 다단: 마지막 단이 아니면 다음 단으로, 마지막 단이면 다음 쪽의 첫 단으로
+        const toCol = !!cols && col < cols.n - 1;
+        if (toCol) col++;
+        else {
+          page = Math.min(page + 1, MAX_PAGES);
+          fnUsed = 0;
+          col = 0;
+          commit();
         }
+        const h = Math.round((T(page) + vs[i][0] - (y + shift)) * 100) / 100;
+        if (toCol || curPara.rel || col !== curPara.startCol || h > 0) moveBy(h, pos + 1 + lines[i][0], 'line', col);
         markPageStart(pos);
         segTop = y;
       }
@@ -665,6 +839,7 @@ function computeLayout(
     const restFns = fns.filter((f) => f.top >= segTop - 1);
     placeFixed(segTop, bottom, restFns.reduce((a, f) => a + f.h, 0), pos);
     pushFootnotes(restFns);
+    endPara(pos + node.nodeSize);
   };
 
   /** 셀 안의 말단 블록(문단·중첩 표 등)을 문서 순서로 */
@@ -801,9 +976,15 @@ function computeLayout(
     const fnTotal = fns.reduce((a, f) => a + f.h, 0);
     curTable = pos;
     const sBottom = bottom + shift;
-    const p = pageAtY(top + shift + 0.5, page);
+    const p = cols ? page : pageAtY(top + shift + 0.5, page);
     const fnUsedHere = p === page ? fnUsed : 0;
-    if (forceNext || sBottom <= T(p) + CHof(p) - fnUsedHere - fnTotal - (fnTotal ? FN_SEP : 0) + 0.5) {
+    if (forceNext || forceCol || sBottom <= T(p) + CHof(p) - fnUsedHere - fnTotal - (fnTotal ? FN_SEP : 0) + 0.5) {
+      place(top, bottom, fnTotal, () => pos, 'block', pos);
+      pushFootnotes(fns);
+      return;
+    }
+    // 다단: 표는 단에 걸쳐 나누지 못한다. 한 단에 들어가는 표는 통째로 다음 단(쪽)으로 넘긴다
+    if (cols && bottom - top <= CHof(p) - fnTotal - (fnTotal ? FN_SEP : 0)) {
       place(top, bottom, fnTotal, () => pos, 'block', pos);
       pushFootnotes(fns);
       return;
@@ -878,23 +1059,60 @@ function computeLayout(
     const name = child.type.name;
     if (name === 'pageBreak') {
       forceNext = true;
-      // 구역 나누기: 다음 쪽부터 그 구역의 용지
+      // 구역 나누기: 다음 쪽부터 그 구역의 용지와 다단
       const sp = child.attrs?.sectionPage as PageSetup | null;
       if (sp && g.resolve) {
         const sg = g.resolve(sp);
         curPg = { H: sg.pageHeight, CH: sg.contentHeight, mt: sg.mt ?? 0, setup: sp };
+        pendingZone = { cols: columnGeom(sp.columns, sg.contentWidth), w: sg.contentWidth };
       }
+      return;
+    }
+    if (name === 'columnBreak') {
+      // 다단 설정 나누기: 다음 블록부터 새 다단. 단 나누기: 다음 블록을 다음 단으로
+      const pz: { cols: ColGeom | null; w?: number } | null = pendingZone;
+      if (child.attrs?.columns) pendingZone = { cols: columnGeom(child.attrs.columns, pz?.w ?? colW), w: pz?.w };
+      else forceCol = true;
       return;
     }
     // 한글이 새 쪽에서 시작한 블록. 앞 블록(여러 쪽에 걸친 표 등)이 이미 쪽을 넘겼으면 다시 넘기지 않는다
     softNext = !!child.attrs?.hwpPage && page === prevStartPage;
+    if (CONTAINERS.has(name)) {
+      // 최상위 상자 안의 상자(목록 항목 등): 첫 내용이 놓인 단을 적어 둔다
+      if (depth > 0) boxStack.push({ pos, col: -1 });
+      walk(child, pos + 1);
+      if (depth > 0) boxStack.pop();
+      return;
+    }
+    leafCol = -1;
     if (child.isTextblock) handleTextblock(child, pos);
     else if (name === 'table') handleTable(child, pos);
-    else if (CONTAINERS.has(name)) walk(child, pos + 1);
     else handleOther(pos);
+    // 목록 등의 안쪽 블록이 다음 단으로 넘어갔으면 가로로 옮긴다 (바깥 상자는 시작한 단에 있다).
+    // 이 블록으로 시작하는 상자(목록 항목: 글머리표도 함께 가야 한다)가 있으면 그 상자를, 아니면 이 블록을 옮긴다
+    if (depth > 0 && cols && leafCol >= 0 && blockCol >= 0) {
+      let ref = blockCol;
+      let target = pos;
+      let found = false;
+      for (const f of boxStack) {
+        if (f.col >= 0) ref = f.col;
+        else {
+          if (!found) {
+            target = f.pos;
+            found = true;
+          }
+          f.col = leafCol;
+        }
+      }
+      if (leafCol !== ref) breaks.push({ pos: target, kind: 'col', height: 0, inner: true, x: r2(cols.x[leafCol] - cols.x[ref]) });
+    }
   };
+  let depth = 0;
+  const boxStack: { pos: number; col: number }[] = [];
   const walk = (parent: PMNode, base: number) => {
+    depth++;
     parent.forEach((child, offset) => handleChild(child, base + offset));
+    depth--;
   };
 
   // 최상위 블록을 돌며 블록마다 상태 스냅샷을 남긴다
@@ -948,7 +1166,19 @@ function computeLayout(
       }
     }
     snaps[j] = { top, page, shift, fnUsed, forceNext, lastBottom, nBreaks: breaks.length, nFn: footnotes.length, nStarts: pageStarts.length, chain, lastSeq, prevStartPage };
+    if (child.type.name === 'columnBreak') {
+      handleChild(child, pos);
+      // 한글 문서에 있던 단 나누기는 한글 배치(블록마다 적힌 단)를 끊지 않는다. 새로 넣은 것은 그 쪽 끝까지 자연 배치로 흐르게 한다
+      if (!child.attrs?.hwp) {
+        chain = false;
+        lastSeq = 0;
+      }
+      pos += child.nodeSize;
+      continue;
+    }
     blockStart = -1;
+    blockCol = -1;
+    leafCol = -1;
     // 한글 자리를 따를 수 있는가: 한글 문서 그대로인 블록(차례·내용 크기)이 쪽 시작부터 이어져 왔을 때
     const a = child.attrs;
     const intact = child.type.name !== 'pageBreak' && a?.hwpSeq != null && a.hwpLen === child.content.size;
@@ -957,11 +1187,17 @@ function computeLayout(
     lastSeq = intact ? a!.hwpSeq : 0;
     if (chain && typeof a!.hwpTop === 'number' && el instanceof HTMLElement) {
       softNext = !!a!.hwpPage && page === prevStartPage;
-      snapTo(el, pos, a!.hwpTop, a!.hwpSeq);
+      snapTo(el, pos, a!.hwpTop, a!.hwpSeq, +a!.hwpCol || 0);
       if (child.isTextblock) handleFixedTextblock(child, pos, el);
       else if (child.type.name === 'table') handleTable(child, pos);
       else handleOther(pos);
     } else handleChild(child, pos);
+    // 다단: 이 블록을 제 단의 자리와 폭으로 (자리는 가로로 옮기기만 하므로, 오른쪽 여백 = 블록 자신의 것 + 본문 폭에서 단 폭을 뺀 나머지)
+    if (blockCols && blockCol >= 0 && child.type.name !== 'pageBreak') {
+      const bc: ColGeom = blockCols;
+      const k = Math.min(blockCol, bc.n - 1);
+      breaks.push({ pos, kind: 'col', height: 0, x: r2(bc.x[k]), r: r2(blockCW - bc.w[k] + ownMargins(child)[1]) });
+    }
     // 한글의 새 쪽 표시는 '줄 정보를 가진 앞 문단의 마지막 줄보다 뒤 쪽'이라는 뜻이다. 그 사이에 낀 표(글을 밀어낸 표: 자리 정보 없음)가
     // 쪽을 넘겼거나 통째로 다음 쪽으로 갔으면 이미 넘어온 것이므로, 기준 쪽은 줄 정보를 가진 블록이 끝난 쪽으로 둔다
     // (한글 문서의 표: 글자처럼 취급하는 표는 표가 곧 그 줄이므로 표가 시작한 쪽, 떠 있는 표는 줄이 아니므로 기준을 바꾸지 않는다)
@@ -1008,6 +1244,19 @@ function computeLayout(
   const repeats = breaks.filter((b) => b.head).map((b) => b.head!);
   const cuts = breaks.filter((b) => b.cut).map((b) => b.cut!);
   const result: LayoutResult = { pageCount, footnotes, pageStarts, ...(repeats.length ? { repeats } : {}), ...(cuts.length ? { cuts } : {}) };
+  // 단 구분선: 단 사이 한가운데에, 그 쪽에서 다단이 차지한 높이만큼 (다음 쪽으로 이어지는 다단은 본문 끝까지)
+  const colLines: ColLine[] = [];
+  for (const z of zones.values()) {
+    const ln = z.cols.line;
+    if (!ln || !(ln.w > 0)) continue;
+    const y2 = zones.has(z.page + 1 + ':' + z.id) ? CHof(z.page) : Math.min(CHof(z.page), z.bottom);
+    if (y2 - z.top < 1) continue;
+    for (let i = 0; i + 1 < z.cols.n; i++) {
+      const x = (z.cols.x[i] + z.cols.w[i] + z.cols.x[i + 1]) / 2;
+      colLines.push({ page: z.page, x: r2(x), y1: r2(z.top), y2: r2(y2), w: ln.w, c: ln.c, s: ln.s });
+    }
+  }
+  if (colLines.length) result.colLines = colLines;
   // 구역마다 용지가 다른 문서: 쪽마다의 용지 (끝 쪽까지 채운다)
   if (multi) {
     page = pageCount - 1;
@@ -1120,7 +1369,7 @@ export const Pagination = Extension.create<{}, PaginationStorage>({
             if (tr.docChanged) {
               noteDirty(tr);
               return {
-                breaks: value.breaks.map((b) => ({ ...b, pos: tr.mapping.map(b.pos, b.kind === 'line' ? 1 : -1), ...(b.head ? { head: { ...b.head, table: tr.mapping.map(b.head.table, -1) } } : {}), ...(b.cut ? { cut: { ...b.cut, table: tr.mapping.map(b.cut.table, -1) } } : {}) })),
+                breaks: value.breaks.map((b) => ({ ...b, pos: tr.mapping.map(b.pos, b.kind === 'line' ? 1 : -1), ...(b.end != null ? { end: tr.mapping.map(b.end, 1) } : {}), ...(b.head ? { head: { ...b.head, table: tr.mapping.map(b.head.table, -1) } } : {}), ...(b.cut ? { cut: { ...b.cut, table: tr.mapping.map(b.cut.table, -1) } } : {}) })),
                 decos: value.decos.map(tr.mapping, tr.doc),
               };
             }

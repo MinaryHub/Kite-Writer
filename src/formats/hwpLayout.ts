@@ -14,7 +14,9 @@ const PT2PX = 96 / 72;
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
 const INLINE_LEAVES = new Set(['image', 'hardBreak', 'footnote', 'math', 'shape']);
-const LEAF_BLOCKS = new Set(['pageBreak', 'horizontalRule']);
+const LEAF_BLOCKS = new Set(['pageBreak', 'columnBreak', 'horizontalRule']);
+/** 쪽 나누기·단 나누기 (줄 정보를 갖지 않는 블록) */
+export const isBreakBlock = (b: JNode) => b.type === 'pageBreak' || b.type === 'columnBreak';
 function jsonSize(n: JNode): number {
   if (n.type === 'text') return (n.text || '').length;
   if (INLINE_LEAVES.has(n.type) || LEAF_BLOCKS.has(n.type)) return 1;
@@ -218,7 +220,7 @@ export class ParaLayout {
   finish(blocks: JNode[], lines: [number, number][] | null, floating: boolean): { blocks: JNode[]; lead: JNode | null } {
     const { segV } = this;
     const { inSub, pp, state } = this.o;
-    let paras = blocks.filter((b) => b.type !== 'pageBreak');
+    let paras = blocks.filter((b) => !isBreakBlock(b));
     // 글자처럼 취급하는 표·글상자 하나와 빈칸뿐인 글: 한글에서는 한 줄(개체 높이)이다
     if (segV.length === 1 && paras.length > 1) {
       const objs = paras.filter((b) => b.type !== 'paragraph');
@@ -236,7 +238,7 @@ export class ParaLayout {
       if (a.hwpLines || segV.length === 1) a.hwpVs = segV;
       one.attrs = a;
     }
-    const breaks = blocks.filter((b) => b.type === 'pageBreak');
+    const breaks = blocks.filter(isBreakBlock);
     if (inSub) return { blocks: [...this.before, ...paras, ...this.after], lead: null };
     const v0 = segV.length ? segV[0][0] : null;
     let lead: JNode | null = null;
@@ -261,11 +263,11 @@ export class ParaLayout {
     for (const [t, top] of this.tableTops) if (top > -1) t.attrs = { ...t.attrs, hwpTop: r2(Math.max(0, top)) };
     const group = [...breaks, ...this.before, ...paras, ...this.after];
     for (const b of group) {
-      if (b.type === 'pageBreak') continue;
+      if (isBreakBlock(b)) continue;
       b.attrs = { ...b.attrs, hwpSeq: ++state.seq };
       if (b.attrs.hwpLen == null) b.attrs.hwpLen = jsonContentSize(b);
     }
-    return { blocks: group, lead: lead || group.find((b) => b.type !== 'pageBreak') || null };
+    return { blocks: group, lead: lead || group.find((b) => !isBreakBlock(b)) || null };
   }
 }
 
@@ -276,7 +278,7 @@ export class ParaLayout {
 export function gapInBox(groups: JNode[][]) {
   let prevEnd: number | null = 0;
   for (const blocks of groups) {
-    const paras = blocks.filter((b) => b.type !== 'pageBreak' && !b.attrs?.float);
+    const paras = blocks.filter((b) => !isBreakBlock(b) && !b.attrs?.float);
     const one = paras.length === 1 && paras[0].type === 'paragraph' ? paras[0] : null;
     const vs = one?.attrs?.hwpVs as number[][] | undefined;
     if (one && vs && vs.length) {
@@ -380,5 +382,35 @@ export function estimateMissingLines(root: JNode) {
     if (p.attrs?.hwpVs || !firstText(p)) continue;
     const s = stats.get(keyOf(p));
     if (s) p.attrs = { ...p.attrs, hwpPitch: s };
+  }
+}
+
+/**
+ * 한글 배치 정보(줄 자리·쪽 안 위치·차례 등)를 모두 뺀 사본. 줄 정보가 형식만 갖춘 문서(Kite 등 다른 프로그램이 쓴 HWP:
+ * 문단마다 세로 위치 0 인 줄 하나)는 그 값을 따르면 모든 문단이 쪽 맨 위에 겹치므로, 배치 정보 없이 자연 배치로 흐르게 한다
+ */
+export function dropHwpLayout(n: JNode): JNode {
+  const out: JNode = { ...n };
+  if (n.attrs) {
+    const a: Record<string, any> = {};
+    for (const k of Object.keys(n.attrs)) if (!/^hwp(Lines|Len|Top|Seq|Page|Col|Vs|Gap|Trail|Pitch)$/.test(k)) a[k] = n.attrs[k];
+    out.attrs = a;
+  }
+  if (n.content) out.content = n.content.map(dropHwpLayout);
+  return out;
+}
+
+/** 본문 문단들의 줄 정보가 형식뿐인가: 줄 정보가 있는 문단이 둘 이상인데 모두 '세로 위치 0 인 줄 하나'일 때 */
+export class LineSegStats {
+  private paras = 0;
+  private zero = 0;
+  /** 본문 문단 하나: 줄 수와 첫 줄의 세로 위치 */
+  note(lines: number, vpos: number) {
+    if (lines < 1) return;
+    this.paras++;
+    if (lines === 1 && vpos === 0) this.zero++;
+  }
+  get fake(): boolean {
+    return this.paras >= 2 && this.zero === this.paras;
   }
 }

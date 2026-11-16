@@ -2,6 +2,7 @@ import { useApp } from '../app/hooks';
 import { CharShapeDialog } from './dialogs/CharShapeDialog';
 import { ParaShapeDialog } from './dialogs/ParaShapeDialog';
 import { PageSetupDialog, HeaderFooterDialog, PageNumberDialog } from './dialogs/PageDialogs';
+import { ColumnsDialog, PageBorderDialog } from './dialogs/LayoutDialogs';
 import {
   TableDialog,
   LinkDialog,
@@ -47,6 +48,12 @@ export function Dialogs() {
         break;
       case 'pageNumber':
         el = <PageNumberDialog onClose={close} />;
+        break;
+      case 'columns':
+        el = <ColumnsDialog onClose={close} />;
+        break;
+      case 'pageBorder':
+        el = <PageBorderDialog onClose={close} />;
         break;
       case 'table':
         el = <TableDialog onClose={close} />;

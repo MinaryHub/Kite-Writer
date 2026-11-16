@@ -19,6 +19,7 @@ import { TextStyleExt } from './extensions/textStyleExt';
 import {
   KImage,
   PageBreak,
+  ColumnBreak,
   Footnote,
   KBulletList,
   KOrderedList,
@@ -120,6 +121,7 @@ export function getExtensions(): AnyExtension[] {
     ParagraphFormat,
     TextStyleExt,
     PageBreak,
+    ColumnBreak,
     Footnote,
     MathInline,
     TextBox,

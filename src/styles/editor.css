@@ -341,6 +341,30 @@
 .hide-marks .kdoc-content .page-break::after {
   display: none;
 }
+/* 단 나누기·다단 설정 나누기 */
+.kdoc-content .column-break::after {
+  border-top-style: dotted;
+  border-top-color: #9a8fd0;
+}
+/* 다단: 블록을 제 단의 자리로 (왼쪽으로는 옮기기만 하고, 오른쪽 여백으로 단의 폭에 맞춘다. --sec-r 은 구역 용지가 다른 블록의 몫) */
+.kdoc-content .pg-col {
+  position: relative;
+  left: var(--col-x, 0px);
+  margin-right: calc(var(--col-r, 0px) + var(--sec-r, 0px)) !important;
+}
+.kdoc-content .pg-col-in {
+  position: relative;
+  left: var(--col-dx, 0px);
+}
+/* 다른 단·쪽으로 넘어간 문단 안 줄들: 제자리에서 옮겨 그린다. 잴 때는 자연 배치로 */
+.kdoc-content .pg-seg {
+  position: relative;
+}
+.kdoc-content.pg-measuring .pg-seg,
+.kdoc-content .pg-measuring .pg-seg {
+  left: 0 !important;
+  top: 0 !important;
+}
 .kdoc-content .pg-spacer {
   display: block;
   pointer-events: none;

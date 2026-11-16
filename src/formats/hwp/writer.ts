@@ -1,7 +1,7 @@
 import * as CFB from 'cfb';
 import { deflateRaw } from 'pako';
-import type { HeaderFooter, KDocument } from '../../types';
-import { type JNode, mmToHwp, pxToHwp, ptToHwp, parseBorderCss, paraBorderToFill, HWP_BORDER_WIDTHS, FIXED_SPACE } from '../common';
+import type { Columns, HeaderFooter, KDocument } from '../../types';
+import { type JNode, mmToHwp, pxToHwp, ptToHwp, parseBorderCss, paraBorderToFill, cleanColumns, HWP_BORDER_WIDTHS, FIXED_SPACE } from '../common';
 import { type CharStyle, type FlatBlock, type FlatFloat, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, unwrapBoxes } from '../flatten';
 import { prepareImage } from '../imageUtil';
 import { HWP_LINE_STYLES, SHADOW_UNIT_PX, type ShapeData, type ShapeItem, type ShapeRaw } from '../shape';
@@ -858,7 +858,8 @@ class BodyWriter {
       }
     });
     this.ctrlChars(pb, 2, 'cold');
-    pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, hex('64 6c 6f 63 04 10 00 00 00 00 00 00 00 00 00 00')));
+    this.curCols = colKey(pg.columns);
+    pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, coldRec(pg.columns)));
     const hfHeight = (mm: number) => Math.max(1000, mmToHwp(mm));
     if (s.header.text.trim()) {
       this.ctrlChars(pb, 16, 'head');
@@ -884,13 +885,36 @@ class BodyWriter {
     }
   }
 
+  /** 지금까지 쓴 다단 (다단 설정 나누기를 앞 다단과 다를 때만 쓴다) */
+  private curCols = '1';
+
+  /**
+   * 본문 최상위 블록 앞의 나누기: 쪽 나누기(4), 단 나누기(8), 다단 설정 나누기(2: 문단에 단 정의를 넣는다).
+   * 문단 머리의 나누기 종류 값을 돌려준다
+   */
+  private breakOf(pb: ParaBuild, b: FlatPara | FlatTable, level: number, first: boolean): number {
+    if (first) return 3;
+    if (level !== 0 || this.inHF) return 0;
+    let bt = b.pageBreakBefore ? 4 : 0;
+    if (b.columnBreakBefore && !bt) bt |= 8;
+    if (b.columnsBefore && colKey(b.columnsBefore) !== this.curCols) {
+      const cols = b.columnsBefore;
+      this.curCols = colKey(cols);
+      this.ctrlChars(pb, 2, 'cold');
+      pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, coldRec(cols)));
+      bt |= 2;
+    }
+    return bt;
+  }
+
   para(p: FlatPara, level: number, last: boolean, first = false) {
     const pb = this.beginPara();
     pb.maxSize = p.baseChar.size;
     this.setShape(pb, this.reg.char(p.baseChar));
     if (first) this.sectionCtrls(pb);
+    const bt = this.breakOf(pb, p, level, first);
     this.inlines(pb, p.inlines, level, (p.style.indentLeft + Math.max(0, -p.style.textIndent)) * PT2PX, p.style.spaceBefore * PT2PX);
-    this.emitPara(pb, this.reg.para(p.style), level, last, first ? 3 : p.pageBreakBefore && level === 0 ? 4 : 0);
+    this.emitPara(pb, this.reg.para(p.style), level, last, bt);
   }
 
   table(t: FlatTable, level: number, last: boolean, first = false) {
@@ -898,13 +922,14 @@ class BodyWriter {
     this.setShape(pb, 0);
     // 문서가 표로 시작하면 구역 정의를 표가 든 문단에 함께 둔다 (따로 빈 문단을 두면 그 줄만큼 본문이 내려간다)
     if (first) this.sectionCtrls(pb);
+    const bt = this.breakOf(pb, t, level, first);
     this.ctrlChars(pb, 11, 'tbl ');
     pb.ctrls.push((w, lv) => this.tableCtrl(w, lv, t));
     const pp = defaultPara();
     if (t.align !== 'left') pp.align = t.align as any;
     // 글자처럼 놓인 표의 줄: 줄 간격이 160% 면 표 아래에 글자 크기의 60% 만큼 빈자리가 더 생긴다
     if (t.inline) pp.lineHeight = '1';
-    this.emitPara(pb, this.reg.para(pp), level, last, first ? 3 : t.pageBreakBefore && level === 0 ? 4 : 0);
+    this.emitPara(pb, this.reg.para(pp), level, last, bt);
   }
 
   private tableCtrl(w: RecWriter, lv: number, t: FlatTable) {
@@ -971,6 +996,40 @@ class BodyWriter {
       else this.blocks(b.blocks, level, false);
     });
   }
+}
+
+/** 다단 값을 견주는 열쇠 (한 단은 '1') */
+function colKey(c: Columns | null | undefined): string {
+  const v = cleanColumns(c);
+  return v && v.count > 1 ? JSON.stringify(v) : '1';
+}
+
+/**
+ * 단 정의(cold) 컨트롤: 속성 u16 (bit 2~9 단 수, bit 12 너비 같게), 너비가 같으면 단 사이 간격 · 속성2,
+ * 다르면 속성2 뒤에 단마다 너비 · 간격 (본문 폭에 대한 비율, 합 32768), 이어서 구분선 종류 · 굵기 · 색
+ */
+function coldRec(c: Columns | null | undefined): Uint8Array {
+  const v = cleanColumns(c);
+  const b = new Buf().u32(ctrlId('cold'));
+  const n = v && v.count > 1 ? Math.min(255, v.count) : 1;
+  const uneven = !!(v && n > 1 && v.widths && v.gaps);
+  b.u16((n << 2) | (uneven ? 0 : 0x1000));
+  if (!uneven) b.u16(v && n > 1 ? Math.min(65535, mmToHwp(v.gap)) : 0).u16(0);
+  else {
+    b.u16(0);
+    const total = v!.widths!.reduce((x, y) => x + y, 0) + v!.gaps!.slice(0, n - 1).reduce((x, y) => x + y, 0) || 1;
+    const u = (x: number) => Math.max(0, Math.min(65535, Math.round((x / total) * 32768)));
+    for (let i = 0; i < n; i++) b.u16(u(v!.widths![i])).u16(i < n - 1 ? u(v!.gaps![i]) : 0);
+  }
+  const ln = v && n > 1 ? v.line : null;
+  if (ln) {
+    let wi = 0;
+    HWP_BORDER_WIDTHS.forEach((w, i) => {
+      if (Math.abs(w - ln.w) < Math.abs(HWP_BORDER_WIDTHS[wi] - ln.w)) wi = i;
+    });
+    b.u8(ln.s === 'dashed' ? 2 : ln.s === 'dotted' ? 3 : ln.s === 'double' ? 8 : 1).u8(wi).u32(rgb(ln.c));
+  } else b.u8(0).u8(0).u32(0);
+  return b.out();
 }
 
 /** 표·그림이 든 머리말/꼬리말의 블록 (없으면 null) */

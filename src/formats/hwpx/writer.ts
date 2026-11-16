@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
-import type { HeaderFooter, KDocument } from '../../types';
-import { type JNode, mmToHwp, pxToHwp, ptToHwp, xmlEscape, parseBorderCss, paraBorderToFill, normColor, safeIsoDate, FIXED_SPACE } from '../common';
+import type { Columns, HeaderFooter, KDocument } from '../../types';
+import { type JNode, mmToHwp, pxToHwp, ptToHwp, xmlEscape, parseBorderCss, paraBorderToFill, normColor, safeIsoDate, cleanColumns, FIXED_SPACE } from '../common';
 import { type CharStyle, type FlatBlock, type FlatFloat, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, type FlatBox } from '../flatten';
 import { prepareImage } from '../imageUtil';
 import { shapeImageSrcs, shapeXml } from './shapeWriter';
@@ -476,18 +476,31 @@ class SectionWriter {
       }
       const isFirst = first && !begun;
       begun = true;
-      if (b.kind === 'para') xml += this.paragraph(b, { sub, first: isFirst, extraRuns: pending });
+      // 다단 설정 나누기: 앞 다단과 다를 때만 이 문단에 다단 정의를 넣는다 (본문 최상위에서만)
+      let colRun = '';
+      if (!sub && !isFirst && b.columnsBefore && colKey(b.columnsBefore) !== this.curCols) {
+        this.curCols = colKey(b.columnsBefore);
+        colRun = `<hp:run charPrIDRef="0"><hp:ctrl>${colPrXml(b.columnsBefore)}</hp:ctrl></hp:run>`;
+      }
+      let bx: string;
+      if (b.kind === 'para') bx = this.paragraph(b, { sub, first: isFirst, extraRuns: colRun + pending });
       else if (b.kind === 'box') {
         // 문서가 글상자로 시작하면 구역 정의를 담을 빈 문단을 앞에 둔다
         if (isFirst) xml += this.paragraph({ kind: 'para', style: defaultPara(), baseChar: defaultChar(), inlines: [], pageBreakBefore: false }, { sub, first: true });
-        xml += this.box(b, sub, pending);
-      } else xml += this.table(b, sub, isFirst, pending);
+        bx = this.box(b, sub, colRun + pending);
+      } else bx = this.table(b, sub, isFirst, colRun + pending);
+      // 단 나누기 (블록을 담은 문단의 속성)
+      if (!sub && !isFirst && b.columnBreakBefore) bx = bx.replace('columnBreak="0"', 'columnBreak="1"');
+      xml += bx;
       pending = '';
     }
     // 뒤따르는 문단이 없는 떠 있는 블록: 빈 문단에 담는다
     if (pending || (first && !begun)) xml += this.paragraph({ kind: 'para', style: defaultPara(), baseChar: defaultChar(), inlines: [], pageBreakBefore: false }, { sub, first: first && !begun, extraRuns: pending });
     return xml;
   }
+
+  /** 지금까지 쓴 다단 (다단 설정 나누기를 앞 다단과 다를 때만 쓴다) */
+  private curCols = '1';
 
   /** 첫 문단의 구역 정의 + 머리말/꼬리말/쪽 번호 컨트롤 */
   secPrRun(p: FlatPara): string {
@@ -536,7 +549,8 @@ class SectionWriter {
     for (const t of ['BOTH', 'EVEN', 'ODD'])
       xml += `<hp:pageBorderFill type="${t}" borderFillIDRef="${t === 'BOTH' ? pbId : 1}" ${t === 'BOTH' ? pbAttrs : 'textBorder="PAPER" headerInside="0" footerInside="0" fillArea="PAPER"'}><hp:offset left="${t === 'BOTH' ? pbOff[0] : 1417}" right="${t === 'BOTH' ? pbOff[1] : 1417}" top="${t === 'BOTH' ? pbOff[2] : 1417}" bottom="${t === 'BOTH' ? pbOff[3] : 1417}"/></hp:pageBorderFill>`;
     for (const m of this.masterXml) xml += `<hp:masterPage idRef="${m.id}"/>`;
-    xml += `</hp:secPr><hp:ctrl><hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/></hp:ctrl></hp:run>`;
+    this.curCols = colKey(pg.columns);
+    xml += `</hp:secPr><hp:ctrl>${colPrXml(pg.columns)}</hp:ctrl></hp:run>`;
 
     const bodyW = this.bodyWidthHwp;
     const hf = (kind: 'header' | 'footer') => {
@@ -833,4 +847,26 @@ export async function writeHwpx(doc: KDocument, opts: { pageCount?: number } = {
   zip.file('Contents/content.hpf', hpf);
   for (const im of reg.images) zip.file(im.path, im.bytes, { compression: 'STORE' });
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', compressionOptions: { level: 6 }, mimeType: 'application/hwp+zip' });
+}
+
+/** 다단 값을 견주는 열쇠 (한 단은 '1') */
+function colKey(c: Columns | null | undefined): string {
+  const v = cleanColumns(c);
+  return v && v.count > 1 ? JSON.stringify(v) : '1';
+}
+
+/** 다단 정의 (hp:colPr). 너비가 다른 단의 너비·간격은 본문 폭에 대한 비율(합 32768)로 적는다 */
+function colPrXml(c: Columns | null | undefined): string {
+  const v = cleanColumns(c);
+  if (!v || v.count < 2) return `<hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="1" sameSz="1" sameGap="0"/>`;
+  const n = v.count;
+  const TYPE: Record<string, string> = { solid: 'SOLID', dashed: 'DASH', dotted: 'DOT', double: 'DOUBLE_SLIM' };
+  const line = v.line ? `<hp:colLine type="${TYPE[v.line.s] || 'SOLID'}" width="${v.line.w} mm" color="${normColor(v.line.c) || '#000000'}"/>` : '';
+  if (v.widths && v.gaps) {
+    const total = v.widths.reduce((a, b) => a + b, 0) + v.gaps.slice(0, n - 1).reduce((a, b) => a + b, 0) || 1;
+    const u = (x: number) => Math.max(0, Math.round((x / total) * 32768));
+    const szs = v.widths.map((w, i) => `<hp:colSz width="${u(w)}" gap="${i < n - 1 ? u(v.gaps![i]) : 0}"/>`).join('');
+    return `<hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="${n}" sameSz="0" sameGap="0">${line}${szs}</hp:colPr>`;
+  }
+  return `<hp:colPr id="" type="NEWSPAPER" layout="LEFT" colCount="${n}" sameSz="1" sameGap="${mmToHwp(v.gap)}"${line ? `>${line}</hp:colPr>` : '/>'}`;
 }

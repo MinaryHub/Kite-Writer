@@ -175,6 +175,8 @@ export const ParagraphFormat = Extension.create({
           hwpGap: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
           /** 한글(HWP)에서 이 문단이 새 쪽의 맨 위에서 시작했다 (쪽 나누기가 그 자리에서 쪽을 넘긴다) */
           hwpPage: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 한글에서 이 문단이 시작한 단 (다단. 0 = 첫 단) */
+          hwpCol: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
           /**
            * 문단 테두리 (한글의 문단 모양 → 테두리/배경): { l, r, t, b: '굵기mm 종류 색', o: 글과의 간격 px [왼, 오른, 위, 아래], c: 이어진 문단과 한 상자 }.
            * 줄 배치를 바꾸지 않도록 문단 상자 위에 얹어 그린다 (editor.css 의 p[data-pb]::after)

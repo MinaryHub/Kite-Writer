@@ -695,3 +695,64 @@ export function paraBorderToFill(pb: ParaBorder): { noBorders: string[]; css: st
     .join(';');
   return { noBorders, css };
 }
+
+// ---------------- 다단 ----------------
+
+/** 단마다의 자리 (px): 본문 왼쪽에서 단 왼쪽까지(x)와 단 너비(w) */
+export interface ColGeom {
+  n: number;
+  x: number[];
+  w: number[];
+  line: { w: number; c: string; s: string } | null;
+}
+
+/** 다단 값을 쓸 수 있는 범위로 (붙여 넣은 HTML·파일에서 온 값). 한 단이면 count 1 만 남긴다. 잘못된 값이면 null */
+export function cleanColumns(v: any): { count: number; gap: number; widths?: number[]; gaps?: number[]; line?: { w: number; c: string; s: 'solid' | 'dashed' | 'dotted' | 'double' } | null } | null {
+  if (!v || typeof v !== 'object') return null;
+  const count = Math.round(Number(v.count));
+  if (!Number.isFinite(count) || count < 1) return null;
+  const n = Math.min(count, 20);
+  const num = (x: any, hi: number) => {
+    const k = Number(x);
+    return Number.isFinite(k) ? Math.min(hi, Math.max(0, k)) : 0;
+  };
+  if (n === 1) return { count: 1, gap: 0 };
+  const out: ReturnType<typeof cleanColumns> = { count: n, gap: num(v.gap, 500) };
+  if (Array.isArray(v.widths) && v.widths.length === n && v.widths.every((w: any) => Number(w) > 0)) {
+    out!.widths = v.widths.map((w: any) => num(w, 2000));
+    out!.gaps = Array.from({ length: n }, (_x, i) => num(Array.isArray(v.gaps) ? v.gaps[i] : 0, 500));
+  }
+  const l = v.line;
+  if (l && typeof l === 'object' && Number(l.w) > 0) {
+    const s = ['solid', 'dashed', 'dotted', 'double'].includes(l.s) ? l.s : 'solid';
+    out!.line = { w: num(l.w, 10), c: typeof l.c === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(l.c) ? l.c : '#000000', s };
+  }
+  return out;
+}
+
+/** 다단의 단 자리. 한 단이거나 값이 없으면 null. 너비가 다른 단은 본문 폭에 맞게 줄이거나 늘린다 */
+export function columnGeom(cols: any, contentWidthPx: number): ColGeom | null {
+  const c = cleanColumns(cols);
+  if (!c || c.count < 2 || !(contentWidthPx > 0)) return null;
+  const n = c.count;
+  const x: number[] = [];
+  const w: number[] = [];
+  if (c.widths && c.gaps) {
+    const total = c.widths.reduce((a, b) => a + b, 0) + c.gaps.slice(0, n - 1).reduce((a, b) => a + b, 0);
+    const k = total > 0 ? contentWidthPx / (total * PX_PER_MM) : 1;
+    let at = 0;
+    for (let i = 0; i < n; i++) {
+      x.push(at);
+      w.push(c.widths[i] * PX_PER_MM * k);
+      at += (c.widths[i] + c.gaps[i]) * PX_PER_MM * k;
+    }
+  } else {
+    const gap = Math.min(c.gap * PX_PER_MM, (contentWidthPx - n * 8) / (n - 1));
+    const cw = (contentWidthPx - Math.max(0, gap) * (n - 1)) / n;
+    for (let i = 0; i < n; i++) {
+      x.push(i * (cw + Math.max(0, gap)));
+      w.push(cw);
+    }
+  }
+  return { n, x, w, line: c.line || null };
+}

@@ -1,8 +1,8 @@
-import { indentByBlanks, type FloatHw } from '../hwpLayout';
+import { LineSegStats, dropHwpLayout, indentByBlanks, type FloatHw } from '../hwpLayout';
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
 import { CELL_VMARGIN_HWP, FLOATING, HwpPageMarks, assembleTable, fitTableLines, placeCaptions, takeFloating, type Caption, type Captions } from '../hwp/reader';
-import type { DocMeta, DocSettings, LoadedDoc, MasterPage, PageBorder, PageSetup } from '../../types';
+import type { Columns, DocMeta, DocSettings, LoadedDoc, MasterPage, PageBorder, PageSetup } from '../../types';
 import { type Gradient, type Mat, type ShapeData, type ShapeItem, type ShapeRaw, IDENTITY, SHADOW_DEFAULT, SHADOW_UNIT_PX, arrowOf, arrowSizeOf, composeMats, gradientToCss, matOfHwp, shapeBounds } from '../shape';
 import {
   type JMark,
@@ -510,7 +510,7 @@ function shapeMatrix(el: Element): { m: Mat; raw: ShapeRaw } {
 }
 
 const INLINE_LEAVES = new Set(['image', 'hardBreak', 'footnote', 'math', 'shape']);
-const LEAF_BLOCKS = new Set(['pageBreak', 'horizontalRule']);
+const LEAF_BLOCKS = new Set(['pageBreak', 'columnBreak', 'horizontalRule']);
 /** 문서 노드(JSON)가 ProseMirror 에서 차지하는 크기 (nodeSize) */
 function jsonSize(n: JNode): number {
   if (n.type === 'text') return (n.text || '').length;
@@ -593,6 +593,10 @@ export class HwpxConverter {
   private lastVpos = 0;
   private topParas = 0;
   private pageMarks = new HwpPageMarks();
+  /** 지금 구역의 다단 (한 단이면 null) */
+  secCols: Columns | null = null;
+  /** 본문 문단의 줄 정보가 형식뿐인지 (다른 프로그램이 쓴 파일) */
+  segStats = new LineSegStats();
 
   /** 지금 구역의 용지 (없으면 문서 용지). 떠 있는 개체의 쪽·종이 기준 자리를 셈한다 */
   private secPage: PageSetup | null = null;
@@ -604,6 +608,9 @@ export class HwpxConverter {
   private pageNo = 0;
   /** 앞 본문 문단의 마지막 줄이 끝난 자리 (px, 쪽 본문 기준) */
   private prevEndV = 0;
+  /** 다단: 지금 다단의 단 수와 지금 문단이 놓인 단 (줄의 세로 위치가 되돌아갈 때마다 다음 단으로 센다) */
+  private colCount = 1;
+  private col = 0;
 
   /** 구역이 바뀌면 쪽 세기를 새로 */
   startSection(page: PageSetup | null = null, newPage = false) {
@@ -613,6 +620,9 @@ export class HwpxConverter {
     this.pageMarks.reset();
     this.secPage = page;
     this.prevEndV = 0;
+    this.colCount = 1;
+    this.col = 0;
+    this.secCols = null;
   }
 
   /** 지금 구역 용지의 크기와 본문 자리 (px) */
@@ -763,16 +773,56 @@ export class HwpxConverter {
     /** 쪽 나누기 없이 한글이 새 쪽에 놓은 문단 (첫 줄의 세로 위치가 되돌아감) */
     let hwpPage = false;
     let vpos: number | null = null;
+    /** 이 문단이 시작한 단 (다단), 단이 바뀌었는가 */
+    let startCol = 0;
+    let newCol = false;
     if (!ctx.inSub) {
       vpos = segEls.length ? numAttr(segEls[0], 'vertpos', 0) : null;
-      hwpPage = this.topParas++ > 0 && !pageBreak && vpos != null && vpos < this.lastVpos;
+      if (vpos != null) this.segStats.note(segEls.length, vpos);
+      const first = this.topParas++ === 0;
+      const reset = !first && !pageBreak && vpos != null && vpos < this.lastVpos;
+      // 다단 정의: 구역의 첫 문단에 있으면 그 구역의 다단, 그 밖에는 '다단 설정 나누기' (여기서부터 새 다단)
+      const colPr = findColPr(p);
+      const cols = colPr ? columnsOfColPr(colPr, this.pageGeom().bodyW / MM2PX) : null;
+      const colBreak = attr(p, 'columnBreak') === '1';
+      let zone = false;
+      if (cols && first) {
+        this.colCount = cols.count;
+        if (cols.count > 1) (this.secPage || this.settings.page).columns = cols;
+        this.secCols = cols.count > 1 ? cols : null;
+      } else if (cols) {
+        this.colCount = cols.count;
+        zone = true;
+      }
+      if (pageBreak) this.col = 0;
+      else if (zone) {
+        // 새 다단은 앞 다단 아래에서 시작한다. 세로 위치가 되돌아갔으면 다음 쪽에서 시작한 것이다
+        this.col = 0;
+        hwpPage = reset;
+      } else if (reset || colBreak) {
+        // 세로 위치가 되돌아갔다: 다음 단으로 넘어갔거나, 마지막 단이었으면 다음 쪽이다
+        if (this.col < this.colCount - 1) {
+          this.col++;
+          newCol = true;
+        } else {
+          this.col = 0;
+          hwpPage = !first;
+        }
+      }
+      startCol = this.col;
+      // 문단 안에서 줄의 세로 위치가 되돌아간 곳마다 단(쪽)이 바뀐다
+      for (let i = 1; i < segEls.length; i++) {
+        if (numAttr(segEls[i], 'vertpos', 0) < numAttr(segEls[i - 1], 'vertpos', 0)) this.col = this.col < this.colCount - 1 ? this.col + 1 : 0;
+      }
       // 다음 문단과는 이 문단 마지막 줄의 세로 위치로 견준다 (여러 줄 문단은 줄 사이에서 쪽이 바뀔 수 있다)
       if (segEls.length) this.lastVpos = numAttr(segEls[segEls.length - 1], 'vertpos', 0);
       if (pageBreak) blocks.push({ type: 'pageBreak' });
+      if (zone) blocks.push({ type: 'columnBreak', attrs: { columns: cols, hwp: true } });
+      else if (colBreak && !first && !pageBreak) blocks.push({ type: 'columnBreak', attrs: { hwp: true } });
       if ((pageBreak || hwpPage) && this.seq > 0) this.pageNo++;
     }
-    /** 앞 문단이 끝난 자리 (새 쪽이면 쪽 맨 위) */
-    const prevEnd = hwpPage || pageBreak ? 0 : this.prevEndV;
+    /** 앞 문단이 끝난 자리 (새 쪽·새 단이면 맨 위) */
+    const prevEnd = hwpPage || pageBreak || newCol ? 0 : this.prevEndV;
     if (!ctx.inSub && segV.length) {
       const l = segV[segV.length - 1];
       this.prevEndV = l[0] + l[1] + l[2];
@@ -945,7 +995,7 @@ export class HwpxConverter {
     track.at.set(0, 0);
     // 떠 있는 개체 표시는 늘 지운다 (문서 노드에는 없는 속성)
     const floating = blocks.map(takeFloating).some(Boolean);
-    let paras = blocks.filter((b) => b.type !== 'pageBreak');
+    let paras = blocks.filter((b) => !isBreak(b));
     // 글자처럼 취급하는 표·글상자 하나와 빈칸뿐인 글: 한글에서는 한 줄(개체 높이)이다. 빈칸 문단을 따로 세우면 줄이 하나 더 생긴다
     if (segV.length === 1 && paras.length > 1) {
       const objs = paras.filter((b) => b.type !== 'paragraph');
@@ -992,13 +1042,14 @@ export class HwpxConverter {
         lead = [...before.filter((x) => x.attrs?.float), one].find((x) => x.attrs?.hwpTop != null) || one;
       }
       for (const [t, top] of tableTops) if (top > -1) t.attrs = { ...t.attrs, hwpTop: r2(Math.max(0, top)) };
-      const group = placeCaptions([...blocks.filter((b) => b.type === 'pageBreak'), ...before, ...paras, ...after], captions);
+      const group = placeCaptions([...blocks.filter(isBreak), ...before, ...paras, ...after], captions);
       for (const b of group) {
-        if (b.type === 'pageBreak') continue;
+        if (isBreak(b)) continue;
         b.attrs = { ...b.attrs, hwpSeq: ++this.seq };
         if (b.attrs.hwpLen == null) b.attrs.hwpLen = jsonContentSize(b);
+        if (startCol > 0) b.attrs.hwpCol = startCol;
       }
-      this.pageMarks.mark(lead || group.find((b) => b.type !== 'pageBreak'), vpos, hwpPage);
+      this.pageMarks.mark(lead || group.find((b) => !isBreak(b)), vpos, hwpPage);
       return group;
     }
     return placeCaptions([...before, ...paras, ...after], captions);
@@ -1241,6 +1292,7 @@ export class HwpxConverter {
     if (!pg) return;
     this.settingsSet = true;
     this.settings.page = pg;
+    if (this.secCols) pg.columns = this.secCols;
     // 쪽 테두리/배경: 양쪽 쪽에 적용되는 것 (첫 구역)
     const pbf = kids(sec, 'pageBorderFill').find((e) => (attr(e, 'type') || 'BOTH') === 'BOTH') || kid(sec, 'pageBorderFill');
     if (pbf) {
@@ -1753,11 +1805,51 @@ export class HwpxConverter {
 }
 
 /** 구역 정의(hp:secPr)의 편집 용지. 없으면 null (base 의 값을 기본으로) */
+/** 쪽 나누기·단 나누기 (줄 정보를 갖지 않는 블록) */
+const isBreak = (b: JNode) => b.type === 'pageBreak' || b.type === 'columnBreak';
+
+/** 문단에 든 다단 정의 (hp:ctrl 의 hp:colPr) */
+function findColPr(p: Element): Element | null {
+  for (const run of kids(p, 'run'))
+    for (const c of kids(run, 'ctrl')) {
+      const cp = kid(c, 'colPr');
+      if (cp) return cp;
+    }
+  return null;
+}
+
+/** 다단 정의 → 다단 값. 너비가 다른 단의 너비·간격은 본문 폭에 대한 비율(합 32768)이므로 본문 폭(mm)에 맞춘다 */
+function columnsOfColPr(el: Element, bodyMm: number): Columns {
+  const n = Math.max(1, Math.min(20, numAttr(el, 'colCount', 1)));
+  if (n < 2) return { count: 1, gap: 0 };
+  const out: Columns = { count: n, gap: round(hwpToMm(numAttr(el, 'sameGap', 0)), 2) };
+  if (attr(el, 'sameSz') === '0') {
+    const szs = kids(el, 'colSz');
+    const ws = szs.map((x) => numAttr(x, 'width', 0));
+    const gs = szs.map((x) => numAttr(x, 'gap', 0));
+    const total = ws.reduce((a, b) => a + b, 0) + gs.slice(0, n - 1).reduce((a, b) => a + b, 0);
+    if (szs.length === n && total > 0 && ws.every((w) => w > 0)) {
+      const k = bodyMm / total;
+      out.widths = ws.map((w) => round(w * k, 2));
+      out.gaps = gs.map((g, i) => (i < n - 1 ? round(g * k, 2) : 0));
+    }
+  }
+  const ln = kid(el, 'colLine');
+  const type = (attr(ln, 'type') || 'NONE').toUpperCase();
+  if (ln && type !== 'NONE') {
+    const w = parseFloat(attr(ln, 'width') || '0.12') || 0.12;
+    out.line = { w, c: normColor(attr(ln, 'color')) || '#000000', s: /DOUBLE|SLIM/.test(type) ? 'double' : /DASH/.test(type) ? 'dashed' : /DOT/.test(type) ? 'dotted' : 'solid' };
+  }
+  return out;
+}
+
 function pageOfSecPr(sec: Element, base: PageSetup): PageSetup | null {
   const pagePr = kid(sec, 'pagePr');
   if (!pagePr) return null;
   const m = kid(pagePr, 'margin');
+  // 다단은 구역마다 따로 정한다 (구역의 첫 문단에 든 다단 정의)
   const pg: PageSetup = { ...base };
+  delete pg.columns;
   pg.width = round(hwpToMm(numAttr(pagePr, 'width', 59528)), 1);
   pg.height = round(hwpToMm(numAttr(pagePr, 'height', 84188)), 1);
   pg.landscape = attr(pagePr, 'landscape') === 'NARROWLY';
@@ -1910,7 +2002,8 @@ export async function readHwpx(data: Uint8Array): Promise<LoadedDoc> {
     }
   }
   if (masters.length) settings.masterPages = masters;
-  return { content: docNode(blocks), settings, meta, warnings: dedupe(warnings) };
+  // 줄 정보가 형식뿐인 문서(한글이 배치하지 않은 파일)는 그 값을 따르지 않고 자연 배치로 흐르게 한다
+  return { content: docNode(conv.segStats.fake ? blocks.map(dropHwpLayout) : blocks), settings, meta, warnings: dedupe(warnings) };
 }
 
 function dedupe(a: string[]) {

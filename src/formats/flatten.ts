@@ -1,5 +1,6 @@
 import { latexToHwp } from '../math/hwpEq';
-import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type JMark, type JNode, type ParaBorder, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
+import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type JMark, type JNode, type ParaBorder, cleanColumns, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
+import type { Columns } from '../types';
 import { cleanShape, type ShapeData } from './shape';
 import type { FloatHw } from './hwpLayout';
 
@@ -117,7 +118,13 @@ export type FlatInline =
   | { type: 'shape'; width: number; height: number; d: ShapeData; float: FlatFloat | null; style: CharStyle }
   | { type: 'footnote'; text: string; style: CharStyle };
 
-export interface FlatPara {
+/** 블록 앞의 단 나누기 (다음 단으로), 다단 설정 나누기 (여기서부터 그 다단으로. count 1 은 한 단) */
+export interface FlatColumnBreak {
+  columnBreakBefore?: boolean;
+  columnsBefore?: Columns | null;
+}
+
+export interface FlatPara extends FlatColumnBreak {
   kind: 'para';
   style: ParaStyle;
   /** 빈 문단의 글자 모양 */
@@ -143,7 +150,7 @@ export interface FlatCell {
   marginsPx?: number[] | null;
 }
 
-export interface FlatTable {
+export interface FlatTable extends FlatColumnBreak {
   kind: 'table';
   rows: number;
   cols: number;
@@ -164,7 +171,7 @@ export interface FlatTable {
 }
 
 /** 글상자 (도형 안의 문단들) */
-export interface FlatBox {
+export interface FlatBox extends FlatColumnBreak {
   kind: 'box';
   width: number | null;
   height: number | null;
@@ -195,6 +202,8 @@ export function unwrapBoxes(blocks: FlatBlock[]): FlatBlock[] {
     if (b.kind === 'box') {
       const inner = unwrapBoxes(b.blocks);
       if (inner.length && b.pageBreakBefore) inner[0].pageBreakBefore = true;
+      if (inner.length && b.columnBreakBefore) inner[0].columnBreakBefore = true;
+      if (inner.length && b.columnsBefore) inner[0].columnsBefore = b.columnsBefore;
       out.push(...inner);
     } else if (b.kind === 'table') {
       for (const row of b.cells) for (const c of row) c.blocks = unwrapBoxes(c.blocks);
@@ -411,10 +420,20 @@ export function flattenDoc(doc: JNode): FlatBlock[] {
 export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
   const out: FlatBlock[] = [];
   let pendingBreak = false;
+  let pendingCol = false;
+  let pendingCols: Columns | null = null;
   const push = (b: FlatBlock) => {
     if (pendingBreak) {
       b.pageBreakBefore = true;
       pendingBreak = false;
+    }
+    if (pendingCol) {
+      b.columnBreakBefore = true;
+      pendingCol = false;
+    }
+    if (pendingCols) {
+      b.columnsBefore = pendingCols;
+      pendingCols = null;
     }
     out.push(b);
   };
@@ -422,6 +441,12 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
     switch (n.type) {
       case 'pageBreak':
         pendingBreak = true;
+        // 구역 나누기: 그 구역의 다단으로 바꾼다 (쓰는 쪽이 앞 다단과 같으면 건너뛴다)
+        if (n.attrs?.sectionPage) pendingCols = cleanColumns(n.attrs.sectionPage.columns) || { count: 1, gap: 0 };
+        break;
+      case 'columnBreak':
+        if (n.attrs?.columns) pendingCols = cleanColumns(n.attrs.columns) || pendingCols;
+        else pendingCol = true;
         break;
       case 'paragraph':
         push(flattenPara(n, ctx, 0));
@@ -482,11 +507,7 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
         if (n.content) for (const b of flattenBlocks(n.content, ctx)) push(b);
     }
   }
-  if (pendingBreak) {
-    const p = flattenPara({ type: 'paragraph' }, ctx, 0);
-    p.pageBreakBefore = true;
-    out.push(p);
-  }
+  if (pendingBreak || pendingCol || pendingCols) push(flattenPara({ type: 'paragraph' }, ctx, 0));
   return out;
 }
 

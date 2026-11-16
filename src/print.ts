@@ -242,9 +242,18 @@ export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number): string {
 export function repeatHeadsHtml(tab: DocTab, g: PageGeom, k: number): string {
   const reps = (tab.layout.repeats || []).filter((r) => r.page === k);
   const cuts = (tab.layout.cuts || []).filter((c) => c.page === k);
-  if (!reps.length && !cuts.length) return '';
+  const lines = (tab.layout.colLines || []).filter((c) => c.page === k);
+  if (!reps.length && !cuts.length && !lines.length) return '';
   const cls = 'kdoc-content' + (tab.settings.hwpMetrics ? ' hwp-metrics' : '') + (tab.settings.fixedLines ? ' fixed-lines' : '');
   let html = '';
+  // 다단의 단 구분선
+  for (const l of lines) {
+    const w = Math.max(0.5, l.w * PX_PER_MM);
+    const st = l.s === 'dashed' || l.s === 'dotted' || l.s === 'double' ? l.s : 'solid';
+    const bw = st === 'double' ? Math.max(3, w) : w;
+    const col = /^#[0-9a-fA-F]{3,8}$/.test(l.c) ? l.c : '#000';
+    html += `<div class="pg-col-line" style="position:absolute;left:${(g.ml + l.x - bw / 2).toFixed(2)}px;top:${(g.mt + l.y1).toFixed(2)}px;height:${Math.max(0, l.y2 - l.y1).toFixed(2)}px;width:0;border-left:${bw.toFixed(2)}px ${st} ${col};pointer-events:none"></div>`;
+  }
   for (const r of reps) {
     let dom: Node | null = null;
     try {
@@ -324,6 +333,9 @@ export interface PageBox {
   el: HTMLElement;
   top: number;
   bottom: number;
+  /** 다단에서 다른 단·쪽으로 옮겨 그린 줄까지 넣은 세로 범위 (없으면 top~bottom) */
+  vTop?: number;
+  vBottom?: number;
   /** 편집기 본문 왼쪽에서 블록 왼쪽(여백 포함 자리)까지와 블록 폭 */
   left: number;
   width: number;
@@ -332,9 +344,28 @@ export interface PageBox {
 /** 편집기 최상위 블록들의 자리 (쪽 나누기 공간은 제외) */
 export function collectPageBoxes(root: HTMLElement): PageBox[] {
   const children = Array.from(root.children) as HTMLElement[];
+  const rootRect = root.getBoundingClientRect();
+  // 화면 배율(CSS 변환)이 걸려 있으면 화면 좌표를 문서 px 로 되돌린다
+  const z = root.offsetHeight > 0 ? rootRect.height / root.offsetHeight || 1 : 1;
   return children
     .filter((el) => !el.classList.contains('pg-spacer') && !el.classList.contains('ProseMirror-gapcursor'))
-    .map((el) => ({ el, top: el.offsetTop, bottom: el.offsetTop + el.offsetHeight, left: el.offsetLeft, width: el.offsetWidth }));
+    .map((el) => {
+      const box: PageBox = { el, top: el.offsetTop, bottom: el.offsetTop + el.offsetHeight, left: el.offsetLeft, width: el.offsetWidth };
+      const segs = el.querySelectorAll('.pg-seg');
+      if (segs.length) {
+        let vTop = box.top;
+        let vBottom = box.bottom;
+        segs.forEach((sg) => {
+          for (const r of Array.from(sg.getClientRects())) {
+            vTop = Math.min(vTop, (r.top - rootRect.top) / z);
+            vBottom = Math.max(vBottom, (r.bottom - rootRect.top) / z);
+          }
+        });
+        box.vTop = vTop;
+        box.vBottom = vBottom;
+      }
+      return box;
+    });
 }
 
 /** 편집 화면의 쪽 배치 (구역마다 용지가 다르면 쪽마다 다르다) */
@@ -371,7 +402,9 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
   const y1 = y0 + g.contentH;
   for (const b of boxes) {
     // 높이 없는 블록(떠 있는 개체의 자리 표시)은 쪽 맨 위에 걸쳐 있어도 이 쪽 것이다
-    if (b.bottom < y0 || b.top >= y1 || (b.bottom === y0 && b.bottom > b.top)) continue;
+    const bt = b.vTop ?? b.top;
+    const bb = b.vBottom ?? b.bottom;
+    if (bb < y0 || bt >= y1 || (bb === y0 && bb > bt)) continue;
     const clone = b.el.cloneNode(true) as HTMLElement;
     clone.style.position = 'absolute';
     clone.style.top = `${b.top - y0}px`;

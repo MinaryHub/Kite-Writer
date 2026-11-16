@@ -38,9 +38,9 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     const s = tab.settings;
     const resolve = (p: PageSetup) => {
       const x = geomFor(s, p, PAGE_GAP);
-      return { pageHeight: x.H, gap: x.gap, contentHeight: x.contentH, contentWidth: x.contentW, mt: x.mt };
+      return { pageHeight: x.H, gap: x.gap, contentHeight: x.contentH, contentWidth: x.contentW, mt: x.mt, columns: p.columns || null };
     };
-    const geo = { pageHeight: g.H, gap: g.gap, contentHeight: g.contentH, contentWidth: g.contentW, mt: g.mt, resolve };
+    const geo = { pageHeight: g.H, gap: g.gap, contentHeight: g.contentH, contentWidth: g.contentW, mt: g.mt, columns: s.page.columns || null, resolve };
     const prev = storage.geometry;
     const secStore = tab.editor.storage.sections;
     const secKey = W + '|' + JSON.stringify(s.page);
@@ -55,7 +55,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       tab.editor.view.dispatch(tab.editor.state.tr.setMeta(sectionsKey, true).setMeta('addToHistory', false));
       changed = true;
     }
-    if (!prev || prev.pageHeight !== geo.pageHeight || prev.contentHeight !== geo.contentHeight || prev.contentWidth !== geo.contentWidth || prev.gap !== geo.gap || prev.mt !== geo.mt) {
+    if (!prev || prev.pageHeight !== geo.pageHeight || prev.contentHeight !== geo.contentHeight || prev.contentWidth !== geo.contentWidth || prev.gap !== geo.gap || prev.mt !== geo.mt || JSON.stringify(prev.columns || null) !== JSON.stringify(geo.columns)) {
       storage.geometry = geo;
       changed = true;
     } else storage.geometry = { ...prev, resolve };
@@ -271,7 +271,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       );
     }
     // 표가 이어지는 쪽 맨 위의 제목 줄 (쪽 나누기가 비워 둔 자리)
-    if (tab.layout.repeats?.some((r) => r.page === k) || tab.layout.cuts?.some((c) => c.page === k)) {
+    if (tab.layout.repeats?.some((r) => r.page === k) || tab.layout.cuts?.some((c) => c.page === k) || tab.layout.colLines?.some((c) => c.page === k)) {
       chrome.push(<div key={'rh' + k} className="pg-repeat-layer" style={{ position: 'absolute', left, top, width: g.W, height: g.H, pointerEvents: 'none' }} dangerouslySetInnerHTML={{ __html: repeatHeadsHtml(tab, g, k) }} />);
     }
     const fns = tab.layout.footnotes.filter((f) => f.page === k);

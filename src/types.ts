@@ -12,6 +12,21 @@ export interface PageSetup {
   marginFooter: number;
   gutter: number;
   landscape: boolean;
+  /** 다단 (없으면 한 단) */
+  columns?: Columns | null;
+}
+
+/** 다단: 본문을 여러 단으로 나눈다 (한글의 쪽 → 다단 설정) */
+export interface Columns {
+  /** 단 수 (2 이상. 1 은 '다단 설정 나누기'로 한 단으로 되돌릴 때만) */
+  count: number;
+  /** 단 사이 간격 mm (너비가 같은 단) */
+  gap: number;
+  /** 너비가 다른 단: 단마다의 너비 mm 와 그 뒤 간격 mm (없으면 같은 너비) */
+  widths?: number[];
+  gaps?: number[];
+  /** 단 구분선: 굵기(mm)·색·종류. 없으면 긋지 않는다 */
+  line?: { w: number; c: string; s: 'solid' | 'dashed' | 'dotted' | 'double' } | null;
 }
 
 export type HFAlign = 'left' | 'center' | 'right';

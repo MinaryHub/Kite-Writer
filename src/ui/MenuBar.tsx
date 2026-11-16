@@ -85,6 +85,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
       { label: '차례', items: ['insert.toc', 'insert.tocUpdate', '-', 'format.leaderTab'] },
       '-',
       'insert.pageBreak',
+      'insert.columnBreak',
       'insert.hr',
       'insert.quote',
       'insert.code',
@@ -114,7 +115,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
   {
     label: '쪽(W)',
     key: 'w',
-    items: () => ['page.setup', 'page.orientation', '-', 'page.headerFooter', 'page.number', '-', 'insert.pageBreak', '-', 'page.prev', 'page.next', 'edit.goto'],
+    items: () => ['page.setup', 'page.orientation', 'page.border', '-', 'page.headerFooter', 'page.number', '-', 'page.columns', 'insert.columnBreak', 'insert.pageBreak', '-', 'page.prev', 'page.next', 'edit.goto'],
   },
   {
     label: '표(B)',

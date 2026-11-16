@@ -10,12 +10,14 @@ import type { Node as PMNode } from '@tiptap/pm/model';
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from '@tiptap/pm/state';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import { viewState } from '../viewState';
+import type { Columns } from '../../types';
 import { cleanMargins } from '../../formats/flatten';
-import { normColor } from '../../formats/common';
+import { cleanColumns, normColor } from '../../formats/common';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
     pageBreak: { setPageBreak: () => ReturnType };
+    columnBreak: { setColumnBreak: (columns?: Columns | null) => ReturnType };
     footnote: { insertFootnote: (text: string) => ReturnType; updateFootnote: (pos: number, text: string) => ReturnType };
     overwrite: { toggleOverwrite: () => ReturnType };
   }
@@ -75,6 +77,7 @@ export const TextBox = Node.create({
       hwpSeq: plain,
       hwpLen: plain,
       hwpPage: plain,
+      hwpCol: plain,
     };
   },
   parseHTML() {
@@ -375,7 +378,7 @@ export const KImage = Image.extend({
 }).configure({ inline: true, allowBase64: true });
 
 /** 붙여 넣은 HTML 의 구역 용지: 숫자만 받아 쓸 수 있는 범위로 (용지 10~2000mm, 여백은 용지 안에) */
-function cleanPageSetup(v: any): Record<string, number | boolean> | null {
+function cleanPageSetup(v: any): Record<string, any> | null {
   if (!v || typeof v !== 'object') return null;
   const num = (x: any, lo: number, hi: number) => {
     const n = Number(x);
@@ -396,7 +399,42 @@ function cleanPageSetup(v: any): Record<string, number | boolean> | null {
     marginFooter: num(v.marginFooter, 0, mh),
     gutter: num(v.gutter, 0, mh),
     landscape: v.landscape === true,
+    ...(cleanColumns(v.columns) ? { columns: cleanColumns(v.columns) } : {}),
   };
+}
+
+/** 쪽 나누기·단 나누기 같은 '나누기' 블록을 커서 자리에 넣는다 (문단 가운데면 문단을 쪼갠다) */
+function insertBreak(state: any, tr: Transaction, dispatch: ((tr: Transaction) => void) | undefined, pb: PMNode): boolean {
+  const para = state.schema.nodes.paragraph;
+  if (!state.selection.empty) tr.deleteSelection();
+  const $from = tr.selection.$from;
+  let caretPos: number;
+  if ($from.depth > 1 || !$from.parent.isTextblock) {
+    // 표/목록 안: 해당 최상위 블록 뒤에 넣는다
+    const after = $from.after(1);
+    tr.insert(after, [pb, para.create()]);
+    caretPos = after + 2;
+  } else if ($from.parentOffset === 0 && $from.parent.content.size > 0) {
+    tr.insert($from.before(), pb);
+    caretPos = $from.pos + 1;
+  } else if ($from.parentOffset === $from.parent.content.size) {
+    const after = $from.after();
+    const next = tr.doc.resolve(after).nodeAfter;
+    if (next && next.isTextblock) {
+      tr.insert(after, pb);
+      caretPos = after + 2;
+    } else {
+      tr.insert(after, [pb, para.create($from.parent.attrs)]);
+      caretPos = after + 2;
+    }
+  } else {
+    tr.split($from.pos);
+    tr.insert($from.pos + 1, pb);
+    caretPos = $from.pos + 3;
+  }
+  tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(caretPos, tr.doc.content.size))));
+  if (dispatch) dispatch(tr.scrollIntoView());
+  return true;
 }
 
 // ---------------- 쪽 나누기 ----------------
@@ -435,43 +473,59 @@ export const PageBreak = Node.create({
     return {
       setPageBreak:
         () =>
-        ({ state, tr, dispatch }) => {
-          const pb = state.schema.nodes.pageBreak.create();
-          const para = state.schema.nodes.paragraph;
-          if (!state.selection.empty) tr.deleteSelection();
-          const $from = tr.selection.$from;
-          let caretPos: number;
-          if ($from.depth > 1 || !$from.parent.isTextblock) {
-            // 표/목록 안: 해당 최상위 블록 뒤에 넣는다
-            const after = $from.after(1);
-            tr.insert(after, [pb, para.create()]);
-            caretPos = after + 2;
-          } else if ($from.parentOffset === 0 && $from.parent.content.size > 0) {
-            tr.insert($from.before(), pb);
-            caretPos = $from.pos + 1;
-          } else if ($from.parentOffset === $from.parent.content.size) {
-            const after = $from.after();
-            const next = tr.doc.resolve(after).nodeAfter;
-            if (next && next.isTextblock) {
-              tr.insert(after, pb);
-              caretPos = after + 2;
-            } else {
-              tr.insert(after, [pb, para.create($from.parent.attrs)]);
-              caretPos = after + 2;
-            }
-          } else {
-            tr.split($from.pos);
-            tr.insert($from.pos + 1, pb);
-            caretPos = $from.pos + 3;
-          }
-          tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(caretPos, tr.doc.content.size))));
-          if (dispatch) dispatch(tr.scrollIntoView());
-          return true;
-        },
+        ({ state, tr, dispatch }) =>
+          insertBreak(state, tr, dispatch, state.schema.nodes.pageBreak.create()),
     };
   },
   addKeyboardShortcuts() {
     return { 'Mod-Enter': () => this.editor.commands.setPageBreak() };
+  },
+});
+
+// ---------------- 단 나누기 ----------------
+/**
+ * 단 나누기 (한글의 Ctrl+Shift+Enter): 뒤 내용을 다음 단으로 넘긴다 (마지막 단이면 다음 쪽).
+ * columns 가 있으면 '다단 설정 나누기': 여기서부터 그 다단으로 새로 시작한다 (같은 쪽, 앞 다단 아래에서. count 1 이면 한 단으로)
+ */
+export const ColumnBreak = Node.create({
+  name: 'columnBreak',
+  priority: 1000,
+  group: 'block',
+  atom: true,
+  selectable: true,
+  addAttributes() {
+    return {
+      columns: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          try {
+            return cleanColumns(JSON.parse(el.getAttribute('data-columns') || 'null'));
+          } catch {
+            return null;
+          }
+        },
+        renderHTML: (a: Record<string, any>) => (a.columns ? { 'data-columns': JSON.stringify(a.columns) } : {}),
+      },
+      /** 한글 문서에 있던 나누기 (블록마다 적힌 단을 따르므로 쪽 나누기가 한글 배치를 끊지 않는다) */
+      hwp: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'div[data-type="column-break"]' }];
+  },
+  renderHTML({ HTMLAttributes, node }) {
+    return ['div', { ...HTMLAttributes, 'data-type': 'column-break', class: 'page-break column-break' + (node.attrs.columns ? ' column-def' : '') }];
+  },
+  addCommands() {
+    return {
+      setColumnBreak:
+        (columns) =>
+        ({ state, tr, dispatch }) =>
+          insertBreak(state, tr, dispatch, state.schema.nodes.columnBreak.create(columns ? { columns: cleanColumns(columns) } : null)),
+    };
+  },
+  addKeyboardShortcuts() {
+    return { 'Mod-Shift-Enter': () => this.editor.commands.setColumnBreak() };
   },
 });
 
@@ -890,6 +944,7 @@ export const KTable = Table.extend({
       },
       /** 한글(HWP)에서 이 표가 새 쪽의 맨 위에서 시작했다 (쪽 나누기가 그 자리에서 쪽을 넘긴다). 화면 전용 */
       hwpPage: { default: false, parseHTML: () => false, renderHTML: () => ({}) },
+      hwpCol: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       // 한글이 놓은 자리·차례·그때의 내용 크기 (화면 전용: 쪽 나누기가 쓴다)
       hwpTop: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       hwpSeq: { default: null, parseHTML: () => null, renderHTML: () => ({}) },

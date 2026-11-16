@@ -1,8 +1,8 @@
-import { ParaLayout, estimateMissingLines, gapInBox, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
+import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, gapInBox, isBreakBlock, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
 import { hwpToLatex } from '../../math/hwpEq';
 import * as CFB from 'cfb';
 import { Inflate } from 'pako';
-import type { DocSettings, LoadedDoc, PageSetup } from '../../types';
+import type { Columns, DocSettings, LoadedDoc, PageSetup } from '../../types';
 import {
   type JNode,
   applyNumFormat,
@@ -403,10 +403,22 @@ class HwpConverter {
   /** 한글 배치를 옮기는 동안 이어 가는 값 (앞 문단이 끝난 자리, 블록 차례) */
   private layState: LayoutState = { prevEndV: 0, seq: 0 };
 
+  /** 다단: 지금 구역의 다단(한 단이면 null), 지금 다단의 단 수, 지금 문단이 놓인 단, 구역의 첫 문단을 읽을 차례인가 */
+  private secCols: Columns | null = null;
+  private colCount = 1;
+  private col = 0;
+  private secFirst = true;
+  /** 본문 문단의 줄 정보가 형식뿐인지 (다른 프로그램이 쓴 파일) */
+  segStats = new LineSegStats();
+
   /** 구역이 바뀌면 쪽 안 자리 셈을 새로 */
   startSection() {
     this.sectionPage = null;
     this.layState.prevEndV = 0;
+    this.secCols = null;
+    this.colCount = 1;
+    this.col = 0;
+    this.secFirst = true;
   }
 
   /** 지금 구역 용지의 크기와 본문 자리 (px) */
@@ -465,15 +477,56 @@ class HwpConverter {
     /** 쪽 나누기 없이 한글이 새 쪽에 놓은 문단 */
     let hwpPage = false;
     let vpos: number | null = null;
+    /** 이 문단이 시작한 단 (다단), 단이 바뀌었는가 */
+    let startCol = 0;
+    let newCol = false;
     if (!inSub) {
       // 쪽 세기: 쪽 나누기, 또는 한글이 배치해 둔 줄 정보(첫 줄의 세로 위치)가 되돌아가면 새 쪽 (첫 문단 앞은 세지 않는다)
       const seg = p.children.find((c) => c.tag === T.PARA_LINE_SEG);
       vpos = seg && seg.data.length >= 8 ? i32(seg, 4) : null;
-      hwpPage = this.topParas > 0 && !(breakType & 0x05) && vpos != null && vpos < this.lastVpos;
-      if (this.topParas++ > 0 && (breakType & 0x05 || (vpos != null && vpos < this.lastVpos))) this.page++;
+      if (seg && vpos != null) this.segStats.note(Math.floor(seg.data.length / 36), vpos);
+      const pb = !!(breakType & 0x05);
+      const started = this.topParas++ > 0;
+      const reset = started && !pb && vpos != null && vpos < this.lastVpos;
+      // 다단 정의(cold): 구역의 첫 문단에 있으면 그 구역의 다단, 그 밖에는 '다단 설정 나누기' (여기서부터 새 다단)
+      const first = this.secFirst;
+      this.secFirst = false;
+      const cold = p.children.find((c) => c.tag === T.CTRL_HEADER && ctrlIdOf(c) === 'cold');
+      const cols = cold ? columnsOfCold(cold, this.pageGeom().bodyW / (96 / 25.4)) : null;
+      const colBreak = !!(breakType & 0x08) && started;
+      let zone = false;
+      if (cols && first) {
+        this.colCount = cols.count;
+        this.secCols = cols.count > 1 ? cols : null;
+        if (this.sectionPage && this.secCols) this.sectionPage.columns = this.secCols;
+      } else if (cols) {
+        this.colCount = cols.count;
+        zone = true;
+      }
+      if (pb) this.col = 0;
+      else if (zone) {
+        // 새 다단은 앞 다단 아래에서 시작한다. 세로 위치가 되돌아갔으면 다음 쪽에서 시작한 것이다
+        this.col = 0;
+        hwpPage = reset;
+      } else if (reset || colBreak) {
+        // 세로 위치가 되돌아갔다: 다음 단으로 넘어갔거나, 마지막 단이었으면 다음 쪽이다
+        if (this.col < this.colCount - 1) {
+          this.col++;
+          newCol = true;
+        } else {
+          this.col = 0;
+          hwpPage = true;
+        }
+      }
+      if (started && (pb || hwpPage)) this.page++;
+      startCol = this.col;
+      // 문단 안에서 줄의 세로 위치가 되돌아간 곳마다 단(쪽)이 바뀐다
+      if (seg) for (let o = 36; o + 36 <= seg.data.length; o += 36) if (i32(seg, o + 4) < i32(seg, o - 32)) this.col = this.col < this.colCount - 1 ? this.col + 1 : 0;
       // 다음 문단과는 이 문단 마지막 줄의 세로 위치로 견준다 (여러 줄 문단은 줄 사이에서 쪽이 바뀔 수 있다)
       if (seg && seg.data.length >= 36) this.lastVpos = i32(seg, (Math.floor(seg.data.length / 36) - 1) * 36 + 4);
-      if (breakType & 0x05) blocks.push({ type: 'pageBreak' });
+      if (pb) blocks.push({ type: 'pageBreak' });
+      if (zone) blocks.push({ type: 'columnBreak', attrs: { columns: cols, hwp: true } });
+      else if (colBreak && !pb) blocks.push({ type: 'columnBreak', attrs: { hwp: true } });
     }
 
     const textRec = p.children.find((c) => c.tag === T.PARA_TEXT);
@@ -500,7 +553,8 @@ class HwpConverter {
       inSub,
       width,
       geom: this.pageGeom,
-      hwpPage,
+      // 새 단으로 넘어온 문단도 단 맨 위에서 시작한다
+      hwpPage: hwpPage || newCol,
       pageBreak: !inSub && !!(breakType & 0x05),
       pp: { spaceBefore: pp?.spaceBefore || 0, indentLeft: pp?.indentLeft || 0, indentRight: pp?.indentRight || 0, textIndent: pp?.textIndent || 0 },
       state: this.layState,
@@ -633,11 +687,12 @@ class HwpConverter {
       // 캡션 문단도 본문 블록이다: 차례가 끊기지 않게 캡션까지 넣어 다시 매긴다
       this.layState.seq = seq0;
       for (const b of out) {
-        if (b.type === 'pageBreak') continue;
+        if (isBreakBlock(b)) continue;
         b.attrs = { ...b.attrs, hwpSeq: ++this.layState.seq };
         if (b.attrs.hwpLen == null) b.attrs.hwpLen = jsonContentSize(b);
+        if (startCol > 0) b.attrs.hwpCol = startCol;
       }
-      this.pageMarks.mark(done.lead || out.find((b) => b.type !== 'pageBreak'), vpos, hwpPage);
+      this.pageMarks.mark(done.lead || out.find((b) => !isBreakBlock(b)), vpos, hwpPage);
     }
     return out;
   }
@@ -754,7 +809,10 @@ class HwpConverter {
     if (ol) this.outlineNumId = String(ol);
     const pd = ctrl.children.find((c) => c.tag === T.PAGE_DEF);
     if (!pd) return;
+    // 다단은 구역마다 따로 정한다 (구역의 첫 문단에 든 단 정의)
     const pg: PageSetup = { ...this.settings.page };
+    if (this.secCols) pg.columns = this.secCols;
+    else delete pg.columns;
     pg.width = round(hwpToMm(u32(pd, 0)), 1);
     pg.height = round(hwpToMm(u32(pd, 4)), 1);
     pg.marginLeft = round(hwpToMm(u32(pd, 8)), 1);
@@ -1590,9 +1648,10 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
     if (brk && conv.sectionPage) brk.attrs = { sectionPage: conv.sectionPage };
   }
   while (blocks.length && blocks[0].type === 'pageBreak') blocks.shift();
-  const content = docNode(blocks);
+  // 줄 정보가 형식뿐인 문서(한글이 배치하지 않은 파일)는 그 값을 따르지 않고 자연 배치로 흐르게 한다
+  const content = docNode(conv.segStats.fake ? blocks.map(dropHwpLayout) : blocks);
   // 한글이 줄 정보를 적지 않은 문단의 줄 높이를 같은 모양의 다른 문단에서 빌린다
-  estimateMissingLines(content);
+  if (!conv.segStats.fake) estimateMissingLines(content);
   return { content, settings: conv.settings, meta: {}, warnings: [...new Set(warnings)].slice(0, 20) };
 }
 
@@ -1600,6 +1659,42 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
  * SHAPE_COMPONENT(그리기 개체 공통)에서 선·채우기 정보.
  * 공통 부분(id 2개, 위치, 크기, 뒤집기, 회전, 렌더링 행렬 cnt 개) 뒤에 선 정보(색 4, 굵기 4, 속성 4)와 채우기 정보(종류 4, 색 4 …)가 온다.
  */
+/**
+ * 단 정의(cold) → 다단 값. ctrl ID 뒤: 속성 u16 (bit 2~9 단 수, bit 12 너비 같게), 너비가 같으면 단 사이 간격 u16 · 속성2 u16,
+ * 다르면 속성2 u16 뒤에 단마다 너비 u16 · 간격 u16 (본문 폭에 대한 비율), 이어서 구분선 종류 u8 · 굵기 u8 · 색 u32
+ */
+function columnsOfCold(r: Rec, bodyMm: number): Columns {
+  const a = u16(r, 4);
+  const n = Math.max(1, Math.min(20, (a >>> 2) & 0xff));
+  const same = !!(a & 0x1000);
+  if (n < 2) return { count: 1, gap: 0 };
+  const out: Columns = { count: n, gap: 0 };
+  let o = 6;
+  if (same) {
+    out.gap = round(hwpToMm(u16(r, o)), 2);
+    o += 4;
+  } else {
+    o += 2;
+    const ws: number[] = [];
+    const gs: number[] = [];
+    for (let i = 0; i < n && o + 4 <= r.data.length; i++, o += 4) {
+      ws.push(u16(r, o));
+      gs.push(u16(r, o + 2));
+    }
+    const total = ws.reduce((x, y) => x + y, 0) + gs.slice(0, n - 1).reduce((x, y) => x + y, 0);
+    if (ws.length === n && total > 0 && ws.every((w) => w > 0)) {
+      const k = bodyMm / total;
+      out.widths = ws.map((w) => round(w * k, 2));
+      out.gaps = gs.map((g, i) => (i < n - 1 ? round(g * k, 2) : 0));
+    }
+  }
+  if (o + 6 <= r.data.length) {
+    const type = u8(r, o);
+    if (type > 0) out.line = { w: HWP_BORDER_WIDTHS[u8(r, o + 1)] ?? 0.12, c: colorRefToHex(u32(r, o + 2)), s: hwpBorderStyle(type) };
+  }
+  return out;
+}
+
 /** SHAPE_COMPONENT 의 공통 정보 시작 위치: 최상위 개체는 ctrl ID 를 두 번 쓰고(8), 묶음 안의 개체는 한 번 쓴다(4) */
 function shapeBase(sc: Rec): number {
   return u32(sc, 0) === u32(sc, 4) ? 8 : 4;
