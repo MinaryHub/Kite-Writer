@@ -75,6 +75,19 @@ export interface ImportOptions {
   onProgress?: (p: number) => void;
 }
 
+/** Word 문서: 머리말·꼬리말이 길면 본문 영역을 그만큼 줄인다 (화면에서 잰다. 브라우저에서만) */
+async function fitDocx(d: LoadedDoc): Promise<LoadedDoc> {
+  const rich = (h: LoadedDoc['settings']['header']) => !!(h.content || h.even || h.first);
+  if (typeof document !== 'undefined' && (rich(d.settings.header) || rich(d.settings.footer))) {
+    try {
+      (await import('../hfRich')).fitHeaderFooter(d.settings);
+    } catch {
+      /* 잴 수 없으면 그대로 */
+    }
+  }
+  return d;
+}
+
 export async function importDocument(name: string, data: Uint8Array, opts: ImportOptions = {}): Promise<LoadedDoc & { format: FormatId }> {
   const format = detectFormat(name, data);
   const done = (d: LoadedDoc) => ({ ...d, format });
@@ -84,13 +97,13 @@ export async function importDocument(name: string, data: Uint8Array, opts: Impor
     case 'hwp':
       return done(await (await import('./hwp/reader')).readHwp(data));
     case 'docx':
-      return done(await (await import('./docx/reader')).readDocx(data));
+      return done(await fitDocx(await (await import('./docx/reader')).readDocx(data)));
     case 'doc': {
       if (!opts.convertLegacyDoc) throw new Error('DOC 형식은 데스크톱 앱에서만 열 수 있습니다.');
       const res = await opts.convertLegacyDoc(data);
       if (res.kind === 'error') throw new Error(res.message);
       if (res.kind === 'docx') {
-        const d = await (await import('./docx/reader')).readDocx(res.data);
+        const d = await fitDocx(await (await import('./docx/reader')).readDocx(res.data));
         return done(d);
       }
       const lines = res.body.replace(/\r\n?/g, '\n').split('\n');

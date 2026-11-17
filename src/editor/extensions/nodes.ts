@@ -153,6 +153,21 @@ export const TabStop = Mark.create({
         parseHTML: (el: HTMLElement) => +(el.getAttribute('data-tab-type') || 0),
         renderHTML: (a: Record<string, any>) => (+a.type ? { 'data-tab-type': String(+a.type) } : {}),
       },
+      /** 절대 위치 탭 (Word 의 ptab): 글 영역의 왼쪽 끝(l)·가운데(c)·오른쪽 끝(r)에 뒤 글을 맞춘다 (tabLayout) */
+      ptab: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          const v = el.getAttribute('data-ptab');
+          return v === 'l' || v === 'c' || v === 'r' ? v : null;
+        },
+        renderHTML: (a: Record<string, any>) => (a.ptab === 'l' || a.ptab === 'c' || a.ptab === 'r' ? { 'data-ptab': a.ptab } : {}),
+      },
+      /** 구분 값: 이웃한 탭이 모양이 같아도 한 글자 조각으로 합쳐지지 않게 번갈아 0·1 을 준다 (합쳐지면 탭 둘이 한 폭으로 그려진다) */
+      k: {
+        default: 0,
+        parseHTML: (el: HTMLElement) => (el.getAttribute('data-k') === '1' ? 1 : 0),
+        renderHTML: (a: Record<string, any>) => (+a.k === 1 ? { 'data-k': '1' } : {}),
+      },
       /** 오른쪽 맞춤 채움 탭 (차례): 뒤 글이 문단 오른쪽 끝에 닿도록 폭을 저절로 맞춘다 (tabFill) */
       right: {
         default: false,

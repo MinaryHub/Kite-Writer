@@ -578,7 +578,8 @@
 .print-page .k-tab[style*='width'] {
   display: inline-block;
   tab-size: 0;
-  overflow: hidden;
+  /* hidden 이면 이 상자의 기준선이 아래 끝이 되어 줄이 높아진다. clip 은 기준선을 그대로 둔다 */
+  overflow: clip;
   white-space: pre;
   vertical-align: baseline;
   max-width: 100%;

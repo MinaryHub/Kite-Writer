@@ -32,12 +32,14 @@ export interface PageGeometry {
   columns?: Columns | null;
   /** 구역 나누기(쪽 나누기의 sectionPage)의 용지 → 그 구역의 쪽 기하 */
   resolve?: (p: PageSetup) => PageGeometry;
+  /** 첫 쪽만 본문 영역이 다른 문서: 둘째 쪽부터의 용지 (이 기하는 첫 쪽의 것) */
+  rest?: PageSetup | null;
 }
 
 function sameGeometry(a: PageGeometry | null, b: PageGeometry | null): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
-  return a.pageHeight === b.pageHeight && a.gap === b.gap && a.contentHeight === b.contentHeight && a.contentWidth === b.contentWidth && a.mt === b.mt && JSON.stringify(a.columns || null) === JSON.stringify(b.columns || null);
+  return a.pageHeight === b.pageHeight && a.gap === b.gap && a.contentHeight === b.contentHeight && a.contentWidth === b.contentWidth && a.mt === b.mt && JSON.stringify(a.columns || null) === JSON.stringify(b.columns || null) && JSON.stringify(a.rest || null) === JSON.stringify(b.rest || null);
 }
 
 export interface PageBreakInfo {
@@ -309,6 +311,12 @@ function computeLayout(
   view.state.doc.forEach((n) => {
     if (n.type.name === 'pageBreak' && n.attrs?.sectionPage) multi = true;
   });
+  // 첫 쪽만 본문 영역이 다른 문서: 둘째 쪽부터는 문서 용지 그대로
+  if (g.rest && g.resolve) {
+    const sg = g.resolve(g.rest);
+    curPg = { H: sg.pageHeight, CH: sg.contentHeight, mt: sg.mt ?? 0, setup: g.rest };
+    multi = true;
+  }
   if (multi) cache = null;
   // ---- 다단 ----
   /** 지금 다단 (없으면 한 단), 지금 구역의 본문 폭, 지금 단 */
@@ -403,7 +411,9 @@ function computeLayout(
     try {
       const $f = doc.resolve(clampPos(dirty.from));
       const $t = doc.resolve(clampPos(dirty.to));
-      const si = $f.index(0);
+      let si = $f.index(0);
+      // '다음 문단과 함께'인 문단은 뒤 문단에 따라 놓이는 쪽이 달라진다: 바뀐 블록 앞의 그런 문단부터 다시 잰다
+      while (si > 0 && si <= doc.childCount && String(doc.child(si - 1).attrs?.pageKeep || '').includes('n')) si--;
       const rn = $t.depth === 0 ? $t.index(0) : $t.index(0) + 1;
       const oldTo = dirty.mapping.invert().map(clampPos(dirty.to), 1);
       const $ot = cache.doc.resolve(Math.max(0, Math.min(cache.doc.content.size, oldTo)));
@@ -747,6 +757,51 @@ function computeLayout(
     }
   };
 
+  /**
+   * '다음 문단과 함께'인 문단(제목 등): 이어지는 그런 문단들과 그 뒤 문단의 첫 줄(외톨이줄 방지면 두 줄, 세 줄 이하면 모두)까지
+   * 이 쪽에 들어가야 한다. 들어가지 않으면 이 문단부터 다음 쪽으로 넘긴다
+   */
+  const keepWithNext = (pos: number, top: number) => {
+    const sTop = top + shift;
+    const p = pageAtY(sTop + 0.5, page);
+    // 쪽 맨 위에 있으면 넘길 곳이 없다
+    if (sTop <= T(p) + 0.5) return;
+    let need = NaN;
+    try {
+      const $p = doc.resolve(pos);
+      const parent = $p.parent;
+      const idx = $p.index();
+      let npos = pos + parent.child(idx).nodeSize;
+      for (let i = idx + 1; i < parent.childCount && i <= idx + 8; i++) {
+        const nx = parent.child(i);
+        if (nx.type.name === 'pageBreak' || nx.type.name === 'columnBreak') return;
+        const flags = String(nx.attrs?.pageKeep || '');
+        if (nx.isTextblock && flags.includes('n')) {
+          npos += nx.nodeSize;
+          continue;
+        }
+        const nel = view.nodeDOM(npos) as HTMLElement | null;
+        if (!(nel instanceof HTMLElement)) return;
+        need = rel(nel.getBoundingClientRect().bottom);
+        if (nx.isTextblock) {
+          const ls = getLines(nel);
+          const k = flags.includes('l') || !ls.length ? ls.length : flags.includes('w') ? (ls.length <= 3 ? ls.length : 2) : 1;
+          if (k > 0 && k < ls.length) need = ls[k - 1].bottom;
+        } else if (nx.type.name === 'table') {
+          const row = nel.querySelector('tr');
+          if (row) need = rel(row.getBoundingClientRect().bottom);
+        }
+        break;
+      }
+    } catch {
+      return;
+    }
+    if (!isFinite(need)) return;
+    const limit = T(p) + CHof(p) - (p === page ? fnUsed : 0);
+    // 다음 쪽에서도 다 들어가지 않을 만큼 길면 넘겨도 소용없다
+    if (need + shift > limit + 0.5 && need - top <= CHof(p + 1)) forceNext = true;
+  };
+
   const handleTextblock = (node: PMNode, pos: number) => {
     const el = view.nodeDOM(pos) as HTMLElement | null;
     if (!el || !(el instanceof HTMLElement)) return;
@@ -755,6 +810,9 @@ function computeLayout(
     const bottom = rel(r.bottom);
     const fns = collectFootnotes(el, pos);
     const fnTotal = fns.reduce((a, f) => a + f.h, 0);
+    /** 쪽 나눔 규칙 (Word 문서): w 외톨이줄 방지, n 다음 문단과 함께, l 문단을 나누지 않음. 다단에서는 따지지 않는다 */
+    const keep = !cols && typeof node.attrs.pageKeep === 'string' ? (node.attrs.pageKeep as string) : '';
+    if (keep.includes('n') && !forceNext && !softNext && !forceCol) keepWithNext(pos, top);
 
     // 그대로 들어가는지 확인
     const sTop = top + shift;
@@ -774,12 +832,27 @@ function computeLayout(
       return;
     }
     const n = lines.length;
+    // 외톨이줄 방지·문단 보호: 쪽 끝에 한 줄만 남거나 다음 쪽으로 한 줄만 넘어가지 않게, 나눌 줄을 앞당긴다 (0 이면 문단째 넘긴다)
+    let breakAt = -1;
+    if (keep.includes('w') || keep.includes('l')) {
+      const unitBottom = (i: number) => (i === n - 1 ? bottom : (lines[i].bottom + lines[i + 1].top) / 2) + shift;
+      let fit = 0;
+      while (fit < n && unitBottom(fit) <= limit + 0.5) fit++;
+      if (fit < n) {
+        let want = fit;
+        if (keep.includes('l') || want < 2) want = 0;
+        else if (n - want < 2) want = n - 2 < 2 ? 0 : n - 2;
+        // 쪽 맨 위에서 시작한 문단은 통째로 넘길 곳이 없다
+        if (want === 0 ? sTop > T(p) + 0.5 : want < fit) breakAt = want;
+      }
+    }
     curPara = { end: pos + node.nodeSize - 1, startCol: col, rel: false, dy: 0, seg: null };
     for (let i = 0; i < n; i++) {
       const uTop = i === 0 ? top : (lines[i - 1].bottom + lines[i].top) / 2;
       const uBottom = i === n - 1 ? bottom : (lines[i].bottom + lines[i + 1].top) / 2;
       const lineFns = fns.filter((f) => f.top >= uTop - 1 && f.top < uBottom);
       const fnH = lineFns.reduce((a, f) => a + f.h, 0);
+      if (i === breakAt) forceNext = true;
       if (i === 0) {
         place(uTop, uBottom, fnH, () => pos, 'block', pos);
         // 문단 상자는 첫 줄이 놓인 단에 선다

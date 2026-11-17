@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import type { DocMeta, LoadedDoc } from '../../types';
+import type { DocMeta, HeaderFooter, LoadedDoc } from '../../types';
 import {
   type JMark,
   type JNode,
@@ -48,6 +48,8 @@ interface RProps {
   width?: number;
   effect?: string | null;
   hidden?: boolean;
+  /** 모두 대문자로 보인다 (w:caps) */
+  caps?: boolean;
 }
 
 interface PProps {
@@ -69,6 +71,12 @@ interface PProps {
   numId?: string;
   ilvl?: number;
   outlineLvl?: number;
+  /** 쪽 나눔 규칙: 외톨이줄 방지(기본 켬), 다음 문단과 함께, 문단을 나누지 않음 */
+  widow?: boolean;
+  keepNext?: boolean;
+  keepLines?: boolean;
+  /** 탭 자리: 자리(twips) → [맞춤(l·c·r·d), 채움]. 스타일에서 내려오며 쌓이고 clear 로 지운다 */
+  tabs?: Map<number, [string, number]>;
 }
 
 /** 번호 매기기의 한 수준: 번호 모양, 번호 글(%1 … %9 가 수준마다의 번호), 시작 번호, 수준의 문단·글자 모양, 번호 뒤(탭·빈칸·없음) */
@@ -153,6 +161,19 @@ class DocxReader {
   gridPt = 0;
   /** 호환 모드 (settings.xml 의 compatibilityMode: 15 = Word 2013 이후). 표의 왼쪽 자리 등이 달라진다 */
   compatMode = 12;
+  /** 기본 탭 간격 (pt). settings.xml 의 defaultTabStop */
+  defaultTab = 36;
+  /** 짝수 쪽·홀수 쪽의 머리말/꼬리말을 따로 쓴다 (settings.xml 의 evenAndOddHeaders) */
+  evenOdd = false;
+  /**
+   * 문단 사이 간격을 더한다 (settings.xml 의 doNotUseHTMLParagraphAutoSpacing).
+   * 이 설정이 없는 문서(대부분)에서 Word 는 앞 문단의 아래 간격과 뒤 문단의 위 간격 가운데 큰 쪽만 둔다
+   */
+  addSpacing = false;
+  /** Kite 가 쓴 문서 (docProps/app.xml). 머리말·쪽 번호를 Kite 의 설정으로 되돌린다 */
+  fromKite = false;
+  /** 탭마다 번갈아 주는 구분 값 (이웃한 탭이 한 글자 조각으로 합쳐지지 않게) */
+  private tabSeq = 0;
   /** 표 스타일을 고르지 않은 표가 쓰는 기본 표 스타일 */
   defaultTableStyle: string | null = null;
   /** 지금 읽는 표의 표 스타일 (안쪽 표가 뒤): 표 스타일의 문단·글자 모양이 칸 안 문단에 깔린다 */
@@ -211,10 +232,19 @@ class DocxReader {
     }
     const settingsXml = await this.text('word/settings.xml');
     if (settingsXml) {
-      const cm = descendants(parseXml(settingsXml), 'compatSetting').find((e) => attr(e, 'name') === 'compatibilityMode');
+      const sx = parseXml(settingsXml);
+      const cm = descendants(sx, 'compatSetting').find((e) => attr(e, 'name') === 'compatibilityMode');
       const v = cm ? parseInt(attr(cm, 'val') || '', 10) : NaN;
       if (Number.isFinite(v)) this.compatMode = v;
+      const dt = parseFloat(attr(descendant(sx, 'defaultTabStop'), 'val') || '');
+      if (dt >= 20 && dt <= 31680) this.defaultTab = round(twipToPt(dt), 2);
+      const eo = descendant(sx, 'evenAndOddHeaders');
+      this.evenOdd = !!eo && onOff(eo) !== false;
+      const as = descendant(sx, 'doNotUseHTMLParagraphAutoSpacing');
+      this.addSpacing = !!as && onOff(as) !== false;
     }
+    const appXml = await this.text('docProps/app.xml');
+    this.fromKite = !!appXml && /<Application>Kite<\/Application>/.test(appXml);
     const stylesXml = await this.text('word/styles.xml');
     if (stylesXml) {
       const sd = parseXml(stylesXml);
@@ -322,14 +352,19 @@ class DocxReader {
       }
     }
     // 그림
-    for (const [id, r] of this.rels) {
+    await this.loadImages(this.rels, this.images);
+  }
+
+  /** 관계 파일이 가리키는 그림을 읽어 둔다 (관계 id → data URL) */
+  private async loadImages(rels: Map<string, { target: string; type: string; external: boolean }>, into: Map<string, string>) {
+    for (const [id, r] of rels) {
       if (r.type !== 'image' || r.external) continue;
       const path = normalizePath('word/' + r.target);
       const f = this.zip.file(path);
       if (!f) continue;
       const ext = path.split('.').pop() || '';
       const mime = mimeFromExt(ext);
-      this.images.set(id, isBrowserImage(mime) ? bytesToDataUrl(await readZipEntry(f, 'uint8array'), mime) : placeholderImage(`그림(${ext.toUpperCase()})`));
+      into.set(id, isBrowserImage(mime) ? bytesToDataUrl(await readZipEntry(f, 'uint8array'), mime) : placeholderImage(`그림(${ext.toUpperCase()})`));
     }
   }
 
@@ -423,6 +458,9 @@ class DocxReader {
         case 'vanish':
           p.hidden = onOff(c);
           break;
+        case 'caps':
+          p.caps = onOff(c);
+          break;
       }
     }
   }
@@ -494,8 +532,34 @@ class DocxReader {
         case 'outlineLvl':
           p.outlineLvl = parseInt(attr(c, 'val') || '9', 10);
           break;
+        case 'widowControl':
+          p.widow = onOff(c);
+          break;
+        case 'keepNext':
+          p.keepNext = onOff(c);
+          break;
+        case 'keepLines':
+          p.keepLines = onOff(c);
+          break;
+        case 'tabs': {
+          const tabs = (p.tabs = p.tabs || new Map());
+          for (const t of kids(c, 'tab')) {
+            const pos = parseFloat(attr(t, 'pos') || '');
+            if (!Number.isFinite(pos)) continue;
+            const v = attr(t, 'val') || 'left';
+            if (v === 'clear') tabs.delete(pos);
+            // 세로 줄 탭(bar)은 탭 자리가 아니다
+            else if (v !== 'bar') tabs.set(pos, [v === 'center' ? 'c' : v === 'right' || v === 'end' ? 'r' : v === 'decimal' ? 'd' : 'l', leaderOf(attr(t, 'leader'))]);
+          }
+          break;
+        }
       }
     }
+  }
+
+  /** 탭 글자 하나. 탭 마크를 달아 폭을 화면에서 재서 맞추게 한다 (tabLayout) */
+  private tabNode(marks: JMark[], extra?: Record<string, any>): JNode {
+    return { type: 'text', text: '\t', marks: [...marks, { type: 'tab', attrs: { ...extra, k: this.tabSeq++ & 1 } }] };
   }
 
   resolveP(pPr: Element | null): { p: PProps; r: RProps; mark: RProps; styleId: string | null; heading: number } {
@@ -637,6 +701,9 @@ class DocxReader {
     if (!(/^[\d.]+$/.test(lh) && Math.abs(parseFloat(lh) - 1.6) < 0.006)) a.lineHeight = lh;
     if (p.bg) a.paraBg = p.bg;
     if (size && size !== 10) a.fontSize = size;
+    // 쪽 나눔 규칙. Word 는 외톨이줄 방지가 기본이다 (끈 문서만 widowControl=0 을 적는다)
+    const keep = (p.widow !== false ? 'w' : '') + (p.keepNext ? 'n' : '') + (p.keepLines ? 'l' : '');
+    if (keep && !this.headerMode) a.pageKeep = keep;
     return a;
   }
 
@@ -655,6 +722,15 @@ class DocxReader {
           if (prev && first && prev.style === res.style) {
             if (prev.contextual && prev.node.attrs) delete prev.node.attrs.spaceAfter;
             if (res.contextual && first.attrs) delete first.attrs.spaceBefore;
+          }
+          // 문단 사이 간격은 앞 문단의 아래 간격과 이 문단의 위 간격 가운데 큰 쪽: 위 간격에서 앞 문단의 아래 간격만큼 뺀다
+          if (prev && first && !this.addSpacing) {
+            const a = +prev.node.attrs?.spaceAfter || 0;
+            const b = +first.attrs?.spaceBefore || 0;
+            if (a > 0 && b > 0) {
+              if (b - a > 0.05) first.attrs!.spaceBefore = round(b - a);
+              else delete first.attrs!.spaceBefore;
+            }
           }
           for (const item of res.blocks) out.push(item.node);
           out.push(...res.after);
@@ -729,11 +805,17 @@ class DocxReader {
         const pre: JNode[] = [];
         const tn = textNode(label.text, lm);
         if (tn) pre.push(tn);
-        const sep = label.level.suff === 'space' ? ' ' : label.level.suff === 'nothing' ? '' : '\t';
-        const sn = sep ? textNode(sep, lm) : null;
-        if (sn) pre.push(sn);
+        if (label.level.suff === 'space') {
+          const sn = textNode(' ', lm);
+          if (sn) pre.push(sn);
+        } else if (label.level.suff !== 'nothing') pre.push(this.tabNode(lm));
         segments[0].unshift(...pre);
       }
+    }
+    // 탭이 든 문단: 탭 자리(문단·스타일·번호 수준에서 정한 자리와 기본 탭 간격)를 적어 둔다
+    if (segments.some((seg) => seg.some((n) => n.type === 'text' && n.marks?.some((m) => m.type === 'tab')))) {
+      const stops = [...(p.tabs || new Map<number, [string, number]>()).entries()].sort((x, y) => x[0] - y[0]).map(([pos, [al, leader]]) => [round(twipToPt(pos), 2), al, leader]);
+      pAttrs.tabs = { d: this.defaultTab, ...(stops.length ? { s: stops } : {}) };
     }
     segments.forEach((seg, i) => {
       if (i > 0) blocks.push({ node: { type: colBreak[i] ? 'columnBreak' : 'pageBreak' } });
@@ -837,13 +919,19 @@ class DocxReader {
         case 'delText':
         case 't': {
           if (this.fieldIsPage === 2) break;
-          const n = textNode(c.textContent || '', marks());
+          // '모두 대문자': 보이는 대로 대문자로 옮긴다
+          const n = textNode(r.caps ? (c.textContent || '').toUpperCase() : c.textContent || '', marks());
           if (n) out.push(n);
           break;
         }
-        case 'tab': {
-          const n = textNode('\t', marks());
-          if (n) out.push(n);
+        case 'tab':
+          out.push(this.tabNode(marks()));
+          break;
+        case 'ptab': {
+          // 절대 위치 탭: 글 영역의 왼쪽 끝·가운데·오른쪽 끝에 뒤 글을 맞춘다 (머리말·꼬리말의 세 칸 배치)
+          const al = attr(c, 'alignment');
+          const leader = leaderOf(attr(c, 'leader'));
+          out.push(this.tabNode(marks(), { ptab: al === 'center' ? 'c' : al === 'right' ? 'r' : 'l', ...(leader ? { leader } : {}) }));
           break;
         }
         case 'br':
@@ -946,7 +1034,17 @@ class DocxReader {
     const ext = kid(container, 'extent');
     const w = ext ? Math.round(parseFloat(attr(ext, 'cx') || '0') / 9525) : null;
     const h = ext ? Math.round(parseFloat(attr(ext, 'cy') || '0') / 9525) : null;
-    const blips = descendants(d, 'blip');
+    // 같은 그림을 형식만 달리 두 번 담은 것(AlternateContent 의 Choice·Fallback)은 하나만 쓴다: 널리 읽히는 Fallback 쪽
+    const blips = descendants(d, 'blip').filter((b) => {
+      for (let e: Element | null = b.parentElement; e && e !== d; e = e.parentElement) {
+        const ln = localName(e);
+        if (ln !== 'Choice' && ln !== 'Fallback') continue;
+        const ac = e.parentElement;
+        const other = ac ? kid(ac, ln === 'Choice' ? 'Fallback' : 'Choice') : null;
+        if (ln === 'Choice' && other && descendant(other, 'blip')) return false;
+      }
+      return true;
+    });
     if (blips.length) {
       for (const blip of blips) {
         const rid = attr(blip, 'embed') || attr(blip, 'link');
@@ -1094,34 +1192,74 @@ class DocxReader {
     return t;
   }
 
-  async convertHeaderFooter(rid: string | null): Promise<{ text: string; align: 'left' | 'center' | 'right' } | null> {
-    if (!rid) return null;
+  /**
+   * 머리말/꼬리말 하나. Word 가 그리는 모양 그대로(글꼴·탭 자리·표·그림) 블록으로 담고, 글자만 추린 것도 함께 둔다 (대화상자에서 고칠 때 쓴다).
+   * Kite 가 쓴 문서의 글자뿐인 머리말은 Kite 의 설정(글자·정렬)으로 되돌린다. 쪽 번호만 든 문단은 pageNums 로 돌려준다
+   */
+  async convertHeaderFooter(rid: string | null, which: 'header' | 'footer'): Promise<{ hf: HeaderFooter | null; pageNums: { align: 'left' | 'center' | 'right'; text: string }[] }> {
+    const none = { hf: null, pageNums: [] };
+    if (!rid) return none;
     const rel = this.rels.get(rid);
-    if (!rel) return null;
-    const xml = await this.text(normalizePath('word/' + rel.target));
-    if (!xml) return null;
+    if (!rel) return none;
+    const path = normalizePath('word/' + rel.target);
+    const xml = await this.text(path);
+    if (!xml) return none;
+    // 머리말 안의 그림·링크는 그 부분의 관계 파일에서 찾는다 (관계 id 가 본문의 것과 겹친다)
+    const bodyRels = this.rels;
+    const bodyImages = this.images;
+    this.rels = await this.loadRels(path.replace(/([^/]+)$/, '_rels/$1.rels'));
+    this.images = new Map();
+    await this.loadImages(this.rels, this.images);
     this.headerMode = true;
-    const blocks = this.convertBody(parseXml(xml).documentElement);
-    this.headerMode = false;
+    let blocks: JNode[];
+    const rootEl = parseXml(xml).documentElement;
+    // Kite 가 쓴 글자뿐인 머리말: 문단마다 Header·Footer 스타일이 달려 있다 (모양을 갖춘 머리말에는 없다)
+    const kitePlain = this.fromKite && kids(rootEl).every((e) => localName(e) === 'p' && /^(Header|Footer)$/.test(attr(kid(kid(e, 'pPr'), 'pStyle'), 'val') || ''));
+    try {
+      blocks = this.convertBody(rootEl);
+    } finally {
+      this.headerMode = false;
+      this.rels = bodyRels;
+      this.images = bodyImages;
+    }
+    const alignOf = (n: JNode): 'left' | 'center' | 'right' => (n.attrs?.textAlign === 'right' ? 'right' : n.attrs?.textAlign === 'center' ? 'center' : 'left');
+    const textOf = (n: JNode): string => (n.content || []).map((c) => (c.type === 'text' ? (c.text === '\t' ? ' ' : c.text) : c.type === 'hardBreak' ? ' ' : '')).join('');
     const flat: string[] = [];
+    const pageNums: { align: 'left' | 'center' | 'right'; text: string }[] = [];
     let align: 'left' | 'center' | 'right' = 'center';
     let alignSet = false;
-    const walk = (n: JNode) => {
+    let plain = true;
+    /** 쪽 번호 설정으로 옮긴 문단 (내용에서 뺀다) */
+    const numParas = new Set<JNode>();
+    const walk = (n: JNode, top: boolean) => {
       if (n.type === 'paragraph' || n.type === 'heading') {
-        const t = (n.content || []).map((c) => (c.type === 'text' ? c.text : c.type === 'hardBreak' ? ' ' : '')).join('');
-        if (t.trim()) {
-          flat.push(t.trim());
-          if (!alignSet) {
-            const a = n.attrs?.textAlign;
-            align = a === 'right' ? 'right' : a === 'center' ? 'center' : 'left';
-            alignSet = true;
-          }
+        const t = textOf(n).trim();
+        if ((n.content || []).some((c) => c.type !== 'text' && c.type !== 'hardBreak')) plain = false;
+        if (!t) return;
+        // Kite 가 쓴 쪽 번호 문단
+        if (this.fromKite && top && /^(- \{\{PAGE\}\} -|\(\{\{PAGE\}\}\)|\{\{PAGE\}\})$/.test(t)) {
+          pageNums.push({ align: alignOf(n), text: t });
+          numParas.add(n);
+          return;
         }
-      } else (n.content || []).forEach(walk);
+        flat.push(t);
+        if (!alignSet) {
+          align = alignOf(n);
+          alignSet = true;
+        }
+      } else {
+        plain = false;
+        (n.content || []).forEach((c) => walk(c, false));
+      }
     };
-    blocks.forEach(walk);
+    blocks.forEach((b) => walk(b, true));
     const text = flat.join(' ');
-    return text ? { text, align } : null;
+    if (kitePlain && plain) return { hf: text ? { text, align } : null, pageNums };
+    if (!text && plain) return { hf: null, pageNums };
+    const hf: HeaderFooter = { text, align, content: blocks.filter((b) => !numParas.has(b)) };
+    // 꼬리말은 아래쪽 끝(종이 아래에서 꼬리말 거리)에 맞춰 위로 자란다
+    if (which === 'footer') hf.valign = 'bottom';
+    return { hf, pageNums };
   }
 
   async applySection(sectPr: Element | null) {
@@ -1168,21 +1306,40 @@ class DocxReader {
       if (attr(cols, 'sep') === '1' || attr(cols, 'sep') === 'true') c.line = { w: 0.12, c: '#000000', s: 'solid' };
       pg.columns = c;
     }
-    const ref = (tag: string) => {
-      const refs = kids(sectPr, tag);
-      const def = refs.find((r) => attr(r, 'type') === 'default') || refs[0];
-      return def ? attr(def, 'id') : null;
+    // 머리말/꼬리말: 기본(홀수 쪽), 첫 쪽(titlePg 일 때), 짝수 쪽(evenAndOddHeaders 일 때)
+    const tp = kid(sectPr, 'titlePg');
+    const titlePg = !!tp && onOff(tp) !== false;
+    const ref = (tag: string, type: string) => {
+      const r = kids(sectPr, tag).find((x) => (attr(x, 'type') || 'default') === type);
+      return r ? attr(r, 'id') : null;
     };
-    const h = await this.convertHeaderFooter(ref('headerReference'));
-    if (h) this.settings.header = h;
-    const f = await this.convertHeaderFooter(ref('footerReference'));
-    if (f) {
-      if (f.text === '{{PAGE}}' || /^-?\s*\{\{PAGE\}\}\s*-?$/.test(f.text)) {
-        this.settings.pageNumber.pos = (`bottom-${f.align}` as any);
-        this.settings.pageNumber.format = f.text.includes('-') ? 'dash' : 'digit';
-      } else this.settings.footer = f;
+    for (const which of ['header', 'footer'] as const) {
+      const tag = which + 'Reference';
+      const def = await this.convertHeaderFooter(ref(tag, 'default'), which);
+      let hf: HeaderFooter | null = def.hf;
+      // Kite 가 쓴 쪽 번호 문단은 쪽 번호 설정으로
+      for (const pn of def.pageNums) {
+        this.settings.pageNumber.pos = `${which === 'header' ? 'top' : 'bottom'}-${pn.align}` as any;
+        this.settings.pageNumber.format = pn.text.startsWith('-') ? 'dash' : pn.text.startsWith('(') ? 'paren' : this.settings.pageNumber.format;
+      }
+      if (titlePg) {
+        const first = (await this.convertHeaderFooter(ref(tag, 'first'), which)).hf;
+        if (first) hf = { ...(hf || { text: '', align: 'center' }), first };
+        else if (hf) this.settings.hideFirst = { ...this.settings.hideFirst, [which]: true };
+      }
+      if (this.evenOdd) {
+        const even = (await this.convertHeaderFooter(ref(tag, 'even'), which)).hf;
+        if (even) hf = { ...(hf || { text: '', align: 'center' }), even };
+        else if (hf) hf.oddOnly = true;
+      }
+      if (hf) this.settings[which] = hf;
     }
   }
+}
+
+/** Word 의 탭 채움 → 탭 마크의 채움 값 (1 실선, 2 긴 점선, 3 점선, 6 원점선) */
+function leaderOf(v: string | null): number {
+  return v === 'dot' ? 3 : v === 'hyphen' ? 2 : v === 'underscore' || v === 'heavy' ? 1 : v === 'middleDot' ? 6 : 0;
 }
 
 /** 기호 글꼴(Symbol·Wingdings)의 글머리표 글자 → 같은 모양의 유니코드 글자 */

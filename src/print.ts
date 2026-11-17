@@ -1,6 +1,7 @@
 import type { Node as PMNode } from '@tiptap/pm/model';
 import type { DocSettings, HeaderFooter, PageSetup } from './types';
 import { blocksHtml, hfRichHtml } from './hfRich';
+import { layoutTabsHtml } from './editor/tabLayout';
 import type { DocTab } from './doc/docTab';
 import { PX_PER_MM, formatPageNumber, xmlEscape } from './formats/common';
 import { FN_FONT_PX, FN_LINE, FN_SEP } from './editor/extensions/pagination';
@@ -24,8 +25,14 @@ export interface PageGeom {
   P: number;
 }
 
+/** 첫 쪽의 용지: 첫 쪽만의 본문 영역(firstPage)이 있으면 그것을 넣은 것 */
+export function firstPageSetup(s: DocSettings): PageSetup {
+  return s.firstPage ? { ...s.page, ...s.firstPage } : s.page;
+}
+
+/** 문서의 쪽 기하 (첫 쪽의 것. 첫 쪽만 본문 영역이 다른 문서는 둘째 쪽부터 geomFor(s, s.page) 를 쓴다) */
 export function computeGeom(s: DocSettings, gap = PAGE_GAP): PageGeom {
-  const p = s.page;
+  const p = firstPageSetup(s);
   const wMm = p.landscape ? Math.max(p.width, p.height) : p.width;
   const hMm = p.landscape ? Math.min(p.width, p.height) : p.height;
   const W = wMm * PX_PER_MM;
@@ -52,7 +59,7 @@ export function computeGeom(s: DocSettings, gap = PAGE_GAP): PageGeom {
 
 /** 구역 용지(없으면 문서 용지)로 본 쪽 기하 */
 export function geomFor(s: DocSettings, setup: PageSetup | null, gap = PAGE_GAP): PageGeom {
-  return computeGeom(setup ? { ...s, page: setup } : s, gap);
+  return computeGeom(setup ? { ...s, page: setup, firstPage: undefined } : s, gap);
 }
 
 /** 문서의 구역 용지들 (구역 나누기에 담긴 것) */
@@ -90,6 +97,8 @@ export interface PagePlan {
 /** 쪽마다의 자리. 쪽 나누기 엔진(pagination)의 쪽 위치 계산과 같은 식이다 */
 export function planPages(s: DocSettings, pageCount: number, pageSetups: (PageSetup | null)[] | undefined, W: number, gap = PAGE_GAP): PagePlan[] {
   const base = computeGeom(s, gap);
+  // 용지가 따로 없는 쪽(첫 구역)의 설정: 첫 쪽만의 본문 영역을 넣은 것
+  const s0 = s.firstPage ? { ...s, page: firstPageSetup(s) } : s;
   const hostLeft = (W - base.W) / 2 + base.ml;
   const out: PagePlan[] = [];
   let top = 0;
@@ -97,7 +106,7 @@ export function planPages(s: DocSettings, pageCount: number, pageSetups: (PageSe
     const setup = pageSetups?.[k] ?? null;
     const g = setup ? geomFor(s, setup, gap) : base;
     const left = (W - g.W) / 2;
-    out.push({ g, settings: setup ? { ...s, page: setup } : s, left, top, contentTop: top + g.mt - base.mt, dx: left + g.ml - hostLeft });
+    out.push({ g, settings: setup ? { ...s, page: setup } : s0, left, top, contentTop: top + g.mt - base.mt, dx: left + g.ml - hostLeft });
     top += g.H + gap;
   }
   return out;
@@ -128,6 +137,7 @@ export function pageNumShown(s: DocSettings, k: number): boolean {
 export function hfAt(s: DocSettings, which: 'header' | 'footer', k: number): HeaderFooter | null {
   const def = s[which];
   if (k === 0 && s.hideFirst?.[which]) return null;
+  if (k === 0 && def.first) return def.first;
   if (def.from != null && k < def.from) return null;
   if (pageNumAt(s, k) % 2 === 0) return def.even ?? (def.oddOnly ? null : def);
   return def;
@@ -303,7 +313,7 @@ export function pageChromeHtml(tab: DocTab, g: PageGeom, k: number, pageCount: n
     if (rich) {
       // 영역 안 세로 맞춤 (아래·가운데면 영역 높이 안에서 맞춘다. 넘치는 내용은 자르지 않는다)
       const va = def.valign === 'bottom' ? 'flex-end' : def.valign === 'middle' ? 'center' : 'flex-start';
-      return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;flex-direction:column;justify-content:${va}"><div class="kdoc-content hf-rich">${hfText(rich, num, total, s.pageNumber.format)}</div></div>`;
+      return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;flex-direction:column;justify-content:${va}"><div class="kdoc-content hf-rich">${layoutTabsHtml(hfText(rich, num, total, s.pageNumber.format), g.contentW)}</div></div>`;
     }
     if (!def.text.trim()) return '';
     return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;align-items:${valign};justify-content:${def.align === 'left' ? 'flex-start' : def.align === 'right' ? 'flex-end' : 'center'};font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:9pt;white-space:pre;overflow:hidden">${xmlEscape(hfText(def.text, num, total, s.pageNumber.format))}</div>`;

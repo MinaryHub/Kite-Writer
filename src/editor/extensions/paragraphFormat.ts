@@ -3,6 +3,7 @@ import type { EditorState } from '@tiptap/pm/state';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { cssToPt, normLineHeight, r2 } from '../cssUnits';
 import { cleanParaBorder, normColor } from '../../formats/common';
+import { cleanTabs } from '../tabLayout';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -39,6 +40,13 @@ export function forEachSelectedPara(state: EditorState, fn: (node: PMNode, pos: 
     });
   }
   return seen.size;
+}
+
+/** 쪽 나눔 규칙 값: w·n·l 가운데 든 것만 (없으면 null) */
+export function cleanKeep(v: any): string | null {
+  if (typeof v !== 'string') return null;
+  const out = ['w', 'n', 'l'].filter((c) => v.includes(c)).join('');
+  return out || null;
 }
 
 const ptAttr = (cssProp: string, styleProp: string) => ({
@@ -127,6 +135,30 @@ export const ParagraphFormat = Extension.create({
               return pt ? r2(pt) : null;
             },
             renderHTML: (attrs: Record<string, any>) => (attrs.spaceAfter ? { style: `padding-bottom: ${attrs.spaceAfter}pt` } : {}),
+          },
+          /** 쪽 나눔 규칙: w 외톨이줄 방지(쪽에 한 줄만 남기지 않는다), n 다음 문단과 함께, l 문단을 나누지 않음 (쪽 나누기가 따른다) */
+          pageKeep: {
+            default: null,
+            parseHTML: (el: HTMLElement) => cleanKeep(el.getAttribute('data-keep')),
+            renderHTML: (attrs: Record<string, any>) => {
+              const k = cleanKeep(attrs.pageKeep);
+              return k ? { 'data-keep': k } : {};
+            },
+          },
+          /** 탭 자리 (Word 문서): { d: 기본 탭 간격 pt, s: [자리 pt, 맞춤, 채움][] }. 탭 폭은 화면에서 재서 맞춘다 (tabLayout) */
+          tabs: {
+            default: null,
+            parseHTML: (el: HTMLElement) => {
+              try {
+                return cleanTabs(JSON.parse(el.getAttribute('data-tabs') || 'null'));
+              } catch {
+                return null;
+              }
+            },
+            renderHTML: (attrs: Record<string, any>) => {
+              const t = cleanTabs(attrs.tabs);
+              return t ? { 'data-tabs': JSON.stringify(t) } : {};
+            },
           },
           /** 한글 줄 나눔 단위: 글자 (한글의 '줄 나눔 기준 - 한글 단위: 글자'). 기본은 어절 */
           breakChar: {

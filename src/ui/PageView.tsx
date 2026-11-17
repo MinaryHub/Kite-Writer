@@ -13,6 +13,7 @@ import { FN_FONT_PX, FN_LINE, FN_SEP } from '../editor/extensions/pagination';
 import { showContextMenu } from './ContextMenu';
 import { platform } from '../platform';
 import { hfRichHtml } from '../hfRich';
+import { layoutTabsHtml } from '../editor/tabLayout';
 
 export function PageView({ tab, active, hidden = false }: { tab: DocTab; active: boolean; hidden?: boolean }) {
   const app = useApp();
@@ -40,7 +41,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       const x = geomFor(s, p, PAGE_GAP);
       return { pageHeight: x.H, gap: x.gap, contentHeight: x.contentH, contentWidth: x.contentW, mt: x.mt, columns: p.columns || null };
     };
-    const geo = { pageHeight: g.H, gap: g.gap, contentHeight: g.contentH, contentWidth: g.contentW, mt: g.mt, columns: s.page.columns || null, resolve };
+    const geo = { pageHeight: g.H, gap: g.gap, contentHeight: g.contentH, contentWidth: g.contentW, mt: g.mt, columns: s.page.columns || null, resolve, rest: s.firstPage ? s.page : null };
     const prev = storage.geometry;
     const secStore = tab.editor.storage.sections;
     const secKey = W + '|' + JSON.stringify(s.page);
@@ -55,10 +56,10 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       tab.editor.view.dispatch(tab.editor.state.tr.setMeta(sectionsKey, true).setMeta('addToHistory', false));
       changed = true;
     }
-    if (!prev || prev.pageHeight !== geo.pageHeight || prev.contentHeight !== geo.contentHeight || prev.contentWidth !== geo.contentWidth || prev.gap !== geo.gap || prev.mt !== geo.mt || JSON.stringify(prev.columns || null) !== JSON.stringify(geo.columns)) {
+    if (!prev || prev.pageHeight !== geo.pageHeight || prev.contentHeight !== geo.contentHeight || prev.contentWidth !== geo.contentWidth || prev.gap !== geo.gap || prev.mt !== geo.mt || JSON.stringify(prev.columns || null) !== JSON.stringify(geo.columns) || JSON.stringify(prev.rest || null) !== JSON.stringify(geo.rest)) {
       storage.geometry = geo;
       changed = true;
-    } else storage.geometry = { ...prev, resolve };
+    } else storage.geometry = { ...prev, resolve, rest: geo.rest };
     if (changed) storage.schedule();
   });
 
@@ -228,7 +229,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     const ft = hfAt(s, 'footer', k);
     const hRich = hd ? hfRichHtml(hd) : null;
     const fRich = ft ? hfRichHtml(ft) : null;
-    const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: hfText(html, num, total, s.pageNumber.format) }} />;
+    const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: layoutTabsHtml(hfText(html, num, total, s.pageNumber.format), g.contentW) }} />;
     chrome.push(
       <div
         key={'h' + k}

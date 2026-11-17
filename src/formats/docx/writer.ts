@@ -1,7 +1,7 @@
 import JSZip from 'jszip';
-import type { Columns, KDocument } from '../../types';
+import type { Columns, HeaderFooter, KDocument } from '../../types';
 import { type JNode, mmToTwip, xmlEscape, parseBorderCss, normColor, safeIsoDate, cleanColumns } from '../common';
-import { type CharStyle, type FlatBlock, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, flattenDoc } from '../flatten';
+import { type CharStyle, type FlatBlock, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, flattenContent, flattenDoc } from '../flatten';
 import { prepareImage } from '../imageUtil';
 import { naturalLineRatio } from '../fontMetrics';
 
@@ -67,12 +67,24 @@ function rPr(c: CharStyle, extra = ''): string {
 function pPr(p: ParaStyle, pageBreak: boolean, markChar?: CharStyle, font?: string): string {
   let x = '<w:pPr>';
   if (p.heading) x += `<w:pStyle w:val="Heading${p.heading}"/>`;
+  // 쪽 나눔 규칙 (기본 스타일은 외톨이줄 방지를 꺼 둔다: 켠 문단만 적는다)
+  if (p.keep?.includes('n')) x += '<w:keepNext/>';
+  else if (p.heading) x += '<w:keepNext w:val="0"/>';
+  if (p.keep?.includes('l')) x += '<w:keepLines/>';
   if (pageBreak) x += '<w:pageBreakBefore/>';
+  if (p.keep?.includes('w')) x += '<w:widowControl/>';
   if (p.borderBottom) x += '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="000000"/></w:pBdr>';
   if (p.bg) x += `<w:shd w:val="clear" w:color="auto" w:fill="${hex(p.bg)}"/>`;
+  if (p.tabs?.s?.length) {
+    const al = { l: 'left', c: 'center', r: 'right', d: 'decimal' } as const;
+    x += '<w:tabs>' + p.tabs.s.map((t) => `<w:tab w:val="${al[t[1]]}"${leaderAttr(t[2])} w:pos="${Math.round(t[0] * 20)}"/>`).join('') + '</w:tabs>';
+  }
   let line = '';
   if (/pt$/.test(p.lineHeight)) line = ` w:line="${Math.round(parseFloat(p.lineHeight) * 20)}" w:lineRule="exact"`;
-  else line = ` w:line="${Math.round(((parseFloat(p.lineHeight) || 1.6) / naturalLineRatio(font || markChar?.font)) * 240)}" w:lineRule="auto"`;
+  // 빈 문단(문단 부호만 있다): 높이를 글꼴과 상관없이 Kite 가 그리는 값(줄 간격 × 글자 크기) 그대로 고정한다.
+  // 배수로 적으면 그 컴퓨터에 없는 글꼴이 다른 글꼴로 바뀔 때 빈 줄 높이가 달라진다
+  else if (markChar) line = ` w:line="${Math.round((parseFloat(p.lineHeight) || 1.6) * markChar.size * 20)}" w:lineRule="exact"`;
+  else line = ` w:line="${Math.round(((parseFloat(p.lineHeight) || 1.6) / naturalLineRatio(font)) * 240)}" w:lineRule="auto"`;
   x += `<w:spacing w:before="${Math.round(p.spaceBefore * 20)}" w:after="${Math.round(p.spaceAfter * 20)}"${line}/>`;
   // 한글식 여백 → 워드식 (내어쓰기: left = 왼쪽 + 내어쓰기 폭, hanging = 폭)
   const left = Math.round(p.indentLeft * 20);
@@ -90,12 +102,22 @@ function pPr(p: ParaStyle, pageBreak: boolean, markChar?: CharStyle, font?: stri
   return x + '</w:pPr>';
 }
 
-function textRuns(text: string, c: CharStyle, deleted = false): string {
+/** 탭 채움 값 → Word 의 leader 속성 (없으면 빈 글) */
+function leaderAttr(leader: number): string {
+  const v = leader === 1 || leader === 7 ? 'underscore' : leader === 2 || leader === 4 || leader === 5 ? 'hyphen' : leader === 3 ? 'dot' : leader === 6 ? 'middleDot' : '';
+  return v ? ` w:leader="${v}"` : '';
+}
+
+function textRuns(text: string, c: CharStyle, deleted = false, ptab?: { ptab?: 'l' | 'c' | 'r' | null; leader: number } | null): string {
   const parts = text.split('\t');
   let inner = '';
   const tag = deleted ? 'w:delText' : 'w:t';
+  // 절대 위치 탭: 글 영역의 왼쪽 끝·가운데·오른쪽 끝
+  const tabXml = ptab?.ptab
+    ? `<w:ptab w:relativeTo="margin" w:alignment="${ptab.ptab === 'c' ? 'center' : ptab.ptab === 'r' ? 'right' : 'left'}" w:leader="${leaderAttr(ptab.leader).replace(/^.*"(\w+)"$/, '$1') || 'none'}"/>`
+    : '<w:tab/>';
   parts.forEach((part, i) => {
-    if (i) inner += '<w:tab/>';
+    if (i) inner += tabXml;
     if (part) inner += `<${tag} xml:space="preserve">${xmlEscape(part)}</${tag}>`;
   });
   return `<w:r>${rPr(c)}${inner}</w:r>`;
@@ -106,9 +128,9 @@ const isoTime = (t: number) => (t > 0 ? new Date(t).toISOString().replace(/\.\d+
 /** 글자 조각: 변경 내용이면 w:ins / w:del 로 감싼다 */
 function reviewedRun(ctx: Ctx, it: Extract<FlatInline, { type: 'text' }>): string {
   const ch = it.review?.change;
-  if (!ch) return textRuns(it.text, it.style);
+  if (!ch) return textRuns(it.text, it.style, false, it.tab);
   const tag = ch.type === 'ins' ? 'w:ins' : 'w:del';
-  return `<${tag} w:id="${ctx.changeNo++}" w:author="${xmlEscape(ch.author || 'Kite')}" w:date="${isoTime(ch.time)}">${textRuns(it.text, it.style, ch.type === 'del')}</${tag}>`;
+  return `<${tag} w:id="${ctx.changeNo++}" w:author="${xmlEscape(ch.author || 'Kite')}" w:date="${isoTime(ch.time)}">${textRuns(it.text, it.style, ch.type === 'del', it.tab)}</${tag}>`;
 }
 
 /** 메모 범위 시작/끝 (메모는 여러 문단에 걸칠 수 있다) */
@@ -275,11 +297,33 @@ function collectImages(blocks: FlatBlock[], out: Set<string>) {
   }
 }
 
-function hfXml(tag: 'hdr' | 'ftr', paras: string[]): string {
-  return DECL + `<w:${tag} ${W_NS}>${paras.join('') || '<w:p/>'}</w:${tag}>`;
+const REL_TYPES: Record<string, string> = {
+  image: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image',
+  hyperlink: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',
+  header: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/header',
+  footer: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer',
+  footnotes: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes',
+  comments: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments',
+  styles: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles',
+  settings: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings',
+};
+
+/** 관계 파일 (.rels) */
+function relsXml(rels: Ctx['rels']): string {
+  return (
+    DECL +
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+    rels.map((r) => `<Relationship Id="${r.id}" Type="${REL_TYPES[r.type] || r.type}" Target="${xmlEscape(r.target)}"${r.external ? ' TargetMode="External"' : ''}/>`).join('') +
+    `</Relationships>`
+  );
 }
 
-function hfParagraph(text: string, align: string, pageFmt: string): string {
+function hfXml(tag: 'hdr' | 'ftr', inner: string): string {
+  return DECL + `<w:${tag} ${W_NS}>${inner || '<w:p/>'}</w:${tag}>`;
+}
+
+/** 글자뿐인 머리말·꼬리말·쪽 번호 문단. Header·Footer 스타일을 달아 둔다 (다시 읽을 때 Kite 의 글자 머리말로 알아본다) */
+function hfParagraph(text: string, align: string, pageFmt: string, kind: 'header' | 'footer'): string {
   const jc = align === 'left' ? 'left' : align === 'right' ? 'right' : 'center';
   const rp = '<w:rPr><w:sz w:val="18"/></w:rPr>';
   let runs = '';
@@ -289,7 +333,34 @@ function hfParagraph(text: string, align: string, pageFmt: string): string {
       runs += `<w:r>${rp}<w:fldChar w:fldCharType="begin"/></w:r><w:r>${rp}<w:instrText xml:space="preserve"> ${instr} </w:instrText></w:r><w:r>${rp}<w:fldChar w:fldCharType="separate"/></w:r><w:r>${rp}<w:t>1</w:t></w:r><w:r>${rp}<w:fldChar w:fldCharType="end"/></w:r>`;
     } else if (part) runs += `<w:r>${rp}<w:t xml:space="preserve">${xmlEscape(part)}</w:t></w:r>`;
   }
-  return `<w:p><w:pPr><w:jc w:val="${jc}"/></w:pPr>${runs}</w:p>`;
+  return `<w:p><w:pPr><w:pStyle w:val="${kind === 'header' ? 'Header' : 'Footer'}"/><w:jc w:val="${jc}"/></w:pPr>${runs}</w:p>`;
+}
+
+/** 글 속의 쪽 번호 자리({{PAGE}}·{{PAGES}})를 Word 의 필드로 바꾼다 (모양을 갖춘 머리말·꼬리말) */
+function pageFields(xml: string, pageFmt: string): string {
+  if (!/\{\{PAGES?\}\}/.test(xml)) return xml;
+  return xml.replace(/<w:r>((?:<w:rPr>.*?<\/w:rPr>)?)(.*?)<\/w:r>/gs, (m, rp: string, inner: string) => {
+    if (!/\{\{PAGES?\}\}/.test(inner)) return m;
+    const fld = (instr: string) =>
+      `</w:r><w:r>${rp}<w:fldChar w:fldCharType="begin"/></w:r><w:r>${rp}<w:instrText xml:space="preserve"> ${instr} </w:instrText></w:r><w:r>${rp}<w:fldChar w:fldCharType="separate"/></w:r><w:r>${rp}<w:t>1</w:t></w:r><w:r>${rp}<w:fldChar w:fldCharType="end"/></w:r><w:r>${rp}`;
+    const out = inner.replace(/<w:t xml:space="preserve">([^<]*)<\/w:t>/g, (_t, text: string) =>
+      text
+        .split(/(\{\{PAGES?\}\})/)
+        .map((part) => (part === '{{PAGE}}' ? fld('PAGE' + pageFmt) : part === '{{PAGES}}' ? fld('NUMPAGES') : part ? `<w:t xml:space="preserve">${part}</w:t>` : ''))
+        .join(''),
+    );
+    return `<w:r>${rp}${out}</w:r>`;
+  });
+}
+
+/** 모양을 갖춘 머리말/꼬리말의 블록 (없으면 null) */
+function richHF(def: HeaderFooter | null | undefined): FlatBlock[] | null {
+  if (!def || !Array.isArray(def.content) || !def.content.length) return null;
+  try {
+    return flattenContent(def.content as JNode[]);
+  } catch {
+    return null;
+  }
 }
 
 function stylesXml(): string {
@@ -303,6 +374,8 @@ function stylesXml(): string {
     [20, 16, 14, 12, 11, 10].map((s, i) => heading(i + 1, s)).join('') +
     `<w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont"><w:name w:val="Default Paragraph Font"/><w:uiPriority w:val="1"/><w:semiHidden/></w:style>` +
     `<w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr></w:style>` +
+    `<w:style w:type="paragraph" w:styleId="Header"><w:name w:val="header"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:style>` +
+    `<w:style w:type="paragraph" w:styleId="Footer"><w:name w:val="footer"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:style>` +
     `<w:style w:type="paragraph" w:styleId="FootnoteText"><w:name w:val="footnote text"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:style>` +
     `<w:style w:type="character" w:styleId="FootnoteReference"><w:name w:val="footnote reference"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style>` +
     `</w:styles>`
@@ -320,6 +393,8 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
 
   const srcs = new Set<string>();
   collectImages(blocks, srcs);
+  // 머리말·꼬리말(기본·첫 쪽·짝수 쪽)의 그림도 함께 담는다
+  for (const def of [s.header, s.header.first, s.header.even, s.footer, s.footer.first, s.footer.even]) collectImages(richHF(def) || [], srcs);
   let n = 0;
   for (const src of srcs) {
     const img = await prepareImage(src);
@@ -338,26 +413,49 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
   collectComments(ctx, blocks, commentData);
   const body = blocks.map((b) => blockXml(ctx, b)).join('');
 
-  // 머리말/꼬리말
+  // 머리말/꼬리말: 기본(홀수 쪽)·첫 쪽·짝수 쪽. 모양을 갖춘 것(content)은 본문처럼 쓰고, 글자뿐인 것은 한 문단으로 쓴다
   const pfmt = s.pageNumber.format === 'roman' ? ' \\* roman' : s.pageNumber.format === 'ROMAN' ? ' \\* ROMAN' : '';
   const pageText = s.pageNumber.format === 'dash' ? '- {{PAGE}} -' : s.pageNumber.format === 'paren' ? '({{PAGE}})' : '{{PAGE}}';
-  const hdrParas: string[] = [];
-  const ftrParas: string[] = [];
-  if (s.header.text.trim()) hdrParas.push(hfParagraph(s.header.text, s.header.align, pfmt));
-  if (s.footer.text.trim()) ftrParas.push(hfParagraph(s.footer.text, s.footer.align, pfmt));
-  if (s.pageNumber.pos !== 'none') {
-    const [vpos, hpos] = s.pageNumber.pos.split('-');
-    (vpos === 'top' ? hdrParas : ftrParas).push(hfParagraph(pageText, hpos, pfmt));
-  }
-  let sectRefs = '';
+  const [numV, numH] = s.pageNumber.pos === 'none' ? ['', ''] : s.pageNumber.pos.split('-');
   const files: [string, string][] = [];
-  if (hdrParas.length) {
-    files.push(['word/header1.xml', hfXml('hdr', hdrParas)]);
-    sectRefs += `<w:headerReference w:type="default" r:id="${ctx.addRel('header', 'header1.xml')}"/>`;
-  }
-  if (ftrParas.length) {
-    files.push(['word/footer1.xml', hfXml('ftr', ftrParas)]);
-    sectRefs += `<w:footerReference w:type="default" r:id="${ctx.addRel('footer', 'footer1.xml')}"/>`;
+  const hfOverrides: string[] = [];
+  let sectRefs = '';
+  let partNo = 0;
+  /** 머리말/꼬리말 부분 하나를 쓰고 구역에서 가리킨다. 내용이 없으면 쓰지 않는다 */
+  const hfPart = (kind: 'header' | 'footer', type: 'default' | 'first' | 'even', def: HeaderFooter | null | undefined, pageNum: boolean) => {
+    const hc = new Ctx();
+    hc.relNo = 0;
+    hc.bodyWidthTw = ctx.bodyWidthTw;
+    hc.docPrId = ctx.docPrId + 1000 * (partNo + 1);
+    let inner = '';
+    const rich = richHF(def);
+    if (rich) {
+      // 이 부분의 그림은 이 부분의 관계 파일로 가리킨다
+      const used = new Set<string>();
+      collectImages(rich, used);
+      for (const src of used) {
+        const img = ctx.images.get(src);
+        hc.images.set(src, img ? { ...img, rid: hc.addRel('image', `media/${img.name}`) } : null);
+      }
+      inner = pageFields(rich.map((b) => blockXml(hc, b)).join(''), pfmt);
+    } else if (def?.text.trim()) inner = hfParagraph(def.text, def.align, pfmt, kind);
+    if (pageNum) inner += hfParagraph(pageText, numH, pfmt, kind);
+    if (!inner) return;
+    const name = `${kind}${++partNo}.xml`;
+    files.push([`word/${name}`, hfXml(kind === 'header' ? 'hdr' : 'ftr', inner)]);
+    if (hc.rels.length) files.push([`word/_rels/${name}.rels`, relsXml(hc.rels)]);
+    hfOverrides.push(`<Override PartName="/word/${name}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml"/>`);
+    sectRefs += `<w:${kind}Reference w:type="${type}" r:id="${ctx.addRel(kind, name)}"/>`;
+  };
+  // 첫 쪽을 다르게: 머리말·꼬리말 가운데 하나라도 첫 쪽이 다르면 둘 다 첫 쪽의 것을 따로 쓴다 (다르지 않은 쪽은 기본과 같은 내용)
+  const titlePg = !!(s.header.first || s.footer.first || s.hideFirst?.header || s.hideFirst?.footer);
+  const evenOdd = !!(s.header.even || s.footer.even || s.header.oddOnly || s.footer.oddOnly);
+  for (const kind of ['header', 'footer'] as const) {
+    const def = s[kind];
+    const num = numV === (kind === 'header' ? 'top' : 'bottom');
+    hfPart(kind, 'default', def, num);
+    if (titlePg) hfPart(kind, 'first', def.first || (s.hideFirst?.[kind] ? null : def), num && !s.hideFirst?.pageNum);
+    if (evenOdd) hfPart(kind, 'even', def.even || (def.oddOnly ? null : def), num);
   }
   const top = mmToTwip(pg.marginTop + pg.marginHeader);
   const bottom = mmToTwip(pg.marginBottom + pg.marginFooter);
@@ -365,7 +463,7 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
     `<w:sectPr>${sectRefs}<w:pgSz w:w="${mmToTwip(pageW)}" w:h="${mmToTwip(pageH)}"${pg.landscape ? ' w:orient="landscape"' : ''}/>` +
     `<w:pgMar w:top="${top}" w:right="${mmToTwip(pg.marginRight)}" w:bottom="${bottom}" w:left="${mmToTwip(pg.marginLeft)}" w:header="${mmToTwip(pg.marginTop)}" w:footer="${mmToTwip(pg.marginBottom)}" w:gutter="${mmToTwip(pg.gutter)}"/>` +
     (s.pageNumber.start !== 1 ? `<w:pgNumType w:start="${s.pageNumber.start}"/>` : '') +
-    `${colsXml(pg.columns)}<w:docGrid w:linePitch="360"/></w:sectPr>`;
+    `${colsXml(pg.columns)}${titlePg ? '<w:titlePg/>' : ''}<w:docGrid w:linePitch="360"/></w:sectPr>`;
 
   const documentXml = DECL + `<w:document ${W_NS}><w:body>${body}${sectPr}</w:body></w:document>`;
 
@@ -401,28 +499,23 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
   ctx.addRel('styles', 'styles.xml');
   ctx.addRel('settings', 'settings.xml');
 
+  // 기본 탭 간격: Word 문서에서 온 문단이 있으면 그 문서의 값, 아니면 Kite 의 40pt
+  const tabbed = (bs: FlatBlock[]): number | null => {
+    for (const b of bs) {
+      const v = b.kind === 'para' ? b.style.tabs?.d ?? null : b.kind === 'box' ? tabbed(b.blocks) : b.cells.reduce<number | null>((a, row) => a ?? row.reduce<number | null>((x, c) => x ?? tabbed(c.blocks), null), null);
+      if (v) return v;
+    }
+    return null;
+  };
+  const defaultTab = Math.round((tabbed(blocks) || 40) * 20);
   const settingsXml =
     DECL +
-    `<w:settings ${W_NS}><w:zoom w:percent="100"/><w:defaultTabStop w:val="800"/><w:characterSpacingControl w:val="doNotCompress"/>` +
+    `<w:settings ${W_NS}><w:zoom w:percent="100"/><w:defaultTabStop w:val="${defaultTab}"/>${evenOdd ? '<w:evenAndOddHeaders/>' : ''}<w:characterSpacingControl w:val="doNotCompress"/>` +
     (hasFootnotes ? '<w:footnotePr><w:footnote w:id="0"/><w:footnote w:id="1"/></w:footnotePr>' : '') +
-    `<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>`;
+    // Kite 는 문단의 위 간격과 앞 문단의 아래 간격을 더해 그린다: Word 도 그렇게 하도록 적는다 (없으면 큰 쪽만 둔다)
+    `<w:compat><w:doNotUseHTMLParagraphAutoSpacing/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>`;
 
-  const relTypeUri = (t: string) =>
-    ({
-      image: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image',
-      hyperlink: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',
-      header: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/header',
-      footer: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer',
-      footnotes: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes',
-      comments: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments',
-      styles: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles',
-      settings: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings',
-    })[t] || t;
-  const docRels =
-    DECL +
-    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
-    ctx.rels.map((r) => `<Relationship Id="${r.id}" Type="${relTypeUri(r.type)}" Target="${xmlEscape(r.target)}"${r.external ? ' TargetMode="External"' : ''}/>`).join('') +
-    `</Relationships>`;
+  const docRels = relsXml(ctx.rels);
 
   const exts = new Set(ctx.media.map((m) => m.ext));
   const mimeOf = (e: string) => ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', bmp: 'image/bmp' })[e] || 'image/png';
@@ -435,8 +528,7 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
     `<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>` +
     (hasFootnotes ? `<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>` : '') +
     (hasComments ? `<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>` : '') +
-    (hdrParas.length ? `<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>` : '') +
-    (ftrParas.length ? `<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>` : '') +
+    hfOverrides.join('') +
     `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>` +
     `<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`;
 

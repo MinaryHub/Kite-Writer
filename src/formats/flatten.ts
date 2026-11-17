@@ -1,4 +1,5 @@
 import { latexToHwp } from '../math/hwpEq';
+import { cleanTabs, type TabDefs } from '../editor/tabLayout';
 import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type JMark, type JNode, type ParaBorder, cleanColumns, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
 import type { Columns } from '../types';
 import { cleanShape, type ShapeData } from './shape';
@@ -98,6 +99,10 @@ export interface ParaStyle {
   breakChar: boolean;
   /** 문단 테두리 */
   border?: ParaBorder | null;
+  /** 쪽 나눔 규칙: w 외톨이줄 방지, n 다음 문단과 함께, l 문단을 나누지 않음 */
+  keep?: string | null;
+  /** 탭 자리 (Word 문서): 기본 탭 간격과 정한 자리 */
+  tabs?: TabDefs | null;
 }
 
 /** 탭 하나의 정보 (한글 문서의 탭은 폭·채움·종류를 가진다) */
@@ -108,6 +113,8 @@ export interface TabInfo {
   leader: number;
   /** 탭 종류 (한글 값 그대로) */
   type: number;
+  /** 절대 위치 탭 (Word 의 ptab): 글 영역의 왼쪽 끝(l)·가운데(c)·오른쪽 끝(r) */
+  ptab?: 'l' | 'c' | 'r' | null;
 }
 
 /** 검토 정보 (변경 내용·메모) — 지원하는 형식(DOCX)만 쓴다 */
@@ -266,7 +273,7 @@ export function charKey(c: CharStyle): string {
 }
 
 export function paraKey(p: ParaStyle): string {
-  return [p.align, p.indentLeft, p.indentRight, p.textIndent, p.spaceBefore, p.spaceAfter, p.lineHeight, p.bg, +p.borderBottom, +p.breakChar, p.border ? JSON.stringify(p.border) : '', p.outline || ''].join('|');
+  return [p.align, p.indentLeft, p.indentRight, p.textIndent, p.spaceBefore, p.spaceAfter, p.lineHeight, p.bg, +p.borderBottom, +p.breakChar, p.border ? JSON.stringify(p.border) : '', p.outline || '', p.keep || '', p.tabs ? JSON.stringify(p.tabs) : ''].join('|');
 }
 
 function applyMarks(base: CharStyle, marks: JMark[] | undefined): { style: CharStyle; link: string | null; tab: TabInfo | null; ruby: { text: string; pos: string } | null; compose: string | null } {
@@ -285,7 +292,7 @@ function applyMarks(base: CharStyle, marks: JMark[] | undefined): { style: CharS
         compose = typeof m.attrs?.shape === 'string' && /^[A-Z_]{3,40}$/.test(m.attrs.shape) ? m.attrs.shape : 'SHAPE_CIRCLE';
         break;
       case 'tab':
-        tab = { width: m.attrs?.width ? +m.attrs.width : null, leader: +(m.attrs?.leader || 0), type: +(m.attrs?.type || 0) };
+        tab = { width: m.attrs?.width ? +m.attrs.width : null, leader: +(m.attrs?.leader || 0), type: +(m.attrs?.type || 0), ptab: m.attrs?.ptab === 'l' || m.attrs?.ptab === 'c' || m.attrs?.ptab === 'r' ? m.attrs.ptab : null };
         break;
       case 'bold':
         s.bold = true;
@@ -543,6 +550,8 @@ function flattenPara(n: JNode, ctx: Ctx, level: number): FlatPara {
   style.heading = level;
   style.outline = !level && +a.outlineLevel >= 1 && +a.outlineLevel <= 9 ? Math.round(+a.outlineLevel) : null;
   style.breakChar = !!a.breakChar;
+  style.keep = typeof a.pageKeep === 'string' ? ['w', 'n', 'l'].filter((c) => a.pageKeep.includes(c)).join('') || null : null;
+  style.tabs = cleanTabs(a.tabs);
   const base: CharStyle = { ...ctx.baseChar };
   if (level) {
     base.size = HEADING_SIZES[level] || 10;

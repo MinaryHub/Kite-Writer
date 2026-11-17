@@ -45,6 +45,8 @@ export function renderBlocks(schema: Schema, content: JNode[], doc: Document = d
     const node = sanitizeDoc({ type: 'doc', content } as any, schema);
     div.appendChild(DOMSerializer.fromSchema(schema).serializeFragment(node.content, { document: doc }));
     applyHwpLines(node.content, div);
+    // 빈 문단도 한 줄을 차지한다 (편집기는 빈 문단에 줄 바꿈을 넣어 그린다. 여기서도 같게)
+    for (const el of Array.from(div.querySelectorAll('p, h1, h2, h3, h4, h5, h6'))) if (!el.firstChild) el.appendChild(doc.createElement('br'));
   } catch {
     /* 그릴 수 없는 내용 */
   }

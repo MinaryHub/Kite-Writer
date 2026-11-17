@@ -39,6 +39,8 @@ export interface HeaderFooter {
   valign?: 'top' | 'middle' | 'bottom';
   /** 짝수 쪽에 쓰는 머리말/꼬리말 (한글의 '짝수 쪽'). 없으면 짝수 쪽도 이것을 쓴다 (oddOnly 면 비운다) */
   even?: HeaderFooter;
+  /** 첫 쪽에만 쓰는 머리말/꼬리말 (Word 의 '첫 페이지를 다르게'). 없으면 첫 쪽도 이것을 쓴다 */
+  first?: HeaderFooter;
   /** 홀수 쪽에만 (한글의 '홀수 쪽'만 있는 문서) */
   oddOnly?: boolean;
   /** 이 쪽(0부터)부터 쓴다: 머리말이 뒤 구역에서 시작하는 문서 (앞 쪽들에는 없다) */
@@ -76,6 +78,11 @@ export interface DocSettings {
   header: HeaderFooter;
   footer: HeaderFooter;
   pageNumber: PageNumbering;
+  /**
+   * 첫 쪽만의 본문 영역 (Word 의 '첫 페이지를 다르게': 첫 쪽의 머리말·꼬리말 길이가 달라 본문 시작·끝이 다르다).
+   * 적힌 값이 첫 쪽에서 page 의 같은 값을 갈음한다
+   */
+  firstPage?: { marginHeader?: number; marginFooter?: number };
   /** 첫 쪽에서 감추는 것 (한글의 '감추기': 표지 쪽의 머리말·꼬리말·쪽 번호) */
   hideFirst?: { header?: boolean; footer?: boolean; pageNum?: boolean; masterPage?: boolean };
   /**
