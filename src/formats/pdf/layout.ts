@@ -11,6 +11,8 @@ import type { FillRect, Glyph, PageContent, PdfImage, Seg } from './extract';
 const PT2PX = 96 / 72;
 /** 셀 위/아래 안쪽 여백 + 테두리 (pt): 편집기 CSS(0.5mm + 1px) */
 const CELL_PADV = 1.4 + 0.75;
+/** 블록 사이 간격의 한도 (pt). 본문이 짧은 쪽의 꼬리말처럼 쪽 높이에 가까운 간격도 그대로 두되, 잘못 읽은 값이 쪽을 끝없이 늘이지 않게 한다 */
+const MAX_GAP = 2000;
 
 interface Box {
   x0: number;
@@ -1033,6 +1035,8 @@ export function analyzePage(pc: PageContent) {
   // 밑줄: 표에 쓰이지 않은 가로선 바로 위의 글자
   const underlined = new Set<Glyph>();
   const rules: Seg[] = [];
+  /** 밑줄·구분선으로 옮긴 선 */
+  const usedSegs = new Set<Seg>();
   for (const s of leftover.length * glyphs.length > 5e6 ? [] : leftover) {
     if (s.dir !== 'h') continue;
     let under = false;
@@ -1045,7 +1049,24 @@ export function analyzePage(pc: PageContent) {
         }
       }
     // 밑줄이 아닌 긴 가로선은 구분선으로 그린다
-    if (!under && s.b - s.a > 40 && s.w <= 6 && rules.length < 200) rules.push(s);
+    if (!under && s.b - s.a > 40 && s.w <= 6 && rules.length < 200) {
+      rules.push(s);
+      usedSegs.add(s);
+    }
+    if (under) usedSegs.add(s);
+  }
+  // 표·밑줄·구분선 어디에도 쓰이지 않은 선(체크 상자의 네 변, 괄호 선, 짧은 세로선·가로선)은 도형 그림으로 살린다.
+  // 긴 세로선은 단 구분선으로 쓰일 수 있으므로 둔다 (columnsByRule)
+  if (leftover.length <= 4000) {
+    const pageH = page.y1 - page.y0;
+    const stray = leftover
+      .filter((s) => !usedSegs.has(s) && !s.ghost && !(s.dir === 'v' && s.b - s.a > pageH * 0.3))
+      .map((s) => {
+        const hw = Math.max(0.5, s.w / 2) + 0.5;
+        const light = lum(normHex(s.color)) > 0.85;
+        return s.dir === 'h' ? { x0: s.a, x1: s.b, y0: s.pos - hw, y1: s.pos + hw, light } : { x0: s.pos - hw, x1: s.pos + hw, y0: s.a, y1: s.b, light };
+      });
+    if (stray.length) images = images.concat(vectorImages(stray, pageArea).map((v) => ({ ...v, stray: true })));
   }
 
   // 그릇 트리: 페이지 > (표 셀 | 상자) ...
@@ -1089,6 +1110,12 @@ export function analyzePage(pc: PageContent) {
         home = c;
         break;
       }
+    // 선 조각 그림(체크 상자·괄호 선 등): 표의 칸 안에 있는 것만 칸 배경의 제자리에 깐다.
+    // 글 사이에 끼우면 줄·문단이 늘어 꽉 찬 쪽이 다음 쪽으로 넘치므로, 칸 밖의 것은 살리지 않는다
+    if (im.stray) {
+      if ((home as CellModel).kind === 'cell' && tables.some((t) => t.cells.includes(home as CellModel))) ((home as CellModel).overlays ||= []).push(im);
+      continue;
+    }
     // 어느 칸에도 다 들어가지 않고 표에 걸친 그림(직인 등): 겹치는 칸마다 배경으로
     if (home === pageC && area(im) < pageArea * 0.25) {
       const t = tables.find((t) => overlap(t.x0, t.x1, im.x0, im.x1) * overlap(t.y0, t.y1, im.y0, im.y1) > area(im) * 0.3);
@@ -1630,15 +1657,16 @@ export async function renderContainer(c: Container, bounds: Box, ctx: LayoutCtx,
 
   const gapBefore = (top: number) => Math.max(0, top - prevBottom);
   const setSpace = (attrs: Record<string, any>, gap: number) => {
-    if (gap >= 0.8) attrs.spaceBefore = round(Math.min(gap, 400), 1);
+    // 한 쪽 안의 간격은 종이 높이를 넘지 못한다 (본문이 짧은 쪽의 꼬리말처럼 큰 간격도 그대로 둔다)
+    if (gap >= 0.8) attrs.spaceBefore = round(Math.min(gap, MAX_GAP), 1);
   };
   const pushSpacer = (gap: number) => {
     if (gap < 2) return;
     // 문단 간격은 안쪽 여백으로 그려지므로, 배경색을 칠한 문단(구분선)에는 붙이지 않는다
     if (prevBlock && prevBlock.type === 'paragraph' && !prevBlock.attrs?.paraBg) {
       const a = (prevBlock.attrs ||= {});
-      a.spaceAfter = round((a.spaceAfter || 0) + Math.min(gap, 400), 1);
-    } else blocks.push(paragraph({ lineHeight: `${round(Math.min(gap, 400), 1)}pt`, fontSize: 1 }, []));
+      a.spaceAfter = round((a.spaceAfter || 0) + Math.min(gap, MAX_GAP), 1);
+    } else blocks.push(paragraph({ lineHeight: `${round(Math.min(gap, MAX_GAP), 1)}pt`, fontSize: 1 }, []));
   };
 
   // 문단 묶기
@@ -1753,7 +1781,7 @@ export async function renderContainer(c: Container, bounds: Box, ctx: LayoutCtx,
       if (R - r.b > 0.5) attrs.indentRight = round(R - r.b, 1);
       // 위 간격은 빈 문단으로 (배경색이 간격까지 칠해지지 않게)
       const gap = gapBefore(it.top);
-      if (gap >= 0.3) blocks.push(paragraph({ lineHeight: `${round(Math.min(gap, 400), 1)}pt`, fontSize: 1 }, []));
+      if (gap >= 0.3) blocks.push(paragraph({ lineHeight: `${round(Math.min(gap, MAX_GAP), 1)}pt`, fontSize: 1 }, []));
       const node = paragraph(attrs, []);
       blocks.push(node);
       prevBlock = node;
