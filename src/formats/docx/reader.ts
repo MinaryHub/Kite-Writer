@@ -132,6 +132,12 @@ class DocxReader {
   theme = { minorLatin: '', minorEa: '', majorLatin: '', majorEa: '' };
   /** 줄 격자 간격 (pt). 구역의 docGrid 가 type=lines·linesAndChars 일 때만 */
   gridPt = 0;
+  /** 호환 모드 (settings.xml 의 compatibilityMode: 15 = Word 2013 이후). 표의 왼쪽 자리 등이 달라진다 */
+  compatMode = 12;
+  /** 표 스타일을 고르지 않은 표가 쓰는 기본 표 스타일 */
+  defaultTableStyle: string | null = null;
+  /** 지금 읽는 표의 표 스타일 (안쪽 표가 뒤): 표 스타일의 문단·글자 모양이 칸 안 문단에 깔린다 */
+  private tableStyles: StyleDef[][] = [];
   images = new Map<string, string>();
   warnings: string[] = [];
   settings = defaultSettings();
@@ -184,6 +190,12 @@ class DocxReader {
       const ma = pick('majorFont');
       this.theme = { minorLatin: mi.latin, minorEa: mi.ea, majorLatin: ma.latin, majorEa: ma.ea };
     }
+    const settingsXml = await this.text('word/settings.xml');
+    if (settingsXml) {
+      const cm = descendants(parseXml(settingsXml), 'compatSetting').find((e) => attr(e, 'name') === 'compatibilityMode');
+      const v = cm ? parseInt(attr(cm, 'val') || '', 10) : NaN;
+      if (Number.isFinite(v)) this.compatMode = v;
+    }
     const stylesXml = await this.text('word/styles.xml');
     if (stylesXml) {
       const sd = parseXml(stylesXml);
@@ -201,6 +213,7 @@ class DocxReader {
           tblPr: kid(s, 'tblPr'),
         });
         if (attr(s, 'type') === 'paragraph' && attr(s, 'default') === '1') this.defaultPStyle = id;
+        if (attr(s, 'type') === 'table' && attr(s, 'default') === '1') this.defaultTableStyle = id;
       }
     }
     const numXml = await this.text('word/numbering.xml');
@@ -448,6 +461,13 @@ class DocxReader {
     const r: RProps = {};
     this.applyP(p, this.docDefaultsP);
     this.applyR(r, this.docDefaultsR);
+    // 표 안의 문단: 표 스타일의 문단·글자 모양이 문서 기본값 위에, 문단 스타일 아래에 깔린다
+    const ts = this.tableStyles[this.tableStyles.length - 1];
+    if (ts)
+      for (const st of ts) {
+        this.applyP(p, st.pPr);
+        this.applyR(r, st.rPr);
+      }
     let heading = 0;
     for (const s of this.styleChain(styleId)) {
       this.applyP(p, s.pPr);
@@ -896,10 +916,41 @@ class DocxReader {
       };
       if (['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].every(none)) tableNoBorders = ['l', 'r', 't', 'b'];
     } else if (!styleId) tableNoBorders = ['l', 'r', 't', 'b'];
-    const grid = kids(kid(tbl, 'tblGrid'), 'gridCol').map((g) => Math.round(parseFloat(attr(g, 'w') || '0') / 15));
+    const grid = kids(kid(tbl, 'tblGrid'), 'gridCol').map((g) => Math.round((parseFloat(attr(g, 'w') || '0') / 15) * 100) / 100);
+    // 칸의 안 여백 (twip → px): 표 스타일 → 표 → 줄(tblPrEx) → 칸(tcMar) 순서로 덮어쓴다. Word 의 기본은 왼쪽·오른쪽 0.19cm, 위·아래 0
+    const styleChain = styleId ? this.styleChain(styleId) : this.defaultTableStyle ? this.styleChain(this.defaultTableStyle) : [];
+    const marOf = (el: Element | null | undefined, base: number[]): number[] => {
+      if (!el) return base;
+      const out = [...base];
+      const pick = (i: number, ...names: string[]) => {
+        for (const n of names) {
+          const e = kid(el, n);
+          const t = attr(e, 'type');
+          if (e && t !== 'nil' && t !== 'auto' && attr(e, 'w') != null) out[i] = Math.max(0, Math.min(200, (parseFloat(attr(e, 'w') || '0') || 0) / 15));
+        }
+      };
+      pick(0, 'left', 'start');
+      pick(1, 'right', 'end');
+      pick(2, 'top');
+      pick(3, 'bottom');
+      return out;
+    };
+    let tblMar = [7.2, 7.2, 0, 0];
+    for (const st of styleChain) tblMar = marOf(kid(st.tblPr, 'tblCellMar'), tblMar);
+    tblMar = marOf(kid(tblPr, 'tblCellMar'), tblMar);
+    // 표의 가로 자리: 정렬(표 또는 첫 줄의 jc)과 왼쪽 들여쓰기(tblInd)
+    const jcOf = (el: Element | null | undefined) => {
+      const v = attr(kid(el, 'jc'), 'val');
+      return v === 'center' ? 'center' : v === 'right' || v === 'end' ? 'right' : v ? 'left' : null;
+    };
+    let tblAlign = jcOf(tblPr) || jcOf(kid(kids(tbl, 'tr')[0] || null, 'trPr'));
+    if (!tblAlign) for (const st of styleChain) tblAlign = jcOf(st.tblPr) || tblAlign;
+    const indEl = kid(tblPr, 'tblInd') || [...styleChain].reverse().map((st) => kid(st.tblPr, 'tblInd')).find(Boolean) || null;
+    const tblInd = indEl && (attr(indEl, 'type') || 'dxa') === 'dxa' ? (parseFloat(attr(indEl, 'w') || '0') || 0) / 20 : 0;
     type Cell = { row: number; col: number; cs: number; rs: number; w: number; node: JNode };
     const cells: Cell[] = [];
     const origin = new Map<number, Cell>();
+    this.tableStyles.push(styleChain);
     let rowIdx = 0;
     const rowH: number[] = [];
     for (const tr of kids(tbl, 'tr')) {
@@ -910,6 +961,7 @@ class DocxReader {
       if (trH && attr(trH, 'hRule') !== 'auto') rowH[rowIdx] = parseFloat(attr(trH, 'val') || '0') / 15 || 0;
       const gridBefore = Math.max(0, Math.min(512, parseInt(attr(kid(trPr, 'gridBefore'), 'val') || '0', 10) || 0));
       col += gridBefore;
+      const rowMar = marOf(kid(kid(tr, 'tblPrEx'), 'tblCellMar'), tblMar);
       for (const tc of kids(tr).filter((e) => localName(e) === 'tc' || localName(e) === 'sdt')) {
         const tcEl = localName(tc) === 'sdt' ? kid(kid(tc, 'sdtContent'), 'tc') : tc;
         if (!tcEl) continue;
@@ -954,6 +1006,7 @@ class DocxReader {
           }
         }
         if (noB.length) attrs.borderStyle = noB.join(' ');
+        attrs.margins = marOf(kid(tcPr, 'tcMar'), rowMar).map((v) => Math.round(v * 10) / 10);
         const wPx = grid.slice(col, col + span).reduce((a, b) => a + b, 0) || Math.round(parseFloat(attr(kid(tcPr, 'tcW'), 'w') || '0') / 15);
         const cell: Cell = { row: rowIdx, col, cs: span, rs: 1, w: wPx, node: { type: 'tableCell', attrs, content } };
         cells.push(cell);
@@ -963,10 +1016,18 @@ class DocxReader {
       }
       rowIdx++;
     }
+    this.tableStyles.pop();
     // 그리드 기반 열 너비를 우선 사용
     const t = assembleTable(cells, rowIdx, 0, 0, rowH);
     if (grid.length && grid.every((g) => g > 0)) {
       for (const c of cells) c.node.attrs!.colwidth = grid.slice(c.col, c.col + c.cs);
+    }
+    if (tblAlign === 'center' || tblAlign === 'right') t.attrs = { ...t.attrs, align: tblAlign };
+    else {
+      // 예전 호환 모드의 Word 는 칸 안의 글이 본문 왼쪽 끝(+ 들여쓰기)에 맞도록 표를 왼쪽 안 여백만큼 본문 밖으로 내어 놓는다.
+      // Word 2013 이후(호환 모드 15)는 표의 왼쪽 끝을 그 자리에 맞춘다
+      const ind = Math.round((tblInd - (this.compatMode >= 15 ? 0 : (tblMar[0] * 72) / 96)) * 100) / 100;
+      if (Math.abs(ind) > 0.05) t.attrs = { ...t.attrs, indent: ind };
     }
     return t;
   }
