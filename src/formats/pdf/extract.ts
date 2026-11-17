@@ -24,6 +24,8 @@ export interface Glyph {
   /** 장평 (%) */
   hscale: number;
   invisible: boolean;
+  /** 그린 순서 (뒤에 칠한 흰 사각형에 덮인 글자를 가려내는 데 쓴다) */
+  z?: number;
 }
 
 export interface FillRect {
@@ -36,6 +38,8 @@ export interface FillRect {
   tile?: boolean;
   /** 그린 순서 (나중에 칠한 사각형이 먼저 그린 선을 가린다) */
   z?: number;
+  /** 불투명하게 칠했다 (반투명 칠은 아래 글자를 가리지 않는다) */
+  opaque?: boolean;
 }
 
 export interface Seg {
@@ -215,7 +219,7 @@ export function extractPage(ops: { fnArray: number[]; argsArray: any[] }, OPS: R
     // 가는 사각형은 선으로 본다
     if (!tile && h <= 2.2 && w > 2.5) segs.push({ dir: 'h', pos: (r.y0 + r.y1) / 2, a: r.x0, b: r.x1, w: h, color, z: z++ });
     else if (!tile && w <= 2.2 && h > 2.5) segs.push({ dir: 'v', pos: (r.x0 + r.x1) / 2, a: r.y0, b: r.y1, w, color, z: z++ });
-    else fills.push({ ...r, color, tile, z: z++ });
+    else fills.push({ ...r, color, tile, z: z++, opaque: st.fillAlpha >= 0.99 });
   };
 
   const doPath = (paintOp: number, data: ArrayLike<number> | null) => {
@@ -403,6 +407,7 @@ export function extractPage(ops: { fnArray: number[]; argsArray: any[] }, OPS: R
             color,
             spacing: spacingPct,
             hscale: Math.round(hs * 100),
+            z,
             invisible,
           });
         }

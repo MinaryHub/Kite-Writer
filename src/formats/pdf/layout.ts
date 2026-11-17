@@ -854,6 +854,134 @@ function vectorImages(vs: { x0: number; y0: number; x1: number; y1: number; ligh
   return out;
 }
 
+/**
+ * 그림 영역(차트·도해) 찾기.
+ * 사선·곡선·다각형(vectors)과 글자 없는 채운 사각형(막대 차트의 막대, 범례의 네모)이 모여 있는 곳은 표·문단으로 옮기면
+ * 모양을 잃는다: 채운 사각형은 글자를 품지 않으면 버려지므로 막대 차트의 막대가 모두 사라진다.
+ * 그런 곳의 범위를 찾아 돌려준다. 부르는 쪽은 그 범위를 쪽 그림에서 그대로 잘라 한 장의 그림으로 넣는다
+ * (글자도 그림에 들어가므로 고칠 수는 없지만 원본과 같게 보인다).
+ */
+function findFigures(pc: PageContent, glyphs: Glyph[], page: Box): Box[] {
+  const pageArea = area(page);
+  const inked = (g: Glyph) => g.ch.trim() !== '';
+  const hasText = (b: Box) => glyphs.some((g) => inked(g) && containsPt(b, g.x + g.w / 2, g.y - g.size * 0.3));
+  type Ev = Box & { vec: boolean };
+  const ev: Ev[] = [];
+  for (const v of pc.vectors || []) if (!v.light && v.x1 - v.x0 < page.x1 * 0.9 && ev.length < 4000) ev.push({ x0: v.x0, y0: v.y0, x1: v.x1, y1: v.y1, vec: true });
+  for (const f of pc.fills) {
+    if (ev.length >= 6000) break;
+    if (f.tile || f.color === 'transparent' || /^#fff(fff)?$/i.test(f.color)) continue;
+    const w = f.x1 - f.x0;
+    const h = f.y1 - f.y0;
+    // 가는 것은 선(구분선·테두리), 큰 것은 바탕
+    if (w < 2.5 || h < 2.5 || w * h > pageArea * 0.08) continue;
+    if (hasText(f)) continue;
+    ev.push({ x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1, vec: false });
+  }
+  if (ev.length < 4) return [];
+  // 가까운 것끼리 묶는다
+  const GAP = 28;
+  const FAR = 120;
+  const parent = ev.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const order = ev.map((_, i) => i).sort((a, b) => ev[a].x0 - ev[b].x0);
+  for (let a = 0; a < order.length; a++) {
+    const A = ev[order[a]];
+    for (let b = a + 1; b < order.length; b++) {
+      const B = ev[order[b]];
+      if (B.x0 > A.x1 + FAR) break;
+      const near = B.x0 <= A.x1 + GAP && B.y0 <= A.y1 + GAP && A.y0 <= B.y1 + GAP;
+      // 같은 밑변에 선 막대(세로 막대 차트)·같은 왼쪽 변에서 뻗은 막대(가로 막대 차트)는 항목 사이가 떨어져 있어도 한 차트다
+      const sameBase = !A.vec && !B.vec && Math.abs(A.y1 - B.y1) < 1.5;
+      const sameLeft = !A.vec && !B.vec && Math.abs(A.x0 - B.x0) < 1.5 && B.y0 <= A.y1 + FAR && A.y0 <= B.y1 + FAR;
+      if (near || sameBase || sameLeft) parent[find(order[a])] = find(order[b]);
+    }
+  }
+  const groups = new Map<number, Ev[]>();
+  ev.forEach((e, i) => {
+    const r = find(i);
+    const g = groups.get(r);
+    if (g) g.push(e);
+    else groups.set(r, [e]);
+  });
+  // 1) 그림으로 볼 묶음의 범위: 도형들의 범위를 눈금선·축·테두리까지 넓힌 것
+  const cores: Box[] = [];
+  for (const g of groups.values()) {
+    const vecs = g.filter((e) => e.vec).length;
+    const bars = g.filter((e) => !e.vec);
+    // 채운 사각형만으로는 색칠한 빈 칸이 늘어선 표일 수 있다: 크기가 여러 가지일 때만(막대는 높이가 제각각이다) 그림으로 본다
+    const sizes = new Set(bars.map((e) => Math.round(e.y1 - e.y0) + 'x' + Math.round(e.x1 - e.x0)));
+    if (!(vecs >= 3 || (bars.length >= 5 && sizes.size >= 4))) continue;
+    let bb: Box = { x0: Math.min(...g.map((e) => e.x0)), y0: Math.min(...g.map((e) => e.y0)), x1: Math.max(...g.map((e) => e.x1)), y1: Math.max(...g.map((e) => e.y1)) };
+    if (bb.x1 - bb.x0 < 40 || bb.y1 - bb.y0 < 40 || area(bb) > pageArea * 0.5) continue;
+    cores.push(bb);
+    if (cores.length >= 12) break;
+  }
+  const raws: Box[] = [];
+  for (const core of cores) {
+    let bb = core;
+    // 이웃한 그림과의 가운데를 넘지 않는다 (위아래로 붙은 두 차트가 서로의 테두리·눈금선을 가져가지 않게)
+    const fence: Box = { x0: -Infinity, y0: -Infinity, x1: Infinity, y1: Infinity };
+    for (const o of cores) {
+      if (o === core) continue;
+      if (overlap(o.x0, o.x1, core.x0, core.x1) > 0) {
+        if (o.y0 >= core.y1) fence.y1 = Math.min(fence.y1, (core.y1 + o.y0) / 2);
+        else if (o.y1 <= core.y0) fence.y0 = Math.max(fence.y0, (core.y0 + o.y1) / 2);
+      } else if (overlap(o.y0, o.y1, core.y0, core.y1) > 0) {
+        if (o.x0 >= core.x1) fence.x1 = Math.min(fence.x1, (core.x1 + o.x0) / 2);
+        else if (o.x1 <= core.x0) fence.x0 = Math.max(fence.x0, (core.x0 + o.x1) / 2);
+      }
+    }
+    // 눈금선·축·테두리: 범위에 걸친 선까지 넓힌다 (두 번: 테두리가 눈금선에 이어져 있다)
+    for (let pass = 0; pass < 2; pass++) {
+      const lim: Box = { x0: Math.max(fence.x0, bb.x0 - 80), y0: Math.max(fence.y0, bb.y0 - 70), x1: Math.min(fence.x1, bb.x1 + 80), y1: Math.min(fence.y1, bb.y1 + 70) };
+      for (const sg of pc.segs) {
+        const b: Box = sg.dir === 'h' ? { x0: sg.a, x1: sg.b, y0: sg.pos, y1: sg.pos } : { x0: sg.pos, x1: sg.pos, y0: sg.a, y1: sg.b };
+        if (!containsBox(lim, b, 0)) continue;
+        if (overlap(b.x0, b.x1, bb.x0 - 3, bb.x1 + 3) <= 0 && b.x0 !== b.x1) continue;
+        if (overlap(b.y0, b.y1, bb.y0 - 3, bb.y1 + 3) <= 0 && b.y0 !== b.y1) continue;
+        bb = { x0: Math.min(bb.x0, b.x0), y0: Math.min(bb.y0, b.y0), x1: Math.max(bb.x1, b.x1), y1: Math.max(bb.y1, b.y1) };
+      }
+    }
+    if (area(bb) > pageArea * 0.6) continue;
+    raws.push(bb);
+  }
+  if (!raws.length) return [];
+  // 2) 축의 눈금 글자·범례·제목: 범위 가까이의 짧은 글줄까지 넣는다. 다른 그림의 범위에 든 글줄은 그 그림의 것이다
+  const lines = buildLines(glyphs.filter(inked), new Set());
+  const out: Box[] = [];
+  raws.forEach((raw, ri) => {
+    let bb = raw;
+    const others = raws.filter((_, j) => j !== ri);
+    const near: Box = { x0: bb.x0 - 36, y0: bb.y0 - 26, x1: bb.x1 + 36, y1: bb.y1 + 30 };
+    const W = bb.x1 - bb.x0;
+    let inside = 0;
+    for (const l of lines) {
+      const lb: Box = { x0: l.x0, x1: l.x1, y0: l.y - l.size, y1: l.y + l.size * 0.3 };
+      if (!containsBox(near, lb, 0)) continue;
+      // 그림 밖의 긴 글줄(본문·설명글)은 그림이 아니다
+      if (!containsBox(raw, lb, 2) && (l.x1 - l.x0 > W * 0.6 || others.some((o) => overlap(o.x0, o.x1, lb.x0, lb.x1) > 0 && overlap(o.y0, o.y1, lb.y0, lb.y1) > 0))) continue;
+      inside += l.glyphs.length;
+      bb = { x0: Math.min(bb.x0, lb.x0), y0: Math.min(bb.y0, lb.y0), x1: Math.max(bb.x1, lb.x1), y1: Math.max(bb.y1, lb.y1) };
+    }
+    // 글자가 아주 많으면 그림이 아니라 꾸민 본문이다
+    if (inside > 600 || area(bb) > pageArea * 0.6) return;
+    bb = { x0: Math.max(0, bb.x0 - 1.5), y0: Math.max(0, bb.y0 - 1.5), x1: Math.min(page.x1, bb.x1 + 1.5), y1: Math.min(page.y1, bb.y1 + 1.5) };
+    // 이웃한 그림의 범위를 넘지 않게 (위아래·좌우로 붙은 차트가 서로의 가장자리를 잘라 가지 않도록)
+    for (const o of others) {
+      if (overlap(o.x0, o.x1, bb.x0, bb.x1) <= 0 || overlap(o.y0, o.y1, bb.y0, bb.y1) <= 0) continue;
+      if (o.y0 >= raw.y1 - 1) bb.y1 = Math.min(bb.y1, o.y0 - 0.5);
+      else if (o.y1 <= raw.y0 + 1) bb.y0 = Math.max(bb.y0, o.y1 + 0.5);
+      else if (o.x0 >= raw.x1 - 1) bb.x1 = Math.min(bb.x1, o.x0 - 0.5);
+      else if (o.x1 <= raw.x0 + 1) bb.x0 = Math.max(bb.x0, o.x1 + 0.5);
+    }
+    out.push(bb);
+  });
+  // 한쪽이 다른 쪽을 거의 품으면 큰 것만 남긴다. 조금 겹친 것(위아래로 붙은 두 차트)은 따로 둔다
+  const keep = out.filter((b, i) => !out.some((o, j) => j !== i && (area(o) > area(b) || (area(o) === area(b) && j < i)) && overlap(o.x0, o.x1, b.x0, b.x1) * overlap(o.y0, o.y1, b.y0, b.y1) > area(b) * 0.7));
+  return keep;
+}
+
 // ---------------- 메인 ----------------
 export interface PageLayout {
   blocks: JNode[];
@@ -864,11 +992,34 @@ export interface PageLayout {
   right: number;
 }
 
-export function analyzePage(pc: PageContent) {
+export function analyzePage(pcIn: PageContent) {
+  let pc = pcIn;
   const page: Box = { x0: 0, y0: 0, x1: pc.width, y1: pc.height };
   const pageArea = area(page);
   let glyphs = pc.glyphs;
   let images = pc.images;
+  // 뒤에 칠한 불투명한 흰 사각형에 덮인 글자는 보이지 않는다 (겹쳐 놓고 가린 개체의 글: 그대로 두면 없는 글이 나타난다).
+  // 색이 있는 칠은 형광펜처럼 글 위에 겹쳐 보이게 칠한 것일 수 있어 가리는 것으로 보지 않는다.
+  // 글자의 z 는 그 글자를 그릴 때까지 그려진 선·칠의 수이므로, z 가 같거나 큰 칠이 뒤에 그려진 것이다
+  {
+    const covers = pc.fills.filter((f) => !f.tile && f.opaque && f.z != null && /^#fff(fff)?$/i.test(f.color) && f.x1 - f.x0 > 6 && f.y1 - f.y0 > 6);
+    if (covers.length && covers.length * glyphs.length < 4e6)
+      glyphs = glyphs.filter((g) => g.z == null || !covers.some((f) => f.z! >= g.z! && containsPt(f, g.x + g.w / 2, g.y - g.size * 0.3, -0.5)));
+  }
+  // 차트·도해: 그 범위의 글자·선·채움·그림은 따로 옮기지 않고, 쪽 그림에서 잘라 낸 그림 한 장으로 넣는다 (ref 없음 = 쪽 전체 그림에서 자른다)
+  const figures = findFigures(pc, glyphs.filter((g) => !g.invisible), page);
+  if (figures.length) {
+    const inFig = (b: Box) => figures.some((f) => containsBox(f, b, 1));
+    const ptInFig = (x: number, y: number) => figures.some((f) => containsPt(f, x, y));
+    glyphs = glyphs.filter((g) => !ptInFig(g.x + g.w / 2, g.y - g.size * 0.3));
+    images = images.filter((im) => !inFig(im)).concat(figures.map((f) => ({ ...f, ref: null })));
+    pc = {
+      ...pc,
+      fills: pc.fills.filter((f) => !inFig(f)),
+      segs: pc.segs.filter((sg) => !inFig(sg.dir === 'h' ? { x0: sg.a, x1: sg.b, y0: sg.pos, y1: sg.pos } : { x0: sg.pos, x1: sg.pos, y0: sg.a, y1: sg.b })),
+      vectors: (pc.vectors || []).filter((v) => !figures.some((f) => overlap(v.x0, v.x1, f.x0, f.x1) > 0 && overlap(v.y0, v.y1, f.y0, f.y1) > 0)),
+    };
+  }
   // 스캔 + 투명 글자(OCR): 글자를 살리고 바탕 그림은 뺀다
   const inv = glyphs.filter((g) => g.invisible);
   if (inv.length) {
