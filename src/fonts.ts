@@ -311,7 +311,7 @@ export function applyPdfFontVars(families: string[]) {
 }
 
 /** 설치되지 않은 글꼴을 위한 대체 글꼴 목록 (한글처럼 명조/고딕 계열 유지) */
-export function fontStack(name: string, opts: { canvas?: boolean } = {}): string {
+export function fontStack(name: string, opts: { canvas?: boolean; ea?: string | null } = {}): string {
   // 문서에서 온 글꼴 이름이므로 CSS 구문을 바꿀 수 있는 문자는 모두 제거
   const safe = name.replace(/[\u0000-\u001f\u007f'"\\;:{}()<>@[\]]/g, '').trim().slice(0, 80) || '함초롬바탕';
   // 그 이름으로는 못 그리지만 다른 이름(영문 이름·HY 이름)으로 설치되어 있으면 그 이름을 먼저 둔다
@@ -322,7 +322,11 @@ export function fontStack(name: string, opts: { canvas?: boolean } = {}): string
   // 캔버스(글자 폭 재기)는 CSS 변수를 풀지 못하므로 PDF 글꼴 이름을 바로 쓴다
   const direct = embeddedAliases.get(safe);
   const pdfAlias = opts.canvas ? (direct ? `'${direct.replace(/['"\\]/g, '')}', ` : '') : `var(${pdfFontVar(safe)}, kite-none), `;
-  const q = pdfAlias + (alias ? `'${alias}', '${safe}'` : `'${safe}'`);
+  // ea: 한글·한자에 쓰는 글꼴 (Word 문서의 '한글 글꼴'). 영문 글꼴에 없는 글자는 그다음에 둔 이 글꼴로 그려진다
+  const eaSafe = opts.ea ? opts.ea.replace(/[\u0000-\u001f\u007f'"\\;:{}()<>@[\]]/g, '').trim().slice(0, 80) : '';
+  const eaAlias = eaSafe && !fontUsable(eaSafe) ? usableAlias(eaSafe) : null;
+  const eaPart = eaSafe && eaSafe !== safe ? (eaAlias ? `, '${eaAlias}', '${eaSafe}'` : `, '${eaSafe}'`) : '';
+  const q = pdfAlias + (alias ? `'${alias}', '${safe}'` : `'${safe}'`) + eaPart;
   if (/D2Coding|Consolas|Courier|Mono|코딩/i.test(name)) return `${q}, D2Coding, Consolas, monospace`;
   // kite-sym: 가운뎃점(·) 등 몇몇 기호만 맡는 글꼴(editor.css 의 @font-face, unicode-range).
   // 휴먼명조·HY 계열 글꼴은 이 기호를 전각으로 그리지만 한글은 기호 글꼴로 반각으로 보여 주므로 그에 맞춘다.

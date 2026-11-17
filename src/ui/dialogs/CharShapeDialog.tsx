@@ -49,7 +49,7 @@ export function CharShapeDialog({ onClose }: { onClose: () => void }) {
     c.setTextStyleAttrs({
       fontFamily: s.font,
       // 글꼴을 바꾸면 언어별 글꼴(한글 문서)도 그 글꼴로
-      ...(s.font !== initFont ? { langFonts: null } : {}),
+      ...(s.font !== initFont ? { langFonts: null, eaFont: null } : {}),
       fontSize: s.size,
       color: s.color && s.color !== '#000000' ? s.color : null,
       letterSpacing: s.letterSpacing || null,

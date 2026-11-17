@@ -26,6 +26,7 @@ import {
   readZipEntry,
 } from '../common';
 import { assembleTable } from '../hwp/reader';
+import { naturalLineRatio } from '../fontMetrics';
 
 /** DOCX(Office Open XML) 읽기 */
 
@@ -33,6 +34,8 @@ interface RProps {
   font?: string;
   size?: number;
   color?: string | null;
+  /** 한글·한자 글꼴 (rFonts 의 eastAsia). font 는 영문 글꼴 (ascii) */
+  eaFont?: string;
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
@@ -56,6 +59,8 @@ interface PProps {
   after?: number;
   line?: number;
   lineRule?: string;
+  /** 줄 격자에 맞춤 (기본 켬) */
+  snapToGrid?: boolean;
   bg?: string | null;
   pageBreakBefore?: boolean;
   numId?: string;
@@ -125,6 +130,8 @@ class DocxReader {
   footnotes = new Map<string, string>();
   endnotes = new Map<string, string>();
   theme = { minorLatin: '', minorEa: '', majorLatin: '', majorEa: '' };
+  /** 줄 격자 간격 (pt). 구역의 docGrid 가 type=lines·linesAndChars 일 때만 */
+  gridPt = 0;
   images = new Map<string, string>();
   warnings: string[] = [];
   settings = defaultSettings();
@@ -299,9 +306,12 @@ class DocxReader {
     for (const c of kids(rPr)) {
       switch (localName(c)) {
         case 'rFonts': {
-          const ea = attr(c, 'eastAsia') || this.themeFont(attr(c, 'eastAsiaTheme'));
-          const ascii = attr(c, 'ascii') || attr(c, 'hAnsi') || this.themeFont(attr(c, 'asciiTheme') || attr(c, 'hAnsiTheme'));
-          if (ea || ascii) p.font = ea || ascii;
+          // 영문 글꼴(ascii)과 한글 글꼴(eastAsia)은 따로 물려받는다. 테마 글꼴 지정이 있으면 이름보다 그것이 먼저다.
+          // Word 는 글자마다 영문 글자는 영문 글꼴로, 한글·한자는 한글 글꼴로 그린다
+          const ea = this.themeFont(attr(c, 'eastAsiaTheme')) || attr(c, 'eastAsia');
+          const ascii = this.themeFont(attr(c, 'asciiTheme')) || attr(c, 'ascii') || this.themeFont(attr(c, 'hAnsiTheme')) || attr(c, 'hAnsi');
+          if (ascii) p.font = ascii;
+          if (ea) p.eaFont = ea;
           break;
         }
         case 'b':
@@ -407,6 +417,9 @@ class DocxReader {
           }
           break;
         }
+        case 'snapToGrid':
+          p.snapToGrid = onOff(c);
+          break;
         case 'shd': {
           const f = normColor(attr(c, 'fill'));
           p.bg = f && f !== '#FFFFFF' ? f : null;
@@ -429,7 +442,7 @@ class DocxReader {
     }
   }
 
-  resolveP(pPr: Element | null): { p: PProps; r: RProps; styleId: string | null; heading: number } {
+  resolveP(pPr: Element | null): { p: PProps; r: RProps; mark: RProps; styleId: string | null; heading: number } {
     const styleId = attr(kid(pPr, 'pStyle'), 'val') || this.defaultPStyle;
     const p: PProps = {};
     const r: RProps = {};
@@ -445,13 +458,18 @@ class DocxReader {
     }
     this.applyP(p, pPr);
     if (!heading && p.outlineLvl !== undefined && p.outlineLvl < 6 && styleId && styleId !== this.defaultPStyle) heading = p.outlineLvl + 1;
-    return { p, r, styleId, heading: Math.min(heading, 6) };
+    // 문단 부호의 글자 모양 (pPr 의 rPr): 빈 문단의 높이는 이것으로 정해진다
+    const mark: RProps = { ...r };
+    this.applyR(mark, kid(pPr, 'rPr'));
+    return { p, r, mark, styleId, heading: Math.min(heading, 6) };
   }
 
   marksFrom(r: RProps, link: string | null): JMark[] {
     const marks: JMark[] = [];
     const ts: Record<string, any> = {};
-    if (r.font) ts.fontFamily = r.font;
+    // 글꼴이 어디에도 적혀 있지 않으면 Word 의 기본 글꼴
+    ts.fontFamily = r.font || r.eaFont || 'Times New Roman';
+    if (r.eaFont && r.eaFont !== ts.fontFamily) ts.eaFont = r.eaFont;
     if (r.size) ts.fontSize = r.size;
     if (r.color && r.color !== '#000000') ts.color = r.color;
     if (r.spacingTw && r.size) ts.letterSpacing = Math.round((twipToPt(r.spacingTw) / r.size) * 100) || null;
@@ -470,9 +488,14 @@ class DocxReader {
     return marks;
   }
 
-  paraAttrs(p: PProps, baseSize?: number): Record<string, any> {
+  /**
+   * 문단 속성. font·size: 이 문단의 글(없으면 문단 부호)의 글꼴과 글자 크기(pt) — 줄 높이를 셈한다.
+   * Word 의 줄 간격은 글꼴의 고유 줄 높이에 대한 배수(1줄 = 1배)이고, '고정'은 그 값 그대로, '최소'는 고유 줄 높이보다 클 때만 그 값이다
+   */
+  paraAttrs(p: PProps, font?: string, size?: number): Record<string, any> {
     const a: Record<string, any> = {};
-    if (p.align && p.align !== 'justify') a.textAlign = p.align === 'left' ? 'left' : p.align;
+    // Word 의 기본 정렬은 왼쪽이다 (Kite 문단의 기본은 양쪽 정렬)
+    if (p.align !== 'justify') a.textAlign = p.align || 'left';
     const left = p.left || 0;
     const hanging = p.hanging || 0;
     const first = p.firstLine || 0;
@@ -487,15 +510,22 @@ class DocxReader {
     if (p.right) a.indentRight = round(twipToPt(p.right));
     if (p.before) a.spaceBefore = round(twipToPt(p.before));
     if (p.after) a.spaceAfter = round(twipToPt(p.after));
-    if (p.line) {
-      if (p.lineRule === 'exact' || p.lineRule === 'atLeast') a.lineHeight = `${round(twipToPt(p.line), 1)}pt`;
-      else {
-        const f = round((p.line / 240) * 1.2, 2);
-        if (Math.abs(f - 1.6) > 0.01) a.lineHeight = String(f);
-      }
+    const ratio = naturalLineRatio(font || 'Times New Roman');
+    const pt = size || 10;
+    const natural = ratio * pt;
+    let lh: string;
+    if (p.line && p.lineRule === 'exact') lh = `${round(twipToPt(p.line), 2)}pt`;
+    else if (p.line && p.lineRule === 'atLeast') lh = twipToPt(p.line) > natural + 0.05 ? `${round(twipToPt(p.line), 2)}pt` : String(ratio);
+    else {
+      const mult = (p.line || 240) / 240;
+      // 줄 격자(구역의 docGrid type=lines): 줄 높이를 격자 간격의 배수로 올린다
+      const grid = this.gridPt > 0 && p.snapToGrid !== false ? this.gridPt : 0;
+      lh = grid ? `${round(Math.max(1, Math.ceil((natural * mult) / grid - 0.02)) * grid, 2)}pt` : String(round(mult * ratio, 3));
     }
+    // Kite 의 기본 줄 간격(160%)과 같으면 적지 않는다 (Kite 가 쓴 문서를 다시 읽을 때 반올림으로 값이 달라지지 않게)
+    if (!(/^[\d.]+$/.test(lh) && Math.abs(parseFloat(lh) - 1.6) < 0.006)) a.lineHeight = lh;
     if (p.bg) a.paraBg = p.bg;
-    if (baseSize && baseSize !== 10) a.fontSize = baseSize;
+    if (size && size !== 10) a.fontSize = size;
     return a;
   }
 
@@ -572,11 +602,28 @@ class DocxReader {
     after: JNode[];
   } {
     const pPr = kid(pEl, 'pPr');
-    const { p, r: baseR, heading } = this.resolveP(pPr);
-    const pAttrs = this.paraAttrs(p, heading ? undefined : baseR.size);
+    const { p, r: baseR, mark, heading } = this.resolveP(pPr);
     const inline: JNode[] = [];
     const after: JNode[] = [];
     this.collectInline(kids(pEl), baseR, null, inline, after);
+    // 줄 높이를 정하는 글꼴·크기: 글이 있으면 글자 수가 가장 많은 글꼴과 그 크기, 빈 문단이면 문단 부호의 것
+    const use = new Map<string, number>();
+    for (const n of inline) {
+      if (n.type !== 'text' || !(n.text || '').trim()) continue;
+      const ts = n.marks?.find((m) => m.type === 'textStyle')?.attrs || {};
+      const k = `${ts.fontFamily || ''}\u0000${ts.fontSize || 10}`;
+      use.set(k, (use.get(k) || 0) + (n.text || '').length);
+    }
+    let font = mark.font || mark.eaFont;
+    let size = mark.size;
+    if (use.size) {
+      const top = [...use.entries()].sort((x, y) => y[1] - x[1])[0][0].split('\u0000');
+      font = top[0] || font;
+      size = +top[1] || size;
+    }
+    const pAttrs = this.paraAttrs(p, font, size);
+    // 제목: 제목 문단의 모양은 Word 의 스타일 그대로 두고(글자 모양은 글자마다 적혀 있다) 개요 수준만 단다 (차례 만들기가 쓴다)
+    if (heading) pAttrs.outlineLevel = heading;
     // 쪽 나누기로 분할
     const segments: JNode[][] = [[]];
     /** 조각 앞의 나누기가 단 나누기인가 (아니면 쪽 나누기) */
@@ -608,13 +655,7 @@ class DocxReader {
     segments.forEach((seg, i) => {
       if (i > 0) blocks.push({ node: { type: colBreak[i] ? 'columnBreak' : 'pageBreak' } });
       if (i > 0 && !seg.length) return;
-      let node: JNode;
-      if (heading) {
-        const hAttrs: Record<string, any> = { level: heading, ...pAttrs };
-        delete hAttrs.fontSize;
-        node = { type: 'heading', attrs: hAttrs };
-        if (seg.length) node.content = seg;
-      } else node = paragraph(pAttrs, seg);
+      const node: JNode = paragraph(pAttrs, seg);
       blocks.push({ node, list: i === 0 ? listInfo : undefined });
     });
     return { blocks, after };
@@ -1083,9 +1124,12 @@ export async function readDocx(data: Uint8Array): Promise<LoadedDoc> {
   await reader.init();
   const doc = parseXml(xml);
   const body = descendant(doc, 'body');
+  const sectPr = body ? kid(body, 'sectPr') || descendants(body, 'sectPr').pop() || null : null;
+  // 줄 격자: 문단의 줄 높이를 셈할 때 쓰므로 본문보다 먼저 읽는다
+  const grid = kid(sectPr, 'docGrid');
+  if (grid && /^(lines|linesAndChars|snapToChars)$/.test(attr(grid, 'type') || '')) reader.gridPt = Math.max(0, Math.min(200, parseFloat(attr(grid, 'linePitch') || '0') / 20)) || 0;
   const blocks = body ? reader.convertBody(body) : [];
-  const sectPr = body ? kid(body, 'sectPr') : null;
-  await reader.applySection(sectPr || (body ? descendants(body, 'sectPr').pop() || null : null));
+  await reader.applySection(sectPr);
   const meta: DocMeta = {};
   const core = await readZipEntry(zip.file('docProps/core.xml'), 'string');
   if (core) {

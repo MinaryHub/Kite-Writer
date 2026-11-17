@@ -69,7 +69,7 @@ export function getExtensions(): AnyExtension[] {
           setFontFamily:
             (fontFamily: string) =>
             ({ chain }: any) =>
-              chain().setMark('textStyle', { fontFamily, langFonts: null }).run(),
+              chain().setMark('textStyle', { fontFamily, langFonts: null, eaFont: null }).run(),
         };
       },
       addGlobalAttributes() {
@@ -83,7 +83,9 @@ export function getExtensions(): AnyExtension[] {
                 renderHTML: (a: Record<string, any>) => {
                   if (!a.fontFamily) return {};
                   const w = fontWeightFallback(String(a.fontFamily));
-                  return { style: `font-family: ${fontStack(a.fontFamily)}${w ? `; font-weight: ${w}` : ''}` };
+                  // eaFont: Word 문서의 한글 글꼴 (영문 글꼴에 없는 글자를 그린다)
+                  const ea = typeof a.eaFont === 'string' && a.eaFont.trim() ? a.eaFont : null;
+                  return { style: `font-family: ${fontStack(a.fontFamily, { ea })}${w ? `; font-weight: ${w}` : ''}` };
                 },
               },
             },

@@ -3,6 +3,7 @@ import type { Columns, KDocument } from '../../types';
 import { type JNode, mmToTwip, xmlEscape, parseBorderCss, normColor, safeIsoDate, cleanColumns } from '../common';
 import { type CharStyle, type FlatBlock, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, flattenDoc } from '../flatten';
 import { prepareImage } from '../imageUtil';
+import { naturalLineRatio } from '../fontMetrics';
 
 /** DOCX 쓰기 (Word 2010 이상 호환) */
 
@@ -41,7 +42,8 @@ class Ctx {
 
 function rPr(c: CharStyle, extra = ''): string {
   let x = '<w:rPr>' + extra;
-  x += `<w:rFonts w:ascii="${xmlEscape(c.font)}" w:hAnsi="${xmlEscape(c.font)}" w:eastAsia="${xmlEscape(c.font)}" w:cs="${xmlEscape(c.font)}"/>`;
+  // 한글 글꼴이 따로 있으면(Word 문서에서 온 글자) 영문 글꼴과 한글 글꼴을 따로 적는다
+  x += `<w:rFonts w:ascii="${xmlEscape(c.font)}" w:hAnsi="${xmlEscape(c.font)}" w:eastAsia="${xmlEscape(c.eaFont || c.font)}" w:cs="${xmlEscape(c.font)}"/>`;
   if (c.bold) x += '<w:b/><w:bCs/>';
   if (c.italic) x += '<w:i/><w:iCs/>';
   if (c.strike) x += '<w:strike/>';
@@ -61,7 +63,8 @@ function rPr(c: CharStyle, extra = ''): string {
   return x + '</w:rPr>';
 }
 
-function pPr(p: ParaStyle, pageBreak: boolean, markChar?: CharStyle): string {
+/** font: 이 문단의 글꼴 — Word 의 줄 간격 배수는 글꼴의 고유 줄 높이에 대한 것이라, 글자 크기 기준인 Kite 의 줄 간격을 그 비율로 나눠 적는다 */
+function pPr(p: ParaStyle, pageBreak: boolean, markChar?: CharStyle, font?: string): string {
   let x = '<w:pPr>';
   if (p.heading) x += `<w:pStyle w:val="Heading${p.heading}"/>`;
   if (pageBreak) x += '<w:pageBreakBefore/>';
@@ -69,7 +72,7 @@ function pPr(p: ParaStyle, pageBreak: boolean, markChar?: CharStyle): string {
   if (p.bg) x += `<w:shd w:val="clear" w:color="auto" w:fill="${hex(p.bg)}"/>`;
   let line = '';
   if (/pt$/.test(p.lineHeight)) line = ` w:line="${Math.round(parseFloat(p.lineHeight) * 20)}" w:lineRule="exact"`;
-  else line = ` w:line="${Math.round(((parseFloat(p.lineHeight) || 1.6) / 1.2) * 240)}" w:lineRule="auto"`;
+  else line = ` w:line="${Math.round(((parseFloat(p.lineHeight) || 1.6) / naturalLineRatio(font || markChar?.font)) * 240)}" w:lineRule="auto"`;
   x += `<w:spacing w:before="${Math.round(p.spaceBefore * 20)}" w:after="${Math.round(p.spaceAfter * 20)}"${line}/>`;
   // 한글식 여백 → 워드식 (내어쓰기: left = 왼쪽 + 내어쓰기 폭, hanging = 폭)
   const left = Math.round(p.indentLeft * 20);
@@ -81,6 +84,8 @@ function pPr(p: ParaStyle, pageBreak: boolean, markChar?: CharStyle): string {
   }
   const jc = { left: 'left', right: 'right', center: 'center', justify: 'both', distribute: 'distribute' }[p.align] || 'both';
   x += `<w:jc w:val="${jc}"/>`;
+  // 제목 스타일이 아닌 문단의 개요 수준 (Word 문서에서 온 제목 문단 등: 차례에 들어간다)
+  if (!p.heading && p.outline) x += `<w:outlineLvl w:val="${Math.max(0, Math.min(8, p.outline - 1))}"/>`;
   if (markChar) x += rPr(markChar);
   return x + '</w:pPr>';
 }
@@ -164,7 +169,8 @@ function drawing(ctx: Ctx, info: { rid: string; w: number; h: number; name: stri
 }
 
 function paragraphXml(ctx: Ctx, p: FlatPara): string {
-  let x = '<w:p>' + pPr(p.style, p.pageBreakBefore, p.inlines.length ? undefined : p.baseChar);
+  const firstText = p.inlines.find((it) => it.type === 'text');
+  let x = '<w:p>' + pPr(p.style, p.pageBreakBefore, p.inlines.length ? undefined : p.baseChar, (firstText && firstText.type === 'text' ? firstText.style.font : '') || p.baseChar.font);
   // 단 나누기
   if (p.columnBreakBefore) x += '<w:r><w:br w:type="column"/></w:r>';
   let linkOpen: string | null = null;

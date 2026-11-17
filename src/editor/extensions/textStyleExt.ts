@@ -100,6 +100,15 @@ export const TextStyleExt = Extension.create({
               return v ? { 'data-lang-fonts': JSON.stringify(v) } : {};
             },
           },
+          /**
+           * 한글·한자 글꼴 (Word 문서): 글꼴(fontFamily)은 영문 글꼴이고, 그 글꼴에 없는 한글·한자는 이 글꼴로 그린다.
+           * 화면의 글꼴 목록에서 영문 글꼴 바로 다음에 놓인다 (extensions.ts 의 fontFamily)
+           */
+          eaFont: {
+            default: null,
+            parseHTML: (el: HTMLElement) => (el.getAttribute('data-ea-font') || '').slice(0, 80) || null,
+            renderHTML: (a: Record<string, any>) => (typeof a.eaFont === 'string' && a.eaFont.trim() ? { 'data-ea-font': a.eaFont.trim().slice(0, 80) } : {}),
+          },
           /** 강조점 (한글의 강조점 이름: DOT_ABOVE, RING_ABOVE, TILDE …) */
           emphasis: {
             default: null,

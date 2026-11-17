@@ -58,6 +58,8 @@ export interface CharStyle {
   effect: string | null;
   /** 한글 글꼴과 다른 언어별 글꼴 (한글 문서에서 온 것): 영문·한자·기호 */
   langFonts?: { en?: string; hanja?: string; sym?: string } | null;
+  /** 한글·한자 글꼴 (Word 문서에서 온 것): font 는 영문 글꼴이고, 한글·한자는 이 글꼴로 그린다 */
+  eaFont?: string | null;
   /** 밑줄의 선 종류(한글 이름)·색·위치(top: 글자 위), 취소선의 선 종류·색 */
   ulShape?: string | null;
   ulColor?: string | null;
@@ -71,10 +73,11 @@ export interface CharStyle {
 
 /** 언어 7개(한글·영문·한자·일어·기타·기호·사용자)의 글꼴 번호. font 는 글꼴 이름 → 번호 */
 export function langFontIds(c: CharStyle, font: (name: string) => number): number[] {
-  const base = font(c.font);
+  // Word 문서에서 온 글자: 한글 글꼴(eaFont)이 따로 있으면 그것이 한글·한자 글꼴이고 font 는 영문 글꼴이다
+  const base = font(c.eaFont || c.font);
   const lf = c.langFonts || {};
   const id = (n?: string) => (n ? font(n) : base);
-  return [base, id(lf.en), id(lf.hanja), base, base, id(lf.sym), base];
+  return [base, id(lf.en || (c.eaFont ? c.font : undefined)), id(lf.hanja), base, base, id(lf.sym), base];
 }
 
 export interface ParaStyle {
@@ -89,6 +92,8 @@ export interface ParaStyle {
   bg: string | null;
   borderBottom: boolean;
   heading: number; // 0 = 본문
+  /** 개요 수준 (1~9). 제목 스타일이 아닌 문단이 차례에 들어가는 수준 (Word 문서에서 온 제목 문단 등) */
+  outline?: number | null;
   /** 한글 줄 나눔 단위가 글자 */
   breakChar: boolean;
   /** 문단 테두리 */
@@ -257,11 +262,11 @@ export function cleanMargins(v: any): number[] | null {
 }
 
 export function charKey(c: CharStyle): string {
-  return [c.font, c.size, c.color, +c.bold, +c.italic, +c.underline, +c.strike, +c.sup, +c.sub, c.highlight, c.letterSpacing, c.fontWidth, c.effect, c.langFonts ? JSON.stringify(c.langFonts) : '', c.ulShape || '', c.ulColor || '', c.ulPos || '', c.stShape || '', c.stColor || '', c.emphasis || '', c.offset || ''].join('|');
+  return [c.font, c.size, c.color, +c.bold, +c.italic, +c.underline, +c.strike, +c.sup, +c.sub, c.highlight, c.letterSpacing, c.fontWidth, c.effect, c.langFonts ? JSON.stringify(c.langFonts) : '', c.eaFont || '', c.ulShape || '', c.ulColor || '', c.ulPos || '', c.stShape || '', c.stColor || '', c.emphasis || '', c.offset || ''].join('|');
 }
 
 export function paraKey(p: ParaStyle): string {
-  return [p.align, p.indentLeft, p.indentRight, p.textIndent, p.spaceBefore, p.spaceAfter, p.lineHeight, p.bg, +p.borderBottom, +p.breakChar, p.border ? JSON.stringify(p.border) : ''].join('|');
+  return [p.align, p.indentLeft, p.indentRight, p.textIndent, p.spaceBefore, p.spaceAfter, p.lineHeight, p.bg, +p.borderBottom, +p.breakChar, p.border ? JSON.stringify(p.border) : '', p.outline || ''].join('|');
 }
 
 function applyMarks(base: CharStyle, marks: JMark[] | undefined): { style: CharStyle; link: string | null; tab: TabInfo | null; ruby: { text: string; pos: string } | null; compose: string | null } {
@@ -321,7 +326,9 @@ function applyMarks(base: CharStyle, marks: JMark[] | undefined): { style: CharS
         if (a.fontFamily) {
           s.font = String(a.fontFamily).split(',')[0].replace(/['"]/g, '').trim();
           s.langFonts = null;
+          s.eaFont = null;
         }
+        if (typeof a.eaFont === 'string' && a.eaFont.trim()) s.eaFont = a.eaFont.trim().slice(0, 80);
         if (a.langFonts && typeof a.langFonts === 'object') {
           const lf: Record<string, string> = {};
           for (const k of ['en', 'hanja', 'sym']) if (typeof a.langFonts[k] === 'string' && a.langFonts[k].trim()) lf[k] = a.langFonts[k].trim();
@@ -534,6 +541,7 @@ function flattenPara(n: JNode, ctx: Ctx, level: number): FlatPara {
   style.bg = normColor(a.paraBg);
   style.border = cleanParaBorder(a.paraBorder);
   style.heading = level;
+  style.outline = !level && +a.outlineLevel >= 1 && +a.outlineLevel <= 9 ? Math.round(+a.outlineLevel) : null;
   style.breakChar = !!a.breakChar;
   const base: CharStyle = { ...ctx.baseChar };
   if (level) {
