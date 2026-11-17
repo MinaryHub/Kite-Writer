@@ -4,6 +4,7 @@ import {
   type JMark,
   type JNode,
   attr,
+  formatNumber,
   bytesToDataUrl,
   defaultSettings,
   descendant,
@@ -61,11 +62,25 @@ interface PProps {
   lineRule?: string;
   /** 줄 격자에 맞춤 (기본 켬) */
   snapToGrid?: boolean;
+  /** 같은 스타일의 문단 사이에는 문단 위·아래 간격을 두지 않는다 */
+  contextual?: boolean;
   bg?: string | null;
   pageBreakBefore?: boolean;
   numId?: string;
   ilvl?: number;
   outlineLvl?: number;
+}
+
+/** 번호 매기기의 한 수준: 번호 모양, 번호 글(%1 … %9 가 수준마다의 번호), 시작 번호, 수준의 문단·글자 모양, 번호 뒤(탭·빈칸·없음) */
+interface NumLevel {
+  fmt: string;
+  text: string;
+  start: number;
+  pPr: Element | null;
+  rPr: Element | null;
+  suff: string;
+  /** 앞 수준의 번호도 모두 아라비아 숫자로 (법률식 번호) */
+  legal: boolean;
 }
 
 interface StyleDef {
@@ -125,8 +140,12 @@ class DocxReader {
   defaultPStyle: string | null = null;
   docDefaultsR: Element | null = null;
   docDefaultsP: Element | null = null;
-  numbering = new Map<string, { abs: string; overrides: Map<number, number> }>();
-  abstractNums = new Map<string, { fmt: string; text: string; start: number }[]>();
+  numbering = new Map<string, { abs: string; overrides: Map<number, number>; levels: Map<number, NumLevel> }>();
+  abstractNums = new Map<string, NumLevel[]>();
+  /** 번호 매기기의 지금 번호: 번호 정의(abstractNum) → 수준마다의 값. 같은 정의를 쓰는 목록은 이어서 센다 */
+  private numState = new Map<string, number[]>();
+  /** 시작 번호를 새로 준 목록(numId:수준)을 이미 시작했는가 */
+  private numStarted = new Set<string>();
   footnotes = new Map<string, string>();
   endnotes = new Map<string, string>();
   theme = { minorLatin: '', minorEa: '', majorLatin: '', majorEa: '' };
@@ -219,25 +238,46 @@ class DocxReader {
     const numXml = await this.text('word/numbering.xml');
     if (numXml) {
       const nd = parseXml(numXml);
+      const lvlOf = (lvl: Element): NumLevel => ({
+        fmt: attr(kid(lvl, 'numFmt'), 'val') || 'decimal',
+        text: attr(kid(lvl, 'lvlText'), 'val') || '',
+        start: parseInt(attr(kid(lvl, 'start'), 'val') || '1', 10) || 1,
+        pPr: kid(lvl, 'pPr'),
+        rPr: kid(lvl, 'rPr'),
+        suff: attr(kid(lvl, 'suff'), 'val') || 'tab',
+        legal: !!kid(lvl, 'isLgl') && attr(kid(lvl, 'isLgl'), 'val') !== '0' && attr(kid(lvl, 'isLgl'), 'val') !== 'false',
+      });
+      /** 번호 스타일을 가리키기만 하는 정의 (numStyleLink): 그 스타일의 목록 정의를 따라간다 */
+      const links = new Map<string, string>();
+      const styleDefs = new Map<string, string>();
       for (const an of descendants(nd, 'abstractNum')) {
-        const levels: { fmt: string; text: string; start: number }[] = [];
+        const id = attr(an, 'abstractNumId') || '';
+        const levels: NumLevel[] = [];
         for (const lvl of kids(an, 'lvl')) {
           const i = parseInt(attr(lvl, 'ilvl') || '0', 10);
-          levels[i] = {
-            fmt: attr(kid(lvl, 'numFmt'), 'val') || 'decimal',
-            text: attr(kid(lvl, 'lvlText'), 'val') || '',
-            start: parseInt(attr(kid(lvl, 'start'), 'val') || '1', 10),
-          };
+          if (i >= 0 && i < 9) levels[i] = lvlOf(lvl);
         }
-        this.abstractNums.set(attr(an, 'abstractNumId') || '', levels);
+        this.abstractNums.set(id, levels);
+        const link = attr(kid(an, 'numStyleLink'), 'val');
+        if (link) links.set(id, link);
+        const def = attr(kid(an, 'styleLink'), 'val');
+        if (def) styleDefs.set(def, id);
+      }
+      for (const [id, link] of links) {
+        const target = styleDefs.get(link);
+        if (target && !this.abstractNums.get(id)?.length) this.abstractNums.set(id, this.abstractNums.get(target) || []);
       }
       for (const n of descendants(nd, 'num')) {
         const overrides = new Map<number, number>();
+        const levels = new Map<number, NumLevel>();
         for (const o of kids(n, 'lvlOverride')) {
+          const i = parseInt(attr(o, 'ilvl') || '0', 10);
           const so = kid(o, 'startOverride');
-          if (so) overrides.set(parseInt(attr(o, 'ilvl') || '0', 10), parseInt(attr(so, 'val') || '1', 10));
+          if (so) overrides.set(i, parseInt(attr(so, 'val') || '1', 10) || 1);
+          const lvl = kid(o, 'lvl');
+          if (lvl) levels.set(i, lvlOf(lvl));
         }
-        this.numbering.set(attr(n, 'numId') || '', { abs: attr(kid(n, 'abstractNumId'), 'val') || '', overrides });
+        this.numbering.set(attr(n, 'numId') || '', { abs: attr(kid(n, 'abstractNumId'), 'val') || '', overrides, levels });
       }
     }
     // 메모
@@ -433,6 +473,9 @@ class DocxReader {
         case 'snapToGrid':
           p.snapToGrid = onOff(c);
           break;
+        case 'contextualSpacing':
+          p.contextual = onOff(c);
+          break;
         case 'shd': {
           const f = normColor(attr(c, 'fill'));
           p.bg = f && f !== '#FFFFFF' ? f : null;
@@ -476,12 +519,60 @@ class DocxReader {
       if (m) heading = parseInt(m[2], 10);
       else if (s.name === 'title') heading = 1;
     }
+    // 번호 매기기 수준의 문단 모양(들여쓰기 등)은 스타일 위에, 문단에 직접 준 모양 아래에 깔린다
+    const np = kid(pPr, 'numPr');
+    const numId = np ? attr(kid(np, 'numId'), 'val') ?? p.numId : p.numId;
+    const ilvl = np && kid(np, 'ilvl') ? parseInt(attr(kid(np, 'ilvl'), 'val') || '0', 10) || 0 : p.ilvl || 0;
+    const level = this.numLevel(numId, ilvl);
+    if (level) this.applyP(p, level.pPr);
     this.applyP(p, pPr);
     if (!heading && p.outlineLvl !== undefined && p.outlineLvl < 6 && styleId && styleId !== this.defaultPStyle) heading = p.outlineLvl + 1;
     // 문단 부호의 글자 모양 (pPr 의 rPr): 빈 문단의 높이는 이것으로 정해진다
     const mark: RProps = { ...r };
     this.applyR(mark, kid(pPr, 'rPr'));
     return { p, r, mark, styleId, heading: Math.min(heading, 6) };
+  }
+
+  /** 번호 매기기 수준의 정의 (목록마다 덮어쓴 것이 먼저) */
+  private numLevel(numId: string | undefined, ilvl: number): NumLevel | null {
+    if (!numId || numId === '0') return null;
+    const num = this.numbering.get(numId);
+    if (!num) return null;
+    return num.levels.get(ilvl) || this.abstractNums.get(num.abs)?.[ilvl] || null;
+  }
+
+  /**
+   * 번호 매기기 문단의 번호 글. 번호를 하나 세고(아래 수준은 다시 처음부터), 번호 글의 %1 … %9 를 수준마다의 번호로 바꾼다.
+   * 글머리표는 기호 글꼴(Symbol·Wingdings)의 글자를 같은 모양의 유니코드 글자로 바꾼다. 번호가 없으면 null
+   */
+  private numLabel(numId: string, ilvl: number): { text: string; level: NumLevel; bullet: boolean } | null {
+    const num = this.numbering.get(numId);
+    const level = this.numLevel(numId, ilvl);
+    if (!num || !level) return null;
+    const levelAt = (i: number) => num.levels.get(i) || this.abstractNums.get(num.abs)?.[i] || null;
+    let st = this.numState.get(num.abs);
+    if (!st) this.numState.set(num.abs, (st = []));
+    // 시작 번호를 새로 준 목록은 처음 나올 때 그 번호부터
+    const sk = numId + ':' + ilvl;
+    if (num.overrides.has(ilvl) && !this.numStarted.has(sk)) {
+      this.numStarted.add(sk);
+      st[ilvl] = num.overrides.get(ilvl)! - 1;
+    }
+    st[ilvl] = (st[ilvl] ?? level.start - 1) + 1;
+    for (let i = ilvl + 1; i < 9; i++) delete st[i];
+    // 건너뛴 위 수준은 시작 번호로 본다
+    for (let i = 0; i < ilvl; i++) if (st[i] == null) st[i] = levelAt(i)?.start ?? 1;
+    if (level.fmt === 'bullet') {
+      const font = attr(kid(level.rPr, 'rFonts'), 'ascii') || attr(kid(level.rPr, 'rFonts'), 'hAnsi') || '';
+      return { text: bulletChar(level.text, font), level, bullet: true };
+    }
+    const text = level.text.replace(/%(\d)/g, (_m, d) => {
+      const i = +d - 1;
+      const lv = levelAt(i);
+      if (!lv || st![i] == null) return '';
+      return wordNumber(st![i], level.legal && i < ilvl ? 'decimal' : lv.fmt);
+    });
+    return text ? { text, level, bullet: false } : null;
   }
 
   marksFrom(r: RProps, link: string | null): JMark[] {
@@ -552,57 +643,25 @@ class DocxReader {
   // ----- 본문 -----
   convertBody(container: Element): JNode[] {
     const out: JNode[] = [];
-    let stack: { list: JNode; level: number; numId: string }[] = [];
-    const counters = this.listCounters;
-    const closeLists = () => (stack = []);
+    /** 바로 앞 문단 (같은 스타일 사이의 간격을 뺄 때 본다) */
+    let prev: { node: JNode; style: string | null; contextual: boolean } | null = null;
     const walk = (els: Element[]) => {
       for (const el of els) {
         const name = localName(el);
         if (name === 'p') {
           const res = this.convertP(el);
-          for (const item of res.blocks) {
-            if (item.list && item.node.type !== 'pageBreak') {
-              const { numId, ilvl, fmt, listStyle, start } = item.list;
-              const type = fmt === 'bullet' ? 'bulletList' : 'orderedList';
-              while (stack.length && stack[stack.length - 1].level > ilvl) stack.pop();
-              const top = stack[stack.length - 1];
-              if (top && top.level === ilvl && (top.list.type !== type || top.numId !== numId)) stack.pop();
-              const cur = stack[stack.length - 1];
-              if (!cur || cur.level < ilvl) {
-                const attrs: Record<string, any> = {};
-                if (listStyle) attrs.listStyle = listStyle;
-                if (type === 'orderedList' && start !== 1) attrs.start = start;
-                const list: JNode = { type, attrs, content: [] };
-                if (cur && cur.list.content!.length) {
-                  const li = cur.list.content![cur.list.content!.length - 1];
-                  li.content!.push(list);
-                } else out.push(list);
-                stack.push({ list, level: ilvl, numId });
-              }
-              // 번호 이어 매기기 (같은 numId는 문단이 끼어 있어도 계속)
-              const ckey = numId + ':' + ilvl;
-              const prevCount = counters.get(ckey) ?? start - 1;
-              counters.set(ckey, prevCount + 1);
-              for (const k of [...counters.keys()]) {
-                const [nid, lv] = k.split(':');
-                if (nid === numId && +lv > ilvl) counters.delete(k);
-              }
-              const listNode = stack[stack.length - 1].list;
-              if (type === 'orderedList' && listNode.content!.length === 0 && prevCount + 1 !== 1) listNode.attrs = { ...listNode.attrs, start: prevCount + 1 };
-              const node = item.node;
-              if (node.attrs) {
-                delete node.attrs.indentLeft;
-                delete node.attrs.textIndent;
-              }
-              stack[stack.length - 1].list.content!.push({ type: 'listItem', content: [node] });
-            } else {
-              closeLists();
-              out.push(item.node);
-            }
+          // '같은 스타일의 문단 사이에 간격 없음': 앞 문단의 아래 간격과 이 문단의 위 간격을 뺀다
+          const first = res.blocks.find((b) => b.node.type === 'paragraph')?.node;
+          if (prev && first && prev.style === res.style) {
+            if (prev.contextual && prev.node.attrs) delete prev.node.attrs.spaceAfter;
+            if (res.contextual && first.attrs) delete first.attrs.spaceBefore;
           }
+          for (const item of res.blocks) out.push(item.node);
           out.push(...res.after);
+          const last = [...res.blocks].reverse().find((b) => b.node.type === 'paragraph')?.node;
+          prev = last && !res.after.length ? { node: last, style: res.style, contextual: res.contextual } : null;
         } else if (name === 'tbl') {
-          closeLists();
+          prev = null;
           out.push(this.convertTable(el));
         } else if (name === 'sdt') {
           walk(kids(kid(el, 'sdtContent')));
@@ -617,12 +676,9 @@ class DocxReader {
     return out;
   }
 
-  convertP(pEl: Element): {
-    blocks: { node: JNode; list?: { numId: string; ilvl: number; fmt: string; listStyle: string | null; start: number } }[];
-    after: JNode[];
-  } {
+  convertP(pEl: Element): { blocks: { node: JNode }[]; after: JNode[]; style: string | null; contextual: boolean } {
     const pPr = kid(pEl, 'pPr');
-    const { p, r: baseR, mark, heading } = this.resolveP(pPr);
+    const { p, r: baseR, mark, heading, styleId } = this.resolveP(pPr);
     const inline: JNode[] = [];
     const after: JNode[] = [];
     this.collectInline(kids(pEl), baseR, null, inline, after);
@@ -654,31 +710,37 @@ class DocxReader {
         colBreak.push(!!n.attrs?.column);
       } else segments[segments.length - 1].push(n);
     }
-    const blocks: { node: JNode; list?: any }[] = [];
+    const blocks: { node: JNode }[] = [];
     if (p.pageBreakBefore) blocks.push({ node: { type: 'pageBreak' } });
-    let listInfo: any;
-    if (p.numId && p.numId !== '0') {
-      const num = this.numbering.get(p.numId);
-      const levels = num ? this.abstractNums.get(num.abs) : undefined;
-      const ilvl = p.ilvl || 0;
-      const lv = levels?.[ilvl];
-      if (lv && lv.fmt !== 'none') {
-        listInfo = {
-          numId: p.numId,
-          ilvl,
-          fmt: lv.fmt,
-          listStyle: listStyleFor(lv.fmt, lv.text),
-          start: num?.overrides.get(ilvl) ?? lv.start ?? 1,
-        };
+    // 번호 매기기: Word 가 그리는 번호 글을 문단 맨 앞에 글자로 넣는다 (번호 모양·다단계 번호·수준별 들여쓰기를 그대로 보이게).
+    // 번호 뒤의 탭은 내어쓰기 자리(문단 왼쪽)까지 건너뛴다
+    if (p.numId && p.numId !== '0' && !this.headerMode) {
+      const label = this.numLabel(p.numId, p.ilvl || 0);
+      if (label) {
+        const lr: RProps = { ...mark };
+        this.applyR(lr, label.level.rPr);
+        // 글머리표는 유니코드 글자로 바꿨으므로 기호 글꼴 대신 문단의 글꼴로 그린다
+        if (label.bullet) {
+          lr.font = mark.font;
+          lr.eaFont = mark.eaFont;
+        }
+        lr.underline = false;
+        const lm = this.marksFrom(lr, null);
+        const pre: JNode[] = [];
+        const tn = textNode(label.text, lm);
+        if (tn) pre.push(tn);
+        const sep = label.level.suff === 'space' ? ' ' : label.level.suff === 'nothing' ? '' : '\t';
+        const sn = sep ? textNode(sep, lm) : null;
+        if (sn) pre.push(sn);
+        segments[0].unshift(...pre);
       }
     }
     segments.forEach((seg, i) => {
       if (i > 0) blocks.push({ node: { type: colBreak[i] ? 'columnBreak' : 'pageBreak' } });
       if (i > 0 && !seg.length) return;
-      const node: JNode = paragraph(pAttrs, seg);
-      blocks.push({ node, list: i === 0 ? listInfo : undefined });
+      blocks.push({ node: paragraph(pAttrs, seg) });
     });
-    return { blocks, after };
+    return { blocks, after, style: styleId, contextual: !!p.contextual };
   }
 
   private collectInline(els: Element[], baseR: RProps, link: string | null, out: JNode[], after: JNode[]) {
@@ -1123,38 +1185,93 @@ class DocxReader {
   }
 }
 
-function listStyleFor(fmt: string, text: string): string | null {
+/** 기호 글꼴(Symbol·Wingdings)의 글머리표 글자 → 같은 모양의 유니코드 글자 */
+function bulletChar(text: string, font: string): string {
+  const WING: Record<number, string> = { 0xa7: '▪', 0x6e: '■', 0x6c: '●', 0x71: '❑', 0x76: '❖', 0xd8: '➢', 0xfc: '✓', 0xa8: '◻', 0xe0: '→', 0x9f: '•', 0x77: '◆', 0x75: '◆', 0xb7: '•', 0xf0: '⇨', 0x6f: '□', 0x70: '◻' };
+  const SYM: Record<number, string> = { 0xb7: '•', 0xa7: '♣', 0xa8: '♦', 0xde: '⇒', 0xae: '→', 0x2d: '−', 0xb0: '°' };
+  let out = '';
+  for (const ch of text || '•') {
+    const cp = ch.codePointAt(0)!;
+    // 기호 글꼴의 글자는 사용자 영역(U+F000~F0FF)이나 그 아래 바이트 값으로 적힌다
+    const low = cp >= 0xf000 && cp <= 0xf0ff ? cp - 0xf000 : /wingdings|symbol/i.test(font) && cp < 0x100 ? cp : -1;
+    if (low < 0) out += ch;
+    else out += (/wingdings/i.test(font) ? WING[low] : SYM[low]) || WING[low] || SYM[low] || '•';
+  }
+  return out;
+}
+
+const KO_DIGIT = ['영', '일', '이', '삼', '사', '오', '육', '칠', '팔', '구'];
+const KO_COUNT = ['', '하나', '둘', '셋', '넷', '다섯', '여섯', '일곱', '여덟', '아홉', '열'];
+const HANJA_DIGIT = ['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+/** 십·백·천 자리로 읽는 수 (일, 십일, 이십 …) */
+function sinoNumber(n: number, digit: string[], units: string[]): string {
+  if (n <= 0 || n > 9999) return String(n);
+  let out = '';
+  const ds = String(n).split('').map(Number);
+  ds.forEach((d, i) => {
+    const u = units[ds.length - 1 - i];
+    if (!d) return;
+    out += (d === 1 && u ? '' : digit[d]) + u;
+  });
+  return out;
+}
+
+/** Word 의 번호 모양(numFmt)으로 쓴 수 */
+function wordNumber(n: number, fmt: string): string {
+  const letters = (base: number) => String.fromCharCode(base + ((n - 1) % 26)).repeat(Math.floor((n - 1) / 26) + 1);
   switch (fmt) {
-    case 'bullet': {
-      const ch = text.charCodeAt(0);
-      if (text === 'o' || text === '○' || text === '◦') return 'circle';
-      if (ch === 0xf0a7 || text === '▪' || text === '■' || ch === 0xf06e) return 'square';
-      if (text === '-' || text === '–' || text === '−') return 'k-dash';
-      if (text === '✓' || ch === 0xf0fc) return 'k-check';
-      if (text === '◆' || ch === 0xf0a8 || text === '❖' || ch === 0xf076) return 'k-diamond';
-      if (text === '➢' || ch === 0xf0d8) return 'k-arrow';
-      if (text === '※') return 'k-ref';
-      if (text === '●') return 'k-filled-circle';
-      if (text === '□' || ch === 0xf071) return 'k-hollow-square';
-      return null;
-    }
-    case 'lowerLetter':
-      return 'lower-alpha';
-    case 'upperLetter':
-      return 'upper-alpha';
-    case 'lowerRoman':
-      return 'lower-roman';
+    case 'none':
+      return '';
+    case 'decimalZero':
+      return n < 10 ? '0' + n : String(n);
     case 'upperRoman':
-      return 'upper-roman';
-    case 'ganada':
-      return /^\(/.test(text) ? 'k-paren-hangul' : 'hangul';
-    case 'chosung':
-      return 'hangul-consonant';
+      return formatNumber(n, 'ROMAN_CAPITAL');
+    case 'lowerRoman':
+      return formatNumber(n, 'ROMAN_SMALL');
+    case 'upperLetter':
+      return n > 0 ? letters(65) : String(n);
+    case 'lowerLetter':
+      return n > 0 ? letters(97) : String(n);
+    case 'ordinal': {
+      const t = n % 100;
+      return n + (t >= 11 && t <= 13 ? 'th' : ['th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th'][n % 10]);
+    }
     case 'decimalEnclosedCircle':
     case 'decimalEnclosedCircleChinese':
-      return 'k-circled';
+      return formatNumber(n, 'CIRCLED_DIGIT');
+    case 'decimalFullWidth':
+    case 'decimalFullWidth2':
+      return String(n).replace(/\d/g, (d) => String.fromCharCode(0xff10 + +d));
+    case 'decimalEnclosedFullstop':
+      return n >= 1 && n <= 20 ? String.fromCharCode(0x2488 + n - 1) : n + '.';
+    case 'decimalEnclosedParen':
+      return n >= 1 && n <= 20 ? String.fromCharCode(0x2474 + n - 1) : `(${n})`;
+    case 'ganada':
+      return formatNumber(n, 'HANGUL_SYLLABLE');
+    case 'chosung':
+      return formatNumber(n, 'HANGUL_JAMO');
+    case 'koreanDigital':
+      return String(n).replace(/\d/g, (d) => KO_DIGIT[+d]);
+    case 'koreanCounting':
+      return sinoNumber(n, KO_DIGIT, ['', '십', '백', '천']);
+    case 'koreanLegal':
+      return n >= 1 && n <= 10 ? KO_COUNT[n] : String(n);
+    case 'koreanDigital2':
+    case 'ideographDigital':
+    case 'japaneseDigitalTenThousand':
+      return String(n).replace(/\d/g, (d) => HANJA_DIGIT[+d]);
+    case 'chineseCounting':
+    case 'chineseCountingThousand':
+    case 'japaneseCounting':
+    case 'ideographTraditional':
+    case 'taiwaneseCounting':
+      return sinoNumber(n, HANJA_DIGIT, ['', '十', '百', '千']);
+    case 'hex':
+      return n.toString(16).toUpperCase();
+    case 'chicago':
+      return ['*', '†', '‡', '§'][(n - 1) % 4].repeat(Math.floor((n - 1) / 4) + 1);
     default:
-      return /^\(%\d\)$/.test(text) ? 'k-paren' : null;
+      return String(n);
   }
 }
 
