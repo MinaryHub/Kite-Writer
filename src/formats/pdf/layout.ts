@@ -1656,9 +1656,18 @@ export async function renderContainer(c: Container, bounds: Box, ctx: LayoutCtx,
   let prevBlock: JNode | null = null;
 
   const gapBefore = (top: number) => Math.max(0, top - prevBottom);
+  /**
+   * 문단 간격으로 적지 못하고 남긴 작은 간격(0.8pt 미만)과 반올림으로 버린 값의 합.
+   * 줄마다 0.3pt 씩 버리면 쪽 끝에서는 줄이 10pt 넘게 올라가므로, 다음 간격에 더해 쌓이지 않게 한다
+   */
+  let carry = 0;
   const setSpace = (attrs: Record<string, any>, gap: number) => {
-    // 한 쪽 안의 간격은 종이 높이를 넘지 못한다 (본문이 짧은 쪽의 꼬리말처럼 큰 간격도 그대로 둔다)
-    if (gap >= 0.8) attrs.spaceBefore = round(Math.min(gap, MAX_GAP), 1);
+    const g = gap + carry;
+    if (g >= 0.8) {
+      // 한 쪽 안의 간격은 종이 높이를 넘지 못한다 (본문이 짧은 쪽의 꼬리말처럼 큰 간격도 그대로 둔다)
+      attrs.spaceBefore = round(Math.min(g, MAX_GAP), 1);
+      carry = g <= MAX_GAP ? g - attrs.spaceBefore : 0;
+    } else carry = Math.max(0, g);
   };
   const pushSpacer = (gap: number) => {
     if (gap < 2) return;
@@ -1688,8 +1697,9 @@ export async function renderContainer(c: Container, bounds: Box, ctx: LayoutCtx,
       // 줄 상자가 앞 내용과 겹치면 아래로 밀지 말고 줄 높이를 줄인다 (기준선은 PDF 자리 그대로; 밀면 쪽 끝까지 쌓인다)
       if (p.lines.length === 1 && first.y - ascentOff(lh, size) < prevBottom - 0.3) lh = Math.max(size * 1.05, Math.min(lh, 2 * (first.y - size * 0.38 - prevBottom)));
     }
-    // 셀: 행 높이를 넘지 않도록 줄 간격을 줄인다
-    if (c.kind === 'cell' || c.kind === 'box') {
+    // 셀: 행 높이를 넘지 않도록 줄 간격을 줄인다. 단을 나누려고 만든 테두리 없는 칸(layout)은 높이가 글에 맞춰 잡힌 것이라
+    // 줄이지 않는다 (줄이면 줄마다 조금씩 올라가 단 끝에서 한 줄 넘게 어긋난다)
+    if ((c.kind === 'cell' && !(c as CellModel).layout) || c.kind === 'box') {
       const avail = (c.y1 - c.y0 - 2 * CELL_PADV) / p.lines.length;
       if (lh > avail) lh = Math.max(size, avail);
     }
@@ -1722,7 +1732,9 @@ export async function renderContainer(c: Container, bounds: Box, ctx: LayoutCtx,
         // 한 줄인데 영역을 조금 넘으면 줄바꿈되지 않도록 자간을 약간 줄인다 (생략)
       }
     }
-    attrs.lineHeight = `${round(lh, 1)}pt`;
+    // 줄 높이는 0.1pt 단위로 적는다: 뒤의 자리 셈도 적은 값으로 해야 반올림 오차가 줄마다 쌓이지 않는다
+    lh = round(lh, 1);
+    attrs.lineHeight = `${lh}pt`;
     const top = first.y - ascentOff(lh, size);
     setSpace(attrs, gapBefore(top));
     const sz = Math.round(size * 2) / 2;
