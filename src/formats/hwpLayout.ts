@@ -53,18 +53,19 @@ function blankWidthPx(n: JNode): number {
 }
 
 /**
- * 한 줄 문단에 글자처럼 취급하는 표 하나와 글자처럼 취급하는 그림이 함께 있는 것: 한글은 한 줄에 왼쪽부터 차례로 나란히 놓는다
- * (표 + 빈칸 + 그래프 그림 등). 표는 블록이라 그림과 한 줄에 둘 수 없으므로, 그림들을 표 옆 제자리에 띄운다.
- * paras: 표로 쪼개진 문단의 블록들 (빈칸 문단·표 하나·빈칸과 그림뿐인 문단만 있을 때만).
- * line: 한글이 놓은 줄의 가로 자리 (x 는 본문·칸 왼쪽에서, px), align: 문단 정렬, lineH: 줄 높이(px).
- * 표는 정렬 대신 줄 안 자리만큼 들여 쓰고, 그림들은 표 앞에 둘 높이 없는 자리 표시(anchor)에 담는다 — 그림의 y 는 줄 위쪽
- * (= 자리 표시의 위쪽, 표 바깥 여백의 위쪽) 기준. 본문에서는 부르는 쪽이 자리 표시를 그 줄의 쪽 안 위치(hwpTop)에 둔다.
- * 줄에서 가장 큰 개체가 표가 아니면(표가 줄 맨 위에 있지 않으면) null
+ * 한 줄 문단에 글자처럼 취급하는 표 하나와 그 뒤의 글·그림이 함께 있는 것: 한글은 한 줄에 왼쪽부터 차례로 나란히 놓는다
+ * (표 + 빈칸 + 그래프 그림, 표 + 글 등). 표는 블록이라 글·그림과 한 줄에 둘 수 없으므로, 표 뒤의 내용을 한 줄짜리 문단에 담아
+ * 표 옆 제자리에 띄운다. paras: 표로 쪼개진 문단의 블록들 (표 앞은 빈칸만, 표는 하나).
+ * line: 한글이 놓은 줄의 가로 자리 (x 는 본문·칸 왼쪽에서, px), align: 문단 정렬, seg: 그 줄의 [위쪽, 높이, 아래 간격, 기준선] (px).
+ * 표는 정렬 대신 줄 안 자리만큼 들여 쓰고, 표 뒤 내용은 높이 없는 자리 표시(anchor)의 문단으로 — 그 문단의 줄 상자를 한글의
+ * 줄(높이·기준선)과 같게 하므로 글은 기준선에, 그림은 글자처럼 놓인다. 자리 표시의 위쪽이 줄 위쪽이다
+ * (본문에서는 부르는 쪽이 자리 표시를 그 줄의 쪽 안 위치(hwpTop)에 둔다).
+ * 줄에서 가장 큰 개체가 표가 아니거나, 가운데·오른쪽 정렬인데 폭을 모르는 글이 있으면 null
  */
-export function sideBySide(paras: JNode[], line: { x: number; w: number }, align: string | null | undefined, lineH: number): { table: JNode; anchor: JNode } | null {
+export function sideBySide(paras: JNode[], line: { x: number; w: number }, align: string | null | undefined, seg: number[]): { table: JNode; anchor: JNode } | null {
   const objs = paras.filter((b) => b.type !== 'paragraph');
   const table = objs.length === 1 && objs[0].type === 'table' && objs[0].attrs?.inline === true ? objs[0] : null;
-  if (!table) return null;
+  if (!table || !(seg[1] > 0)) return null;
   const om: number[] = Array.isArray(table.attrs?.outMargin) && table.attrs!.outMargin.length === 4 ? table.attrs!.outMargin.map((v: any) => +v || 0) : [0, 0, 0, 0];
   // 표 폭: 첫 줄 칸들의 폭 합
   let tw = 0;
@@ -75,33 +76,47 @@ export function sideBySide(paras: JNode[], line: { x: number; w: number }, align
   }
   const tH = (+table.attrs?.hwpH || 0) + om[2] + om[3];
   if (!(tw > 0) || !(tH > 0)) return null;
-  let x = 0;
-  let tableX = -1;
-  const pics: { node: JNode; x: number; h: number }[] = [];
-  for (const b of paras) {
-    if (b === table) {
-      tableX = x;
-      x += om[0] + tw + om[1];
-      continue;
-    }
+  const ti = paras.indexOf(table);
+  // 표 앞: 빈칸만 (표를 그만큼 민다)
+  let lead = 0;
+  for (const b of paras.slice(0, ti))
     for (const n of b.content || []) {
-      if (n.type === 'text' && !(n.text || '').trim()) x += blankWidthPx(n);
-      else if (n.type === 'image' && !n.attrs?.float && +n.attrs?.width > 0 && +n.attrs?.height > 0) {
-        pics.push({ node: n, x, h: +n.attrs!.height });
-        x += +n.attrs!.width;
+      if (n.type === 'text' && !(n.text || '').trim()) lead += blankWidthPx(n);
+      else return null;
+    }
+  // 표 뒤: 빈칸·글·그림
+  const rest: JNode[] = [];
+  let restW = 0;
+  let text = false;
+  let shown = false;
+  let size: number | null = null;
+  for (const b of paras.slice(ti + 1)) {
+    if (size == null && +b.attrs?.fontSize > 0) size = +b.attrs!.fontSize;
+    for (const n of b.content || []) {
+      if (n.type === 'text') {
+        if ((n.text || '').trim()) text = shown = true;
+        else restW += blankWidthPx(n);
+      } else if (n.type === 'image' && !n.attrs?.float && +n.attrs?.width > 0 && +n.attrs?.height > 0) {
+        if (+n.attrs!.height > tH + 1) return null;
+        restW += +n.attrs!.width;
+        shown = true;
       } else return null;
+      rest.push(n);
     }
   }
-  if (!pics.length || tableX < 0 || pics.some((p) => p.h > tH + 1)) return null;
+  if (!shown || (text && (align === 'right' || align === 'center'))) return null;
   // 정렬: 줄 폭에서 남는 만큼 (가운데·오른쪽). 양쪽·배분 정렬은 왼쪽부터
-  const free = Math.max(0, line.w - x);
+  const tOuter = om[0] + tw + om[1];
+  const free = Math.max(0, line.w - (lead + tOuter + restW));
   const x0 = line.x + (align === 'right' ? free : align === 'center' ? free / 2 : 0);
-  const H = Math.max(lineH, tH);
   const { align: _drop, ...ta } = table.attrs || {};
-  table.attrs = { ...ta, indent: r2(((x0 + tableX) * 72) / 96) };
-  // 글자처럼 놓인 개체: 기준선이 줄 높이의 85% 자리이고 개체 아래 끝은 기준선보다 개체 높이의 15% 아래 (editor.css 와 같은 셈)
-  const imgs = pics.map((p) => ({ ...p.node, attrs: { ...p.node.attrs, float: { x: r2(x0 + p.x), y: r2(0.85 * (H - p.h)) } } }));
-  const anchor: JNode = { type: 'textBox', attrs: { width: null, height: null, padding: [0, 0, 0, 0], float: { x: 0, y: 0 } }, content: [{ type: 'paragraph', content: imgs }] };
+  table.attrs = { ...ta, indent: r2(((x0 + lead) * 72) / 96) };
+  const rx = x0 + lead + tOuter;
+  const H = Math.max(seg[1], tH);
+  const base = seg[3] >= seg[1] * 0.6 ? seg[3] : seg[1] * 0.85;
+  const p: JNode = { type: 'paragraph', attrs: size ? { fontSize: size } : {}, content: rest };
+  p.attrs = { ...p.attrs, hwpLen: jsonContentSize(p), hwpLines: [[0, r2(Math.max(10, line.x + line.w - rx))]], hwpVs: [[0, r2(H), 0, r2(base + (H - seg[1]))]] };
+  const anchor: JNode = { type: 'textBox', attrs: { width: null, height: null, padding: [0, 0, 0, 0], float: { x: r2(rx), y: 0 } }, content: [p] };
   return { table, anchor };
 }
 
@@ -196,7 +211,7 @@ export class ParaLayout {
       pp: ParaBox;
       state: LayoutState;
       origin?: { x: number; y: number };
-      /** 첫 줄의 가로 자리 (본문·칸 왼쪽에서, px)와 문단 정렬: 한 줄에 나란히 놓인 표와 그림을 그 자리에 놓는 데 쓴다 */
+      /** 첫 줄의 가로 자리 (본문·칸 왼쪽에서, px)와 문단 정렬: 한 줄에 나란히 놓인 표와 글·그림을 그 자리에 놓는 데 쓴다 */
       line0?: { x: number; w: number };
       align?: string | null;
     },
@@ -306,8 +321,8 @@ export class ParaLayout {
         indentByBlanks(objs[0], paras.slice(0, paras.indexOf(objs[0])));
         paras = objs;
       } else if (!floating && this.o.line0) {
-        // 표와 그림이 한 줄에 나란히: 그림을 표 옆 제자리에 띄운다
-        const side = sideBySide(paras, this.o.line0, this.o.align, segV[0][1]);
+        // 표와 글·그림이 한 줄에 나란히: 표 뒤의 내용을 표 옆 제자리에 띄운다
+        const side = sideBySide(paras, this.o.line0, this.o.align, segV[0]);
         if (side) {
           this.before.push(side.anchor);
           sideAnchor = side.anchor;
@@ -337,7 +352,7 @@ export class ParaLayout {
       const omT = one.type === 'table' ? +(one.attrs?.outMargin?.[2] || 0) : 0;
       one.attrs = { ...one.attrs, hwpTop: r2(v0 - sb + omT) };
       for (const b of this.before) if (b.attrs?.float) b.attrs = { ...b.attrs, hwpTop: r2(v0 - sb) };
-      // 표 옆에 띄운 그림들의 자리 표시는 줄 위쪽에 (그림의 y 가 줄 위쪽 기준)
+      // 표 옆에 띄운 내용의 자리 표시는 줄 위쪽에 (그 안 문단의 줄 상자가 한글의 줄과 같다)
       if (sideAnchor) sideAnchor.attrs = { ...sideAnchor.attrs, hwpTop: r2(v0) };
       if (this.leadTables.length && one.type === 'paragraph' && !this.o.hwpPage) {
         // 밀린 첫 줄 바로 위에서부터 거꾸로 쌓아 올린다

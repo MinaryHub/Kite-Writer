@@ -1028,8 +1028,8 @@ export class HwpxConverter {
         indentByBlanks(objs[0], paras.slice(0, paras.indexOf(objs[0])));
         paras = objs;
       } else if (!floating && lineSegs.length) {
-        // 표와 그림이 한 줄에 나란히: 그림을 표 옆 제자리에 띄운다 (HWP 와 같게)
-        const side = sideBySide(paras, { x: lineSegs[0][2] + pp.indentLeft * PT2PX, w: lineSegs[0][1] }, pAttrs.textAlign || null, segV[0][1]);
+        // 표와 글·그림이 한 줄에 나란히: 표 뒤의 내용을 표 옆 제자리에 띄운다 (HWP 와 같게)
+        const side = sideBySide(paras, { x: lineSegs[0][2] + pp.indentLeft * PT2PX, w: lineSegs[0][1] }, pAttrs.textAlign || null, segV[0]);
         if (side) {
           before.push(side.anchor);
           sideAnchor = side.anchor;
@@ -1063,7 +1063,7 @@ export class HwpxConverter {
         lead = one;
         // 떠 있는 글상자·도형은 문단 상자와 같은 자리에서 시작한다
         for (const b of before) if (b.attrs?.float) b.attrs = { ...b.attrs, hwpTop: r2(v0 - sb) };
-        // 표 옆에 띄운 그림들의 자리 표시는 줄 위쪽에 (그림의 y 가 줄 위쪽 기준)
+        // 표 옆에 띄운 내용의 자리 표시는 줄 위쪽에 (그 안 문단의 줄 상자가 한글의 줄과 같다)
         if (sideAnchor) sideAnchor.attrs = { ...sideAnchor.attrs, hwpTop: r2(v0) };
         // 글을 밀어낸 표는 앞 블록 바로 뒤로 흐른다: 한글이 적어 둔 표 높이(sz)는 여러 쪽에 걸친 표에서 실제 높이와 달라
         // 표의 위쪽을 거꾸로 셈할 수 없다. 새 쪽 표시도 글 문단이 갖는다 (표는 앞 쪽에서 시작했을 수 있다)
