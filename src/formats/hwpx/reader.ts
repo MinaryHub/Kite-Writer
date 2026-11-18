@@ -1,4 +1,4 @@
-import { LineSegStats, dropHwpLayout, floatOverhang, indentByBlanks, type FloatHw } from '../hwpLayout';
+import { LineSegStats, cellContentNeed, dropHwpLayout, floatOverhang, indentByBlanks, type FloatHw } from '../hwpLayout';
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
 import { CELL_VMARGIN_HWP, FLOATING, HwpPageMarks, assembleTable, fitTableLines, placeCaptions, takeFloating, type Caption, type Captions } from '../hwp/reader';
@@ -40,6 +40,7 @@ import {
   assertZipBudget,
   readZipEntry,
   FIXED_SPACE,
+  pushAll,
 } from '../common';
 
 // ---------------- 헤더(스타일 정의) ----------------
@@ -721,15 +722,26 @@ export class HwpxConverter {
         const paras = blocks.filter((b) => b.type !== 'pageBreak' && !b.attrs?.float);
         const one = paras.length === 1 && paras[0].type === 'paragraph' ? paras[0] : null;
         const vs = one?.attrs?.hwpVs as number[][] | undefined;
+        // 글자처럼 취급하는 표 하나뿐인 문단: 표 아래 간격(hwpAfter)까지 그 줄이 끝난 자리
+        const tvs = paras.length === 1 && paras[0].type === 'table' ? (paras[0].attrs?.hwpVs as number[][] | undefined) : undefined;
         if (one && vs && vs.length) {
           const sb = (+one.attrs!.spaceBefore || 0) * PT2PX;
           const gap = prevEnd == null ? 0 : vs[0][0] - sb - prevEnd;
           if (gap > 0.5 && gap < 4000) one.attrs!.hwpGap = r2(gap);
           const last = vs[vs.length - 1];
           prevEnd = last[0] + last[1] + last[2] + (+one.attrs!.spaceAfter || 0) * PT2PX;
-        } else prevEnd = null;
+        } else if (tvs && tvs.length === 1) prevEnd = tvs[0][0] + tvs[0][1] + (+paras[0].attrs!.hwpAfter || 0);
+        else prevEnd = null;
       }
-      out.push(...blocks);
+      pushAll(out, blocks);
+    }
+    // 칸·글상자의 마지막 줄 아래 간격은 칸 높이에 들지 않는다: 마지막 블록이 표면 그 아래 간격을 지운다
+    if (ctx.inSub) {
+      const last = [...out].reverse().find((b) => b.type !== 'pageBreak' && !b.attrs?.float);
+      if (last?.type === 'table' && last.attrs?.hwpAfter != null) {
+        const { hwpAfter: _drop, ...rest } = last.attrs;
+        last.attrs = rest;
+      }
     }
     return out;
   }
@@ -941,7 +953,7 @@ export class HwpxConverter {
             if (node) cfp = this.placeShape(node, child, pp, segV, ctx, pushed, inline);
             else {
               flush();
-              blocks.push(...this.convertContainer(child));
+              pushAll(blocks, this.convertContainer(child));
               produced = true;
             }
             this.addCaption(child, captions, cfp, before);
@@ -990,6 +1002,12 @@ export class HwpxConverter {
     }
     track.end();
     const lineSize = inline.length && !produced ? inlineSize() : 0;
+    // 표(블록)로 쪼개진 문단에 떠 있는 개체만 남았으면: 한글에서는 표와 같은 줄에 걸린 개체다. 새 문단(빈 줄)을 세우지 않고
+    // 높이 없는 자리 표시에 담아 표 앞에 둔다 (개체 자리는 문단 위끝 = 표 위끝 기준이므로 그대로)
+    if (produced && inline.length && inline.every((n) => !!n.attrs?.float && n.type !== 'text')) {
+      before.push({ type: 'textBox', attrs: { width: null, height: null, padding: [0, 0, 0, 0], float: { x: 0, y: 0 } }, content: [paragraph({ ...pAttrs, fontSize: firstSize && firstSize !== 10 ? firstSize : null }, inline)] });
+      inline = [];
+    }
     if (inline.length) flush();
     else if (!produced) blocks.push(paragraph({ ...pAttrs, fontSize: firstSize && firstSize !== 10 ? firstSize : null }));
     // 문단이 표 등으로 쪼개지지 않고 줄 위치를 모두 찾았을 때만 (HWP 와 같게). 첫 줄은 문단 번호(머리 글자)부터
@@ -1015,6 +1033,12 @@ export class HwpxConverter {
       // 줄 높이·기준선: 줄 자리를 모두 알거나 한 줄뿐인 문단 (빈 문단 포함)
       if (a.hwpLines || segV.length === 1) a.hwpVs = segV;
       one.attrs = a;
+    }
+    // 칸·글상자 안에서 글자처럼 취급하는 표 하나뿐인 문단: 표 아래에 그 줄의 아래 간격과 문단 아래 간격을 둔다
+    // (한글은 표를 한 줄로 놓으므로 다음 문단은 줄 간격만큼 떨어진다). 다음 문단의 자리 셈에 쓰려고 줄 정보도 남긴다
+    if (ctx.inSub && one && one.type === 'table' && segV.length === 1) {
+      const after = segV[0][2] + pp.spaceAfter * PT2PX;
+      one.attrs = { ...one.attrs, hwpVs: segV, ...(after > 0.3 && after < 400 ? { hwpAfter: r2(after) } : {}) };
     }
     if (!ctx.inSub) {
       // 본문: 블록의 쪽 안 세로 위치(테두리 상자의 위쪽). 쪽 나누기가 그 자리에 맞춘다
@@ -1645,13 +1669,43 @@ export class HwpxConverter {
     return out;
   }
 
+  /**
+   * 칸(subList) 안 문단에 떠 있는 개체(글자처럼 취급하지 않고 문단 기준으로 놓인 것)의 아래 끝 가운데 가장 아래 (HWPUNIT, 칸 안쪽 위끝 기준).
+   * 줄 정보가 없는 문단은 셈하지 않는다. 없으면 0
+   */
+  private cellObjectsBottom(sub: Element | null): number {
+    let bottom = 0;
+    for (const p of kids(sub, 'p')) {
+      const seg = kid(kid(p, 'linesegarray'), 'lineseg');
+      if (!seg) continue;
+      const pp = this.h.paraPrs.get(attr(p, 'paraPrIDRef') || '0') || DEFAULT_PARA;
+      // 문단 위끝: 첫 줄 자리에서 문단 위 간격을 뺀 곳 (간격은 pt 로 읽어 두었다)
+      const top = numAttr(seg, 'vertpos', 0) - Math.round(pp.spaceBefore * 100);
+      for (const run of kids(p, 'run'))
+        for (const ob of kids(run)) {
+          const name = localName(ob);
+          if (name !== 'pic' && name !== 'container' && name !== 'ole' && name !== 'equation' && !SHAPES.has(name)) continue;
+          const pos = kid(ob, 'pos');
+          const sz = kid(ob, 'sz');
+          if (!pos || !sz || attr(pos, 'treatAsChar') === '1' || attr(pos, 'vertRelTo') !== 'PARA') continue;
+          let vo = numAttr(pos, 'vertOffset', 0);
+          // 음수 오프셋이 부호 없는 수로 적힌 문서
+          if (vo >= 2 ** 31) vo -= 2 ** 32;
+          const om = kid(ob, 'outMargin');
+          const b = top + vo + numAttr(sz, 'height', 0) + (om ? numAttr(om, 'bottom', 0) : 0);
+          if (b > bottom && b < 2_000_000) bottom = b;
+        }
+    }
+    return bottom;
+  }
+
   convertTable(tbl: Element): JNode {
     type Cell = { row: number; col: number; cs: number; rs: number; w: number; node: JNode };
     const cells: Cell[] = [];
     const rowCnt = numAttr(tbl, 'rowCnt', 0);
     const rowH: number[] = [];
     /** 여러 줄을 합친 칸: 첫 줄, 줄 수, 칸 높이(HWPUNIT). 낱칸이 없는 줄의 높이를 여기서 거꾸로 셈한다 */
-    const spans: { row: number; rs: number; h: number; need: number; last: JNode | null }[] = [];
+    const spans: { row: number; rs: number; h: number; need: number }[] = [];
     /** 표의 기본 안 여백 [왼, 오른, 위, 아래] (HWPUNIT) */
     const inM0 = kid(tbl, 'inMargin');
     const tblMargin = inM0 ? ['left', 'right', 'top', 'bottom'].map((k) => numAttr(inM0, k, k === 'top' || k === 'bottom' ? 141 : 510)) : [510, 510, 141, 141];
@@ -1667,7 +1721,7 @@ export class HwpxConverter {
         const rs = Math.max(1, Math.min(4096, numAttr(span, 'rowSpan', 1)));
         const w = hwpToPx(numAttr(sz, 'width', 0));
         if (rs === 1) rowH[row] = Math.max(rowH[row] || 0, hwpToPx(numAttr(sz, 'height', 0) - CELL_VMARGIN_HWP));
-        else spans.push({ row, rs, h: numAttr(sz, 'height', 0), need: 0, last: null });
+        else spans.push({ row, rs, h: numAttr(sz, 'height', 0), need: 0 });
         const bf = this.h.borderFills.get(attr(tc, 'borderFillIDRef') || '');
         // 칸의 안 여백: '칸 여백 지정'(hasMargin)이 켜진 칸만 제 값을 쓰고, 아니면 표의 기본 안 여백을 쓴다
         const cmEl = kid(tc, 'cellMargin');
@@ -1676,27 +1730,16 @@ export class HwpxConverter {
         let content = this.convertParagraphs(kids(sub, 'p'), { inSub: true, width: w - hwpToPx(cmv[0] + cmv[1]) });
         content = content.filter((n) => n.type !== 'pageBreak');
         if (!content.length) content = [paragraph()];
-        // 적힌 칸 높이가 글(마지막 줄의 글자 높이까지)보다 작으면 한글은 칸 높이를 내용으로 새로 셈하고, 그때는 마지막 줄 간격과
-        // 문단 아래 간격까지 넣는다. 칸 높이가 유효하면 그 높이를 지키고 마지막 줄 뒤 간격은 세지 않는다
-        {
-          const lastP = content[content.length - 1];
-          const vs = lastP.type === 'paragraph' ? (lastP.attrs?.hwpVs as number[][] | undefined) : undefined;
-          // 빈 문단 하나뿐인 칸(색 띠로 쓰는 낮은 칸 등)은 줄 높이만큼만 차지한다 (한글의 미리 보기 그림으로 확인)
-          const emptyOnly = content.length === 1 && lastP.type === 'paragraph' && !(lastP.content || []).length;
-          if (vs && vs.length && !emptyOnly) {
-            const l = vs[vs.length - 1];
-            const vm = hwpToPx(cmv[2] + cmv[3]);
-            const textOnly = l[0] + l[1] + vm;
-            if (hwpToPx(numAttr(sz, 'height', 0)) < textOnly - 1) {
-              lastP.attrs = { ...lastP.attrs, hwpTrail: true };
-              // 여러 줄을 합친 칸: 내용이 요구하는 높이 (마지막 줄 간격·문단 아래 간격 포함). 모자란 만큼은 합친 마지막 줄이 늘어난다
-              if (rs > 1) {
-                const sp = spans[spans.length - 1];
-                sp.need = textOnly + l[2] + (+lastP.attrs.spaceAfter || 0) * PT2PX;
-                sp.last = lastP;
-              }
-            }
-          }
+        // 적힌 칸 높이가 글(마지막 줄의 글자 높이까지)보다 작으면 한글은 칸 높이를 그 내용 높이로 늘린다 (마지막 줄 아래 간격·
+        // 문단 아래 간격은 넣지 않는다: 한글이 적어 둔 표 높이와 맞는 셈). 여러 줄을 합친 칸은 모자란 만큼 합친 마지막 줄이 늘어난다
+        // 칸 안에 떠 있는 개체(문단 기준)도 칸을 늘린다: 한글은 개체의 아래 끝(문단 위끝 + 세로 오프셋 + 높이 + 바깥 아래 여백)까지 칸에 넣는다
+        // (글 앞으로·뒤로 놓은 것도. 한글이 적어 둔 표 높이와 맞는 셈). 문단 위끝 = 첫 줄 자리 - 문단 위 간격
+        const objNeed = this.cellObjectsBottom(sub);
+        const objPx = objNeed > 0 ? hwpToPx(objNeed + cmv[2] + cmv[3]) : 0;
+        if (rs === 1 && objPx > 0) rowH[row] = Math.max(rowH[row] || 0, objPx - hwpToPx(CELL_VMARGIN_HWP));
+        if (rs > 1) {
+          const need = Math.max(cellContentNeed(content, hwpToPx(numAttr(sz, 'height', 0)), hwpToPx(cmv[2] + cmv[3])), objPx > hwpToPx(numAttr(sz, 'height', 0)) + 1 ? objPx : 0);
+          if (need > 0) spans[spans.length - 1].need = need;
         }
         const va = attr(sub, 'vertAlign');
         const attrs: Record<string, any> = { colspan: cs, rowspan: rs, colwidth: null };
@@ -1989,7 +2032,7 @@ export async function readHwpx(data: Uint8Array): Promise<LoadedDoc> {
     const secPage = i > 0 && secPr ? pageOfSecPr(secPr, settings.page) : null;
     if (i > 0 && blocks.length) blocks.push(secPage ? { type: 'pageBreak', attrs: { sectionPage: secPage } } : { type: 'pageBreak' });
     conv.startSection(secPage, i > 0);
-    blocks.push(...conv.convertParagraphs(kids(sec, 'p'), { inSub: false }));
+    pushAll(blocks, conv.convertParagraphs(kids(sec, 'p'), { inSub: false }));
   }
   while (blocks.length && blocks[0].type === 'pageBreak') blocks.shift();
   // 바탕쪽

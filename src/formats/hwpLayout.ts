@@ -292,10 +292,11 @@ export function gapInBox(groups: JNode[][]) {
 }
 
 /**
- * 칸의 마지막 문단: 적힌 칸 높이가 글(마지막 줄의 글자 높이까지)보다 작으면 한글은 칸 높이를 내용으로 새로 셈하고
- * 마지막 줄 간격·문단 아래 간격까지 넣는다 (hwpTrail). 돌려주는 값은 그때 내용이 요구하는 높이(px), 아니면 0
+ * 칸 내용이 요구하는 높이(px): 적힌 칸 높이가 글(마지막 줄의 글자 높이까지 + 위아래 안 여백)보다 작으면 한글은 칸 높이를
+ * 그 내용 높이로 늘린다. 마지막 줄 아래 간격과 문단 아래 간격은 넣지 않는다 — 한글이 적어 둔 표 높이(sz)와 견주어
+ * 표 42개 모두 이 셈과 맞았다. 적힌 높이로 충분하면 0
  */
-export function markCellTrail(content: JNode[], cellHeightPx: number, vMarginPx: number): number {
+export function cellContentNeed(content: JNode[], cellHeightPx: number, vMarginPx: number): number {
   const lastP = content[content.length - 1];
   const vs = lastP && lastP.type === 'paragraph' ? (lastP.attrs?.hwpVs as number[][] | undefined) : undefined;
   if (!vs || !vs.length) return 0;
@@ -303,9 +304,7 @@ export function markCellTrail(content: JNode[], cellHeightPx: number, vMarginPx:
   if (content.length === 1 && !(lastP.content || []).length) return 0;
   const l = vs[vs.length - 1];
   const textOnly = l[0] + l[1] + vMarginPx;
-  if (cellHeightPx >= textOnly - 1) return 0;
-  lastP.attrs = { ...lastP.attrs, hwpTrail: true };
-  return textOnly + l[2] + (+lastP.attrs.spaceAfter || 0) * PT2PX;
+  return cellHeightPx >= textOnly - 1 ? 0 : textOnly;
 }
 
 /**

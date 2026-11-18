@@ -1,4 +1,4 @@
-import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, floatOverhang, gapInBox, isBreakBlock, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
+import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, floatOverhang, gapInBox, isBreakBlock, jsonContentSize, cellContentNeed, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
 import { hwpToLatex } from '../../math/hwpEq';
 import * as CFB from 'cfb';
 import { Inflate } from 'pako';
@@ -27,6 +27,7 @@ import {
   normCrop,
   type BorderSide,
   FIXED_SPACE,
+  pushAll,
 } from '../common';
 import { charMarks, paraAttrs, paraBorderFrom, imgFillFit, langFontsOf, lineColorOf, gradientCss, gradientOf, pageBorderOf, type CharPr, type ParaPr, type BorderFill, type Numbering } from '../hwpx/reader';
 import { type Gradient, type Mat, type ShapeData, type ShapeItem, type ShapeRaw, HWP_ARROW_SIZES, HWP_ARROW_STYLES, HWP_LINE_STYLES, SHADOW_DEFAULT, SHADOW_UNIT_PX, arrowOf, arrowSizeOf, composeMats, matOfHwp, shapeBounds } from '../shape';
@@ -946,8 +947,8 @@ class HwpConverter {
       const cellVm = hwpToPx(cmv[2] + cmv[3]);
       let content = this.convertParagraphs(cur.paras, true, null, w - hwpToPx(cmv[0] + cmv[1])).filter((n) => n.type !== 'pageBreak');
       if (!content.length) content = [paragraph()];
-      // 적힌 칸 높이가 글보다 작으면 한글은 칸 높이를 내용으로 새로 셈한다 (마지막 줄 간격·문단 아래 간격 포함)
-      const need = markCellTrail(content, hwpToPx(u32(lh, 20)), cellVm);
+      // 적힌 칸 높이가 글보다 작으면 한글은 칸 높이를 내용(마지막 줄의 글자 높이까지)으로 늘린다
+      const need = cellContentNeed(content, hwpToPx(u32(lh, 20)), cellVm);
       if (rs > 1) spans.push({ row, rs, h: hwpToPx(u32(lh, 20)), need });
       const va = (attrVal >>> 21) & 3;
       const attrs: Record<string, any> = { colspan: cs, rowspan: rs, colwidth: null };
@@ -1126,7 +1127,7 @@ class HwpConverter {
             for (const n of paras) if (n.type === 'paragraph') n.attrs = { ...n.attrs, indentLeft: (n.attrs?.indentLeft || 0) + l, indentRight: (n.attrs?.indentRight || 0) + rgt };
           }
         }
-        content.push(...paras);
+        pushAll(content, paras);
       }
       // 글의 세로 맞춤: LIST_HEADER 의 속성(문단 수 4바이트 뒤) bit 5~6 (0 위, 1 가운데, 2 아래)
       const va = hd.data.length >= 8 ? (u32(hd, 4) >>> 5) & 3 : 0;
@@ -1158,7 +1159,7 @@ class HwpConverter {
       const sh = Math.round(hwpToPx(Math.abs(i32(p, 32) - i32(p, 16)))) || h;
       blocks.push(paragraph({ textAlign: 'center' }, [this.picture(p, pics.length === 1 ? w : sw, pics.length === 1 ? h : sh)]));
     }
-    for (const t of texts) blocks.push(...this.convertParagraphs(t.paras, true));
+    for (const t of texts) pushAll(blocks, this.convertParagraphs(t.paras, true));
     return blocks;
   }
 
@@ -1651,7 +1652,7 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
     const brk: JNode | null = i > 0 && blocks.length ? { type: 'pageBreak' } : null;
     if (brk) blocks.push(brk);
     conv.startSection();
-    blocks.push(...conv.convertParagraphs(recs, false));
+    pushAll(blocks, conv.convertParagraphs(recs, false));
     if (brk && conv.sectionPage) brk.attrs = { sectionPage: conv.sectionPage };
   }
   while (blocks.length && blocks[0].type === 'pageBreak') blocks.shift();

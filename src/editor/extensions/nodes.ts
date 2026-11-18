@@ -12,7 +12,7 @@ import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import { viewState } from '../viewState';
 import type { Columns } from '../../types';
 import { cleanMargins } from '../../formats/flatten';
-import { cleanColumns, normColor } from '../../formats/common';
+import { cleanColumns, normColor, parseBorderCss } from '../../formats/common';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -699,6 +699,7 @@ const cellAttrs = {
     renderHTML: (a: Record<string, any>) => {
       if (!a.borderCss) return {};
       const names: Record<string, string> = { t: 'top', b: 'bottom', l: 'left', r: 'right' };
+      const half: string[] = [];
       const style = String(a.borderCss)
         .split(';')
         .map((p: string) => {
@@ -706,9 +707,16 @@ const cellAttrs = {
           if (!names[k] || !v) return '';
           // 이중선: 한글은 두 줄이 보이게 그린다 (적힌 굵기의 두 배 남짓). 화면에서 3px 는 되어야 두 줄로 보인다
           const m = /^([\d.]+)mm double (#[0-9A-Fa-f]{6})$/.exec(v.trim());
+          const mm = m ? parseFloat(m[1]) * 2.4 : parseFloat(v);
+          // 위·아래 굵은 선: 그려지는 굵기(화면 px 로 내림)의 절반. 한글은 칸 높이에 선 굵기를 넣지 않으므로 그만큼 안 여백을 줄인다 (CSS)
+          if ((k === 't' || k === 'b') && mm > 0) {
+            const px = Math.max(m ? 3 : 1, Math.floor((mm * 96) / 25.4));
+            if (px > 1) half.push(`--bh-${k}: ${px / 2}px`);
+          }
           return m ? `border-${names[k]}: max(3px, ${Math.round(parseFloat(m[1]) * 240) / 100}mm) double ${m[2]}` : `border-${names[k]}: ${v}`;
         })
         .filter(Boolean)
+        .concat(half)
         .join('; ');
       return { 'data-border-css': a.borderCss, style };
     },
@@ -725,7 +733,20 @@ const cellAttrs = {
     },
     renderHTML: (a: Record<string, any>) => {
       const v = cleanMargins(a.margins);
-      return v ? { 'data-cm': JSON.stringify(v), style: `--cm-l: ${v[0]}px; --cm-r: ${v[1]}px; --cm-t: ${v[2]}px; --cm-b: ${v[3]}px` } : {};
+      if (!v) return {};
+      // 위·아래 안 여백이 테두리 굵기의 절반보다 작은 칸: 한글은 선 굵기를 칸 높이에 넣지 않으므로, 모자란 만큼 첫·끝 내용을
+      // 테두리 쪽으로 당긴다 (CSS --cneg-t/b → 첫 블록의 margin-top, 끝 블록의 margin-bottom. 한글 문서에서만)
+      const half = (k: 't' | 'b') => {
+        const side = parseBorderCss(a.borderCss)[k];
+        if (!side) return 0.5;
+        const mm = side.s === 'double' ? side.w * 2.4 : side.w;
+        return Math.max(side.s === 'double' ? 3 : 1, Math.floor((mm * 96) / 25.4)) / 2;
+      };
+      const neg = (k: 't' | 'b', m: number) => Math.round(Math.max(0, half(k) - m) * 100) / 100;
+      const nt = neg('t', v[2]);
+      const nb = neg('b', v[3]);
+      const extra = (nt > 0 ? `; --cneg-t: -${nt}px` : '') + (nb > 0 ? `; --cneg-b: -${nb}px` : '');
+      return { 'data-cm': JSON.stringify(v), style: `--cm-l: ${v[0]}px; --cm-r: ${v[1]}px; --cm-t: ${v[2]}px; --cm-b: ${v[3]}px${extra}` };
     },
   },
   borderStyle: {
@@ -895,7 +916,9 @@ class KTableView extends TableView {
     t.style.marginLeft = align === 'center' || align === 'right' ? 'auto' : left ? left.toFixed(1) + 'px' : '';
     t.style.marginRight = align === 'center' ? 'auto' : '';
     t.style.marginTop = om && om[2] ? om[2] + 'px' : '';
-    t.style.marginBottom = om && om[3] ? om[3] + 'px' : '';
+    // 한글 문서의 칸 안에서 표 하나뿐인 문단: 그 줄의 아래 간격(hwpAfter)도 표 아래에 둔다
+    const after = (om ? om[3] : 0) + (+node.attrs.hwpAfter > 0 ? +node.attrs.hwpAfter : 0);
+    t.style.marginBottom = after ? Math.round(after * 100) / 100 + 'px' : '';
   }
 }
 
@@ -926,6 +949,8 @@ export const KTable = Table.extend({
         parseHTML: (el: HTMLElement) => el.getAttribute('data-inline') === 'true',
         renderHTML: (a: Record<string, any>) => (a.inline ? { 'data-inline': 'true' } : {}),
       },
+      /** 한글 문서의 칸·글상자 안에서 표 하나뿐인 문단: 그 줄의 아래 간격과 문단 아래 간격 (px). 표 아래에 둔다 (화면 전용) */
+      hwpAfter: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
       /** 표 바깥 여백 [왼, 오른, 위, 아래] (px) — 한글 문서에서 읽은 값을 저장할 때 되돌리려고 둔다 */
       outMargin: {
         default: null,
@@ -938,9 +963,10 @@ export const KTable = Table.extend({
         },
         renderHTML: (a: Record<string, any>) => {
           const v = cleanMargins(a.outMargin);
-          if (!v) return {};
+          if (!v) return +a.hwpAfter > 0 ? { style: `margin-bottom: ${Math.round(+a.hwpAfter * 100) / 100}px` } : {};
           // 한글처럼 위·아래 바깥 여백만큼 표를 띄운다 (왼쪽 여백은 정렬이 없을 때만: 가운데·오른쪽 정렬은 CSS 가 자리를 정한다)
-          const st = [`margin-top: ${v[2]}px`, `margin-bottom: ${v[3]}px`];
+          const after = v[3] + (+a.hwpAfter > 0 ? +a.hwpAfter : 0);
+          const st = [`margin-top: ${v[2]}px`, `margin-bottom: ${Math.round(after * 100) / 100}px`];
           if (!a.align && v[0]) st.push(`margin-left: ${v[0]}px`);
           return { 'data-out-margin': JSON.stringify(v), style: st.join('; ') };
         },

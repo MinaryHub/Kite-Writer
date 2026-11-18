@@ -226,9 +226,8 @@ export function hwpLineBoxes(node: PMNode, lastInBox: boolean): HwpLineBox[] | n
     let pitch = v[1] + (+v[2] || 0);
     // 같은 쪽에서 이어지는 줄은 다음 줄의 자리까지 (개체를 피해 밀린 줄 포함). 다음 줄이 새 쪽(자리가 되돌아감)이면 줄 높이 + 간격
     if (next && next[0] > v[0] + 0.5) pitch = next[0] - v[0];
-    // 칸의 마지막 줄 아래 간격은 칸 높이에 들지 않는다. 다만 한글이 칸 높이를 새로 셈해야 했던 칸(hwpTrail: 적힌 칸 높이가
-    // 내용보다 작다)은 마지막 줄 간격과 문단 아래 간격까지 넣어 줄 높이를 정한다
-    else if (!next && lastInBox && node.attrs?.hwpTrail !== true) pitch = v[1];
+    // 칸·글상자의 마지막 줄 아래 간격은 칸 높이에 들지 않는다 (칸 높이가 내용으로 늘어날 때도: 한글이 적어 둔 표 높이와 맞는 셈)
+    else if (!next && lastInBox) pitch = v[1];
     // 기준선: 문단의 줄 안 세로 정렬이 '가운데'·'위'면 한글은 기준선 자리에 줄 가운데(높이의 절반)나 위를 적어 둔다.
     // 그 값은 글자의 기준선이 아니므로, 줄 높이의 0.6 에 못 미치면 한글 글꼴의 보통 기준선(높이의 0.85)으로 본다
     const base = v[3] >= v[1] * 0.6 ? v[3] : v[1] * 0.85;
@@ -368,8 +367,8 @@ function decosIn(doc: PMNode, from: number, to: number, out: Decoration[]) {
       // 빈 문단(줄 정보는 한 줄, 줄 첫 자리 목록은 없음)도 버팀대를 세운다
       if (!useLines) out.push(Decoration.widget(pos + 1, lineStartWidget(boxes[0]), { side: -1, key: `hwp-ls-${boxes[0].pitch}-${boxes[0].base}`, ignoreSelection: true }));
       const gap = +node.attrs?.hwpGap;
-      // 칸의 마지막 문단: 문단 아래 간격도 칸 높이에 들지 않는다 (hwpTrail 인 칸은 든다)
-      const noAfter = inBox && index === parent!.childCount - 1 && node.attrs?.hwpTrail !== true && +node.attrs?.spaceAfter > 0;
+      // 칸의 마지막 문단: 문단 아래 간격도 칸 높이에 들지 않는다
+      const noAfter = inBox && index === parent!.childCount - 1 && +node.attrs?.spaceAfter > 0;
       out.push(Decoration.node(pos, pos + node.nodeSize, { style: 'line-height: 0; white-space: pre' + (gap > 0 ? `; margin-top: ${gap.toFixed(2)}px` : '') + (noAfter ? '; padding-bottom: 0' : '') }));
       return false;
     }

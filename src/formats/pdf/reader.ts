@@ -1,5 +1,5 @@
 import type { LoadedDoc } from '../../types';
-import { DEFAULT_FONT, type JNode, defaultSettings, docNode, paragraph, round } from '../common';
+import { DEFAULT_FONT, type JNode, defaultSettings, docNode, paragraph, pushAll, round } from '../common';
 import { bytesToBase64, fontStack, fontUsable, registerPdfFonts } from '../../fonts';
 import type { PdfFontFace } from '../../types';
 import { unicodeFont, unicodeRange } from './embedfont';
@@ -191,7 +191,7 @@ export async function convertPdf(pdf: any, OPS: Record<string, number>, imageSrc
       res = { blocks: [] as JNode[], endY: T };
     }
     if (i > 0) blocks.push({ type: 'pageBreak' });
-    blocks.push(...res.blocks);
+    pushAll(blocks, res.blocks);
     // 그림 읽기가 다 끝난 뒤에 쪽 자원을 푼다 (먼저 풀면 아직 못 읽은 그림이 빈 그림이 된다)
     await Promise.allSettled([...srcCache.values()]);
     page.cleanup?.();

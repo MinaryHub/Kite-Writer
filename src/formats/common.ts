@@ -756,3 +756,12 @@ export function columnGeom(cols: any, contentWidthPx: number): ColGeom | null {
   }
   return { n, x, w, line: c.line || null };
 }
+
+/**
+ * 배열 뒤에 다른 배열을 모두 잇는다. push(...items) 는 항목이 수만 개를 넘으면 함수 인자 한도를 넘어
+ * 'Maximum call stack size exceeded' 로 멈추므로(문단이 아주 많은 큰 문서), 큰 목록은 이것으로 잇는다
+ */
+export function pushAll<T>(to: T[], items: readonly T[]): T[] {
+  for (let i = 0; i < items.length; i++) to.push(items[i]);
+  return to;
+}

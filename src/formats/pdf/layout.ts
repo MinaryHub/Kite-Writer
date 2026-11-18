@@ -1,4 +1,4 @@
-import { type BorderSide, type JMark, type JNode, borderCss, paragraph, round } from '../common';
+import { type BorderSide, type JMark, type JNode, borderCss, paragraph, pushAll, round } from '../common';
 import type { FillRect, Glyph, PageContent, PdfImage, Seg } from './extract';
 
 /**
@@ -623,7 +623,7 @@ function findTables(segsIn: Seg[], page: Box): { tables: TableModel[]; leftover:
     // 가로선 여러 개 + 세로선 1개(바깥 세로선 없는 열린 표)도 표로 본다
     const openTable = vs.length === 1 && hs.length >= 3 && hs.filter((h) => h.b - h.a > (bb.x1 - bb.x0) * 0.8).length >= 2;
     if (hs.length < 2 || (vs.length < 2 && !openTable) || bb.x1 - bb.x0 < 10 || bb.y1 - bb.y0 < 6) {
-      leftover.push(...segs);
+      pushAll(leftover, segs);
       continue;
     }
     // 페이지 테두리: 바깥 선을 빼고 다시
@@ -639,13 +639,13 @@ function findTables(segsIn: Seg[], page: Box): { tables: TableModel[]; leftover:
     const xs = clusterVals([...vs.map((v) => v.pos), bb.x0, bb.x1], 2.2);
     const ys = clusterVals([...hs.map((h) => h.pos), bb.y0, bb.y1], 2.2);
     if (xs.length < 2 || ys.length < 2) {
-      leftover.push(...segs);
+      pushAll(leftover, segs);
       continue;
     }
     const nC = xs.length - 1;
     const nR = ys.length - 1;
     if (nC > 120 || nR > 400) {
-      leftover.push(...segs);
+      pushAll(leftover, segs);
       continue;
     }
     const hSeg = (yi: number, c: number): Seg | null => {

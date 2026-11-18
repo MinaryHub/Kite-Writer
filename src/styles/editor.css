@@ -45,6 +45,12 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* ProseMirror 가 줄 끝 개체 뒤에 넣는 빈 그림(줄 바꿈 자리 표시): 기준선에 앉으면 줄 상자를 기준선까지 늘린다.
+   한글 줄 상자(버팀대)는 줄 간격이 음수일 때 기준선이 줄 아래로 나가므로, 이 빈 그림이 줄을 늘리지 않게 위에 붙인다 */
+.kdoc-content img.ProseMirror-separator {
+  vertical-align: top;
+}
+
 .kdoc-content p,
 .kdoc-content h1,
 .kdoc-content h2,
@@ -617,10 +623,25 @@
   padding-left: max(0px, calc(var(--cm-l, var(--cell-px, 1.8mm)) - 0.75px));
   padding-right: max(0px, calc(var(--cm-r, var(--cell-px, 1.8mm)) - 0.75px));
 }
-/* 세로도 같다: 한글의 줄 높이(칸 높이)에는 테두리 두께가 들지 않는다. 위아래 테두리의 절반씩만큼 안 여백을 줄인다 */
+/* 세로도 같다: 한글의 줄 높이(칸 높이)에는 테두리 두께가 들지 않는다. 위아래 테두리의 절반씩만큼 안 여백을 줄인다
+   (굵은 선은 칸 속성이 그 절반을 --bh-t / --bh-b 로 준다. 없으면 1px 선) */
+@property --bh-t { syntax: '*'; inherits: false; }
+@property --bh-b { syntax: '*'; inherits: false; }
 :is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th):not(tr.pg-push-row > *) {
-  padding-top: max(0px, calc(var(--cm-t, 0.5mm) - 0.5px));
-  padding-bottom: max(0px, calc(var(--cm-b, 0.5mm) - 0.5px));
+  padding-top: max(0px, calc(var(--cm-t, 0.5mm) - var(--bh-t, 0.5px)));
+  padding-bottom: max(0px, calc(var(--cm-b, 0.5mm) - var(--bh-b, 0.5px)));
+}
+/* 안 여백이 테두리 절반보다 작아 위에서 다 줄이지 못한 칸(--cneg-*: 칸 속성이 준다): 첫·끝 블록을 그만큼 테두리 쪽으로 당긴다.
+   값은 칸마다 다시 0 으로 두어 안에 든 표의 칸으로 이어지지 않게 한다 */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th) {
+  --cneg-t: 0px;
+  --cneg-b: 0px;
+}
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th):not(tr.pg-push-row > *) > :first-child {
+  margin-top: var(--cneg-t);
+}
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th):not(tr.pg-push-row > *) > :last-child {
+  margin-bottom: var(--cneg-b);
 }
 /* 줄 높이 고정 문서(PDF)의 그림은 PDF 크기 그대로: 내어쓰기(음수 text-indent)가 있는 줄에서
    max-width: 100% 가 그림을 아주 좁게 줄이는 일이 있다 */
@@ -934,10 +955,12 @@
 }
 
 /* 한글 문서·줄 높이 고정 문서: 글자 조각의 줄 높이가 0 이라 폭이 정해진 탭(인라인 블록)의 높이도 0 이 되어 채움(점선)이
-   보이지 않았다. 탭 상자에 글자 크기만큼의 높이를 주고 기준선 아래로 조금 내려 채움이 글자 아래쪽에 오게 한다 */
+   보이지 않았다. 탭 상자에 글자 크기만큼의 높이를 주어 한글의 글자 상자(기준선 위 0.85em, 아래 0.15em)와 같은 자리에 둔다:
+   기준선을 상자 아래 끝에 두고(overflow: hidden) 0.15em 내린다. 그보다 아래로 나가면 줄 상자가 늘어 칸이 높아진다 */
 :is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics, .workspace.fixed-lines .ProseMirror, .kdoc-content.fixed-lines) .k-tab[style*='width'] {
   height: 1em;
-  vertical-align: -0.2em;
+  overflow: hidden;
+  vertical-align: -0.15em;
 }
 /* 채움은 한글처럼 앞 글과 뒤 글(쪽 번호)에서 조금 떨어져 그린다 (탭 폭은 그대로: 안 여백 안쪽에만 채움) */
 .k-tab[data-leader]:not([data-leader='0'])[style*='width'] {
