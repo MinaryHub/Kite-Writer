@@ -1,8 +1,8 @@
-import { ParaLayout, estimateMissingLines, gapInBox, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
+import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, floatOverhang, gapInBox, isBreakBlock, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
 import { hwpToLatex } from '../../math/hwpEq';
 import * as CFB from 'cfb';
 import { Inflate } from 'pako';
-import type { LoadedDoc, PageSetup } from '../../types';
+import type { Columns, DocSettings, LoadedDoc, PageSetup } from '../../types';
 import {
   type JNode,
   applyNumFormat,
@@ -28,7 +28,8 @@ import {
   type BorderSide,
   FIXED_SPACE,
 } from '../common';
-import { charMarks, paraAttrs, imgFillFit, langFontsOf, gradientCss, type CharPr, type ParaPr, type BorderFill, type Numbering } from '../hwpx/reader';
+import { charMarks, paraAttrs, paraBorderFrom, imgFillFit, langFontsOf, lineColorOf, gradientCss, gradientOf, pageBorderOf, type CharPr, type ParaPr, type BorderFill, type Numbering } from '../hwpx/reader';
+import { type Gradient, type Mat, type ShapeData, type ShapeItem, type ShapeRaw, HWP_ARROW_SIZES, HWP_ARROW_STYLES, HWP_LINE_STYLES, SHADOW_DEFAULT, SHADOW_UNIT_PX, arrowOf, arrowSizeOf, composeMats, matOfHwp, shapeBounds } from '../shape';
 
 /**
  * HWP 5.0 (바이너리, OLE 복합 문서) 읽기.
@@ -55,14 +56,20 @@ const T = {
   CTRL_HEADER: 71,
   LIST_HEADER: 72,
   PAGE_DEF: 73,
+  PAGE_BORDER_FILL: 75,
   SHAPE_COMPONENT: 76,
   TABLE: 77,
+  SHAPE_COMPONENT_LINE: 78,
   SHAPE_COMPONENT_RECTANGLE: 79,
   SHAPE_COMPONENT_ELLIPSE: 80,
+  SHAPE_COMPONENT_ARC: 81,
+  SHAPE_COMPONENT_POLYGON: 82,
+  SHAPE_COMPONENT_CURVE: 83,
   SHAPE_COMPONENT_PICTURE: 85,
   SHAPE_COMPONENT_CONTAINER: 86,
   CTRL_DATA: 87,
   EQEDIT: 88,
+  SHAPE_COMPONENT_TEXTART: 90,
 };
 
 interface Rec {
@@ -164,6 +171,11 @@ function decompress(data: Uint8Array, compressed: boolean): Uint8Array {
 
 /** 그림 채우기 방식 번호 → HWPX 이름 */
 const IMG_FILL_MODES = ['TILE', 'TILE_HORZ_TOP', 'TILE_HORZ_BOTTOM', 'TILE_VERT_LEFT', 'TILE_VERT_RIGHT', 'TOTAL', 'CENTER', 'CENTER_TOP', 'CENTER_BOTTOM', 'LEFT_CENTER', 'LEFT_TOP', 'LEFT_BOTTOM', 'RIGHT_CENTER', 'RIGHT_TOP', 'RIGHT_BOTTOM', 'ZOOM'];
+
+/** 글자 모양의 밑줄·취소선 모양 번호 → 이름 (0 실선은 따로 두지 않는다) */
+const LINE_SHAPE_NAMES = ['', 'DASH', 'DOT', 'DASH_DOT', 'DASH_DOT_DOT', 'LONG_DASH', 'CIRCLE', 'DOUBLE_SLIM', 'SLIM_THICK', 'THICK_SLIM', 'SLIM_THICK_SLIM', 'WAVE', 'DOUBLE_WAVE'];
+/** 글자 겹침의 테두리 모양 번호 → 이름 */
+const COMPOSE_SHAPE_NAMES = ['CHAR', 'SHAPE_CIRCLE', 'SHAPE_REVERSAL_CIRCLE', 'SHAPE_RECTANGLE', 'SHAPE_REVERSAL_RECTANGLE', 'SHAPE_TRIANGLE', 'SHAPE_REVERSAL_TIRANGLE', 'SHAPE_LIGHT', 'SHAPE_RHOMBUS', 'SHAPE_REVERSAL_RHOMBUS', 'SHAPE_ROUNDED_RECTANGLE'];
 
 // ---------- DocInfo ----------
 interface DocInfo {
@@ -279,6 +291,14 @@ function parseDocInfo(recs: Rec[]): DocInfo {
           letterSpacing: spacing || undefined,
           fontWidth: ratio && ratio !== 100 ? ratio : undefined,
           textEffect: effect,
+          // 밑줄 모양(bit 4~7)·색, 취소선 모양(bit 26~29)·색, 강조점(bit 21~24), 글자 위치(언어별 1바이트, 한글 것)
+          ulShape: LINE_SHAPE_NAMES[(attr >>> 4) & 0xf] || null,
+          ulColor: lineColorOf(colorRefToHex(u32(r, 56)), colorRefToHex(color)),
+          ulPos: ulType === 3 ? 'top' : null,
+          stShape: LINE_SHAPE_NAMES[(attr >>> 26) & 0xf] || null,
+          stColor: r.data.length >= 74 ? lineColorOf(colorRefToHex(u32(r, 70)), colorRefToHex(color)) : null,
+          emphasis: ['', 'DOT_ABOVE', 'RING_ABOVE', 'CARON', 'TILDE', 'SIDE', 'COLON'][(attr >>> 21) & 0xf] || null,
+          offset: i8(r, 35) || undefined,
         });
         break;
       }
@@ -317,6 +337,8 @@ function parseDocInfo(recs: Rec[]): DocInfo {
           headingLevel: (a1 >>> 25) & 7,
           pageBreakBefore: false,
           bg: bfId ? info.borderFills[bfId - 1]?.bg || null : null,
+          // 문단 테두리: 테두리/배경 번호 뒤에 글과의 간격(왼·오른·위·아래, 각 2바이트), 속성1 bit 28 이어진 문단과 연결
+          border: paraBorderFrom(bfId ? info.borderFills[bfId - 1] : undefined, [34, 36, 38, 40].map((o) => r.dv.getInt16(o, true)), ((a1 >>> 28) & 1) === 1),
           // 속성1 bit 7: 줄 나눔 기준 한글 단위 (0 어절, 1 글자)
           breakChar: ((a1 >>> 7) & 1) === 1,
         });
@@ -381,10 +403,22 @@ class HwpConverter {
   /** 한글 배치를 옮기는 동안 이어 가는 값 (앞 문단이 끝난 자리, 블록 차례) */
   private layState: LayoutState = { prevEndV: 0, seq: 0 };
 
+  /** 다단: 지금 구역의 다단(한 단이면 null), 지금 다단의 단 수, 지금 문단이 놓인 단, 구역의 첫 문단을 읽을 차례인가 */
+  private secCols: Columns | null = null;
+  private colCount = 1;
+  private col = 0;
+  private secFirst = true;
+  /** 본문 문단의 줄 정보가 형식뿐인지 (다른 프로그램이 쓴 파일) */
+  segStats = new LineSegStats();
+
   /** 구역이 바뀌면 쪽 안 자리 셈을 새로 */
   startSection() {
     this.sectionPage = null;
     this.layState.prevEndV = 0;
+    this.secCols = null;
+    this.colCount = 1;
+    this.col = 0;
+    this.secFirst = true;
   }
 
   /** 지금 구역 용지의 크기와 본문 자리 (px) */
@@ -422,15 +456,16 @@ class HwpConverter {
     return applyNumFormat(def.text, vals, nb.levels.map((l) => l.format)) + ' ';
   }
 
-  convertParagraphs(paras: Rec[], inSub: boolean, bg?: string | null, width?: number): JNode[] {
+  convertParagraphs(paras: Rec[], inSub: boolean, bg?: string | null, width?: number, origin?: { x: number; y: number }): JNode[] {
     const groups: JNode[][] = [];
-    for (const p of paras) if (p.tag === T.PARA_HEADER) groups.push(this.convertPara(p, inSub, bg, width));
+    for (const p of paras) if (p.tag === T.PARA_HEADER) groups.push(this.convertPara(p, inSub, bg, width, origin));
     // 칸·글상자 안: 한글이 놓은 문단 사이가 더 벌어져 있으면(개체가 글을 밀어낸 자리 등) 그만큼 띄운다
     if (inSub) gapInBox(groups);
     return groups.flat();
   }
 
-  convertPara(p: Rec, inSub: boolean, bg?: string | null, width?: number): JNode[] {
+  /** origin: 머리말·꼬리말·바탕쪽 영역의 왼쪽 위가 종이에서 놓인 자리 (종이·쪽 기준 개체의 자리를 셈한다) */
+  convertPara(p: Rec, inSub: boolean, bg?: string | null, width?: number, origin?: { x: number; y: number }): JNode[] {
     const psId = u16(p, 8);
     const breakType = u8(p, 11);
     const pp = this.info.paraPrs[psId];
@@ -442,15 +477,56 @@ class HwpConverter {
     /** 쪽 나누기 없이 한글이 새 쪽에 놓은 문단 */
     let hwpPage = false;
     let vpos: number | null = null;
+    /** 이 문단이 시작한 단 (다단), 단이 바뀌었는가 */
+    let startCol = 0;
+    let newCol = false;
     if (!inSub) {
       // 쪽 세기: 쪽 나누기, 또는 한글이 배치해 둔 줄 정보(첫 줄의 세로 위치)가 되돌아가면 새 쪽 (첫 문단 앞은 세지 않는다)
       const seg = p.children.find((c) => c.tag === T.PARA_LINE_SEG);
       vpos = seg && seg.data.length >= 8 ? i32(seg, 4) : null;
-      hwpPage = this.topParas > 0 && !(breakType & 0x05) && vpos != null && vpos < this.lastVpos;
-      if (this.topParas++ > 0 && (breakType & 0x05 || (vpos != null && vpos < this.lastVpos))) this.page++;
+      if (seg && vpos != null) this.segStats.note(Math.floor(seg.data.length / 36), vpos);
+      const pb = !!(breakType & 0x05);
+      const started = this.topParas++ > 0;
+      const reset = started && !pb && vpos != null && vpos < this.lastVpos;
+      // 다단 정의(cold): 구역의 첫 문단에 있으면 그 구역의 다단, 그 밖에는 '다단 설정 나누기' (여기서부터 새 다단)
+      const first = this.secFirst;
+      this.secFirst = false;
+      const cold = p.children.find((c) => c.tag === T.CTRL_HEADER && ctrlIdOf(c) === 'cold');
+      const cols = cold ? columnsOfCold(cold, this.pageGeom().bodyW / (96 / 25.4)) : null;
+      const colBreak = !!(breakType & 0x08) && started;
+      let zone = false;
+      if (cols && first) {
+        this.colCount = cols.count;
+        this.secCols = cols.count > 1 ? cols : null;
+        if (this.sectionPage && this.secCols) this.sectionPage.columns = this.secCols;
+      } else if (cols) {
+        this.colCount = cols.count;
+        zone = true;
+      }
+      if (pb) this.col = 0;
+      else if (zone) {
+        // 새 다단은 앞 다단 아래에서 시작한다. 세로 위치가 되돌아갔으면 다음 쪽에서 시작한 것이다
+        this.col = 0;
+        hwpPage = reset;
+      } else if (reset || colBreak) {
+        // 세로 위치가 되돌아갔다: 다음 단으로 넘어갔거나, 마지막 단이었으면 다음 쪽이다
+        if (this.col < this.colCount - 1) {
+          this.col++;
+          newCol = true;
+        } else {
+          this.col = 0;
+          hwpPage = true;
+        }
+      }
+      if (started && (pb || hwpPage)) this.page++;
+      startCol = this.col;
+      // 문단 안에서 줄의 세로 위치가 되돌아간 곳마다 단(쪽)이 바뀐다
+      if (seg) for (let o = 36; o + 36 <= seg.data.length; o += 36) if (i32(seg, o + 4) < i32(seg, o - 32)) this.col = this.col < this.colCount - 1 ? this.col + 1 : 0;
       // 다음 문단과는 이 문단 마지막 줄의 세로 위치로 견준다 (여러 줄 문단은 줄 사이에서 쪽이 바뀔 수 있다)
       if (seg && seg.data.length >= 36) this.lastVpos = i32(seg, (Math.floor(seg.data.length / 36) - 1) * 36 + 4);
-      if (breakType & 0x05) blocks.push({ type: 'pageBreak' });
+      if (pb) blocks.push({ type: 'pageBreak' });
+      if (zone) blocks.push({ type: 'columnBreak', attrs: { columns: cols, hwp: true } });
+      else if (colBreak && !pb) blocks.push({ type: 'columnBreak', attrs: { hwp: true } });
     }
 
     const textRec = p.children.find((c) => c.tag === T.PARA_TEXT);
@@ -467,8 +543,11 @@ class HwpConverter {
 
     // 한글이 배치해 둔 줄: [줄 첫 글자 위치, 줄 폭(px)]. 화면에서 같은 자리에서 줄을 바꾸도록 문단에 넘긴다 (hwpMetrics)
     const lineRec = p.children.find((c) => c.tag === T.PARA_LINE_SEG);
-    const lineSegs: [number, number][] = [];
-    if (lineRec) for (let o = 0; o + 36 <= lineRec.data.length; o += 36) lineSegs.push([u32(lineRec, o), hwpToPx(i32(lineRec, o + 28))]);
+    // 줄 정보 36바이트: 글자 위치, 세로 위치, 줄 높이, 글자 높이, 기준선, 줄 간격, 가로 시작 자리, 줄 폭, 속성.
+    // 셋째 값: 가로 시작 자리에서 문단 왼쪽 여백을 뺀 것 — 어울림으로 놓인 개체를 피해 들어간 몫
+    const lineSegs: [number, number, number][] = [];
+    const leftPx = (pp?.indentLeft || 0) * (96 / 72);
+    if (lineRec) for (let o = 0; o + 36 <= lineRec.data.length; o += 36) lineSegs.push([u32(lineRec, o), hwpToPx(i32(lineRec, o + 28)), hwpToPx(i32(lineRec, o + 24)) - leftPx]);
     const lineAt = new Map<number, number>();
     /** 한글이 놓은 줄마다의 세로 자리 (px): [줄 위쪽, 줄 높이, 줄 아래 간격, 기준선]. 줄 정보 36바이트: 글자 위치, 세로 위치, 줄 높이, 글자 높이, 기준선, 줄 간격 … */
     const segV: number[][] = [];
@@ -477,10 +556,12 @@ class HwpConverter {
       inSub,
       width,
       geom: this.pageGeom,
-      hwpPage,
+      // 새 단으로 넘어온 문단도 단 맨 위에서 시작한다
+      hwpPage: hwpPage || newCol,
       pageBreak: !inSub && !!(breakType & 0x05),
       pp: { spaceBefore: pp?.spaceBefore || 0, indentLeft: pp?.indentLeft || 0, indentRight: pp?.indentRight || 0, textIndent: pp?.textIndent || 0 },
       state: this.layState,
+      origin,
     });
 
     let inline: JNode[] = [];
@@ -601,7 +682,9 @@ class HwpConverter {
     const floating = blocks.map(takeFloating).some(Boolean);
     // 줄 자리·쪽 안 위치·블록 차례를 달고 떠 있는 블록을 앞뒤에 놓는다 (hwpLayout)
     const lines: [number, number][] | null =
-      lineSize && lineSegs.length && lineSegs.every((s) => lineAt.has(s[0])) ? lineSegs.map((s) => [lineAt.get(s[0])!, Math.round(s[1] * 100) / 100]) : null;
+      lineSize && lineSegs.length && lineSegs.every((s) => lineAt.has(s[0]))
+        ? lineSegs.map((s) => (s[2] > 2 ? [lineAt.get(s[0])!, Math.round(s[1] * 100) / 100, Math.round(s[2] * 100) / 100] : [lineAt.get(s[0])!, Math.round(s[1] * 100) / 100]) as [number, number])
+        : null;
     const seq0 = this.layState.seq;
     const done = lay.finish(blocks, lines, floating);
     const out = placeCaptions(done.blocks, captions);
@@ -609,11 +692,12 @@ class HwpConverter {
       // 캡션 문단도 본문 블록이다: 차례가 끊기지 않게 캡션까지 넣어 다시 매긴다
       this.layState.seq = seq0;
       for (const b of out) {
-        if (b.type === 'pageBreak') continue;
+        if (isBreakBlock(b)) continue;
         b.attrs = { ...b.attrs, hwpSeq: ++this.layState.seq };
         if (b.attrs.hwpLen == null) b.attrs.hwpLen = jsonContentSize(b);
+        if (startCol > 0) b.attrs.hwpCol = startCol;
       }
-      this.pageMarks.mark(done.lead || out.find((b) => b.type !== 'pageBreak'), vpos, hwpPage);
+      this.pageMarks.mark(done.lead || out.find((b) => !isBreakBlock(b)), vpos, hwpPage);
     }
     return out;
   }
@@ -643,7 +727,10 @@ class HwpConverter {
         this.inHF = true;
         let blocks: JNode[];
         try {
-          blocks = this.convertParagraphs(ctrl.children, true);
+          // 영역의 종이 안 자리: 머리말은 위쪽 여백 아래, 꼬리말은 본문 아래 (종이·쪽 기준으로 놓인 개체의 자리를 셈한다)
+          const g = this.pageGeom();
+          const pg = this.sectionPage || this.settings.page;
+          blocks = this.convertParagraphs(ctrl.children, true, undefined, g.bodyW, { x: g.ml, y: id === 'head' ? pg.marginTop * (96 / 25.4) : g.mt + g.bodyH });
         } finally {
           this.inHF = false;
         }
@@ -677,6 +764,28 @@ class HwpConverter {
         this.linkHref = cmd.split(';')[0].replace(/\\:/g, ':') || null;
         return [];
       }
+      case 'tdut': {
+        // 덧말: 본말, 덧말, 위치(0 위, 1 아래) …
+        const main = wstr(ctrl, 4);
+        const sub = wstr(ctrl, main.end);
+        const marks = charMarks(this.charPr(shapeId), this.linkHref);
+        if (sub.s) marks.push({ type: 'ruby', attrs: { text: sub.s, pos: u32(ctrl, sub.end) === 1 ? 'bottom' : 'top' } });
+        const t = textNode(main.s || sub.s, marks);
+        if (t) inline.push(t);
+        return [];
+      }
+      case 'tcps': {
+        // 글자 겹침: 겹칠 글자, 테두리 모양(1), 안 글자 크기(1), 펼침(1), 글자 모양 수(1)와 번호들
+        const text = wstr(ctrl, 4);
+        if (!text.s) return [];
+        const shape = COMPOSE_SHAPE_NAMES[u8(ctrl, text.end)] || 'SHAPE_CIRCLE';
+        const n = u8(ctrl, text.end + 3);
+        const cid = n > 0 && ctrl.data.length >= text.end + 8 ? u32(ctrl, text.end + 4) : 0xffffffff;
+        const cp = cid !== 0xffffffff && this.info.charPrs[cid] ? this.info.charPrs[cid] : this.charPr(shapeId);
+        const t = textNode(text.s, [...charMarks(cp, this.linkHref), { type: 'compose', attrs: { shape } }]);
+        if (t) inline.push(t);
+        return [];
+      }
       case 'eqed': {
         const eq = ctrl.children.find((c) => c.tag === T.EQEDIT);
         const script = eq ? wstr(eq, 4).s : '';
@@ -705,7 +814,10 @@ class HwpConverter {
     if (ol) this.outlineNumId = String(ol);
     const pd = ctrl.children.find((c) => c.tag === T.PAGE_DEF);
     if (!pd) return;
+    // 다단은 구역마다 따로 정한다 (구역의 첫 문단에 든 단 정의)
     const pg: PageSetup = { ...this.settings.page };
+    if (this.secCols) pg.columns = this.secCols;
+    else delete pg.columns;
     pg.width = round(hwpToMm(u32(pd, 0)), 1);
     pg.height = round(hwpToMm(u32(pd, 4)), 1);
     pg.marginLeft = round(hwpToMm(u32(pd, 8)), 1);
@@ -717,11 +829,58 @@ class HwpConverter {
     pg.gutter = round(hwpToMm(u32(pd, 32)), 1);
     pg.landscape = (u32(pd, 36) & 1) === 1;
     // 첫 구역의 용지가 문서 용지, 다음 구역부터는 구역 나누기에 담는다 (readHwp)
+    const firstSec = !this.settingsSet;
     if (!this.settingsSet) {
       this.settingsSet = true;
       this.settings.page = pg;
     }
     if (!this.sectionPage) this.sectionPage = pg;
+    if (!firstSec) return;
+    // 구역 속성: bit 2 첫 쪽에 바탕쪽 감춤, 3 테두리 감춤, 4 배경 감춤, 8 첫 쪽에만 테두리, 9 첫 쪽에만 배경
+    const sp = u32(ctrl, 4);
+    // 쪽 테두리/배경 (양쪽·짝수·홀수 차례로 세 개: 양쪽 것을 쓴다). 속성: bit 0 위치 기준, 1 머리말 포함, 2 꼬리말 포함, 3~4 채울 영역
+    const pbf = ctrl.children.find((c) => c.tag === T.PAGE_BORDER_FILL);
+    if (pbf && pbf.data.length >= 14) {
+      const a = u32(pbf, 0);
+      const bf = this.info.borderFills[u16(pbf, 12) - 1];
+      const image = bf?.img ? this.images.get(+bf.img.id) || null : null;
+      const pb = pageBorderOf(bf, {
+        paperBasis: (a & 1) === 1,
+        offsetHwp: [u16(pbf, 4), u16(pbf, 6), u16(pbf, 8), u16(pbf, 10)],
+        headerInside: !!(a & 2),
+        footerInside: !!(a & 4),
+        fillArea: ['PAPER', 'PAGE', 'BORDER'][(a >>> 3) & 3] || 'PAPER',
+        image: image && /^data:image\//.test(image) ? image : null,
+      });
+      if (pb) {
+        if (sp & (1 << 8)) pb.borderOn = 'first';
+        else if (sp & (1 << 3)) pb.borderOn = 'notFirst';
+        if (sp & (1 << 9)) pb.fillOn = 'first';
+        else if (sp & (1 << 4)) pb.fillOn = 'notFirst';
+        this.settings.pageBorder = pb;
+      }
+    }
+    if (sp & (1 << 2)) this.settings.hideFirst = { ...this.settings.hideFirst, masterPage: true };
+    // 바탕쪽: 구역 정의 아래의 문단 목록들 (양쪽·짝수·홀수 차례)
+    const masters: NonNullable<DocSettings['masterPages']> = [];
+    let cur: Rec[] | null = null;
+    const lists: Rec[][] = [];
+    for (const c of ctrl.children) {
+      if (c.tag === T.LIST_HEADER) lists.push((cur = []));
+      else if (c.tag === T.PARA_HEADER && cur) cur.push(c);
+    }
+    const g = this.pageGeom();
+    lists.slice(0, 3).forEach((paras, i) => {
+      if (!paras.some((p) => paraHasContent(p))) return;
+      this.inHF = true;
+      try {
+        const content = this.convertParagraphs(paras, true, undefined, g.bodyW, { x: g.ml, y: g.mt }).map(stripLayoutAttrs);
+        if (content.length) masters.push({ content: content as any, type: (['both', 'even', 'odd'] as const)[i] });
+      } finally {
+        this.inHF = false;
+      }
+    });
+    if (masters.length) this.settings.masterPages = masters;
   }
 
   /** 머리말/각주 등 하위 문단의 텍스트 */
@@ -781,8 +940,11 @@ class HwpConverter {
       if (rs === 1) rowH[row] = Math.max(rowH[row] || 0, hwpToPx(u32(lh, 20) - CELL_VMARGIN_HWP));
       const bfId = u16(lh, 32);
       const bf = bfId ? this.info.borderFills[bfId - 1] : undefined;
-      const cellVm = hwpToPx(u16(lh, 28) + u16(lh, 30));
-      let content = this.convertParagraphs(cur.paras, true, null, w - hwpToPx(u16(lh, 24) + u16(lh, 26))).filter((n) => n.type !== 'pageBreak');
+      // 칸의 안 여백: '칸 여백 지정'(속성 뒤 2바이트의 bit 0)이 켜진 칸만 제 값을 쓰고, 아니면 표의 기본 안 여백을 쓴다
+      const ownMargin = (u16(lh, 6) & 1) === 1;
+      const cmv = ownMargin || !tbl ? [u16(lh, 24), u16(lh, 26), u16(lh, 28), u16(lh, 30)] : [u16(tbl, 10), u16(tbl, 12), u16(tbl, 14), u16(tbl, 16)];
+      const cellVm = hwpToPx(cmv[2] + cmv[3]);
+      let content = this.convertParagraphs(cur.paras, true, null, w - hwpToPx(cmv[0] + cmv[1])).filter((n) => n.type !== 'pageBreak');
       if (!content.length) content = [paragraph()];
       // 적힌 칸 높이가 글보다 작으면 한글은 칸 높이를 내용으로 새로 셈한다 (마지막 줄 간격·문단 아래 간격 포함)
       const need = markCellTrail(content, hwpToPx(u32(lh, 20)), cellVm);
@@ -796,7 +958,8 @@ class HwpConverter {
       const fillSrc = bf?.img ? this.images.get(+bf.img.id) : null;
       if (fillSrc && bf?.img) attrs.bgImages = [{ src: fillSrc, fit: imgFillFit(bf.img.mode) }];
       // 칸 자체 안 여백 (속성 뒤 2바이트의 bit 0 이 켜진 칸만; 아니면 표의 기본 여백)
-      if (u16(lh, 6) & 1) attrs.margins = [u16(lh, 24), u16(lh, 26), u16(lh, 28), u16(lh, 30)].map((v) => Math.round(hwpToPx(v) * 10) / 10);
+      // (표의 기본 안 여백이 위·아래 0.5mm 가 아닐 때도 넣는다: 화면의 기본 위·아래 여백은 0.5mm)
+      if (ownMargin || Math.abs(cmv[2] - 141) > 2 || Math.abs(cmv[3] - 141) > 2) attrs.margins = cmv.map((v) => Math.round(hwpToPx(v) * 10) / 10);
       if (va === 0) attrs.verticalAlign = 'top';
       else if (va === 2) attrs.verticalAlign = 'bottom';
       // 제목 칸(속성 뒤 2바이트의 bit 2)이고 표가 '제목 줄 자동 반복'(표 속성 bit 2)이면 제목 칸으로: 쪽이 바뀌면 되풀이된다
@@ -831,6 +994,12 @@ class HwpConverter {
     solveSpanRows(rowH, spans, VM);
     const t = assembleTable(cells, nRowsDecl, nColsDecl, hwpToPx(u32(ctrl, 16)), rowH);
     if (tbl) t.attrs = { cellPadding: Math.round(hwpToPx((u16(tbl, 10) + u16(tbl, 12)) / 2) * 10) / 10 };
+    // 쪽 경계에서 나눔 (표 속성 bit 0~1): 0 나누지 않음, 1 셀 단위로 나눔(줄을 통째로 넘김), 2 나눔
+    if (tbl) {
+      const brk = u32(tbl, 0) & 3;
+      if (brk === 1) t.attrs = { ...t.attrs, pageSplit: 'row' };
+      else if (brk === 0) t.attrs = { ...t.attrs, pageSplit: 'none' };
+    }
     // 글자처럼 취급(개체 속성 bit 0): 쪽에서 나뉘지 않고 문단 정렬을 따른다. 저장할 때 되돌린다
     const objAttr = u32(ctrl, 4);
     if (objAttr & 1) t.attrs = { ...t.attrs, inline: true };
@@ -861,12 +1030,12 @@ class HwpConverter {
     let rectRec: Rec | null = null;
     let ellipse = false;
     /** 개체 바로 아래의 LIST_HEADER 는 캡션 (글상자의 문단 목록은 SHAPE_COMPONENT 아래에 있다) */
-    let cap: { top: boolean; paras: Rec[] } | null = null;
+    let cap: { top: boolean; gap: number; paras: Rec[] } | null = null;
     const visit = (r: Rec) => {
       let curText: { header: Rec; paras: Rec[]; shape: Rec } | null = null;
       for (const c of r.children) {
         if (r === ctrl && c.tag === T.LIST_HEADER) {
-          cap = { top: isCaptionTop(c), paras: [] };
+          cap = { top: isCaptionTop(c), gap: c.data.length >= 18 ? hwpToPx(u16(c, 16)) : 11.3, paras: [] };
           continue;
         }
         if (r === ctrl && c.tag === T.PARA_HEADER && cap) {
@@ -886,27 +1055,54 @@ class HwpConverter {
       }
     };
     visit(ctrl);
-    const capList = cap as { top: boolean; paras: Rec[] } | null;
-    if (capList && capList.paras.length && captions) (capList.top ? captions.before : captions.after).push(...this.convertParagraphs(capList.paras, true));
-    if (pics.length === 1 && !texts.length) {
+    const capList = cap as { top: boolean; gap: number; paras: Rec[] } | null;
+    /** 캡션: 떠 있는 개체는 개체 아래(위)에 함께 띄울 글상자를, 흐름 안의 개체는 문단 앞뒤에 놓는다 */
+    const capFloats: JNode[] = [];
+    if (capList && capList.paras.length) {
+      const capBlocks = this.convertParagraphs(capList.paras, true);
+      if (fp && capBlocks.length) {
+        // 캡션 글의 높이: 마지막 문단의 마지막 줄 아래까지 (한글이 적어 둔 줄 자리)
+        const lastSeg = capList.paras[capList.paras.length - 1].children.find((c) => c.tag === T.PARA_LINE_SEG);
+        const lo = lastSeg && lastSeg.data.length >= 36 ? (Math.floor(lastSeg.data.length / 36) - 1) * 36 : -1;
+        const capH = lastSeg && lo >= 0 ? hwpToPx(i32(lastSeg, lo + 4) + i32(lastSeg, lo + 8)) : 16;
+        const y = capList.top ? fp.y - capList.gap - capH : fp.y + h + capList.gap;
+        capFloats.push({ type: 'textBox', attrs: { width: w || null, height: null, padding: [0, 0, 0, 0], float: { x: fp.x, y: Math.round(y * 100) / 100, ...(fp.behind ? { behind: true } : {}), ...(fp.py != null ? { py: Math.round((fp.py + y - fp.y) * 100) / 100 } : {}) } }, content: capBlocks });
+      } else if (captions) (capList.top ? captions.before : captions.after).push(...capBlocks);
+    }
+    const top = ctrl.children.find((c) => c.tag === T.SHAPE_COMPONENT) || null;
+    const topKind = top ? ctrlIdOf(top) : '';
+    if (pics.length === 1 && !texts.length && (topKind === '$pic' || !top)) {
       const pic = this.picture(pics[0], w, h);
       // 글자처럼 취급하지 않는(떠 있는) 그림: 한글의 줄 배치에 들지 않는다 (hasFloating)
       // 자리를 아는 떠 있는 그림은 그 자리에 띄운다 (x 는 문단 상자 왼쪽 기준). 모르면 예전처럼 줄 안에
       if (fp && lay) pic.attrs = { ...pic.attrs, float: { ...fp, x: Math.round((fp.x - lay.paraLeft()) * 100) / 100 } };
       else if (!(u32(ctrl, 4) & 1)) pic.attrs = { ...pic.attrs, [FLOATING]: true };
       inline.push(pic);
-      return [];
+      return capFloats;
     }
-    const blocks: JNode[] = [];
+    // 글상자로 읽을 것: 글이 든, 돌리지 않은 사각형·타원 하나. 그 밖의 도형(선·다각형·곡선·호·묶음, 글 없는 도형)은 그려서 보여 준다
+    const mt = top ? shapeMatrixOf(top) : null;
+    const plain = !!mt && Math.abs(mt.m[1]) < 1e-4 && Math.abs(mt.m[2]) < 1e-4 && mt.m[0] > 0 && mt.m[3] > 0;
+    const asTextBox = (topKind === '$rec' || topKind === '$ell') && texts.length === 1 && texts[0].shape === top && plain && texts[0].paras.some((p) => paraHasContent(p));
+    if (top && !asTextBox) {
+      const node = this.shapeNode(top, w, h);
+      if (node) {
+        if (fp && lay) node.attrs = { ...node.attrs, float: { ...fp, x: Math.round((fp.x - lay.paraLeft()) * 100) / 100 } };
+        else if (!(u32(ctrl, 4) & 1)) node.attrs = { ...node.attrs, [FLOATING]: true };
+        inline.push(node);
+        return capFloats;
+      }
+    }
+    const blocks: JNode[] = [...capFloats];
     if (texts.length) {
       // 글상자: 도형(또는 그림을 배경으로 한 상자) 안의 문단들
-      const st = shapeRec && !pics.length ? shapeStyle(shapeRec) : { borderColor: null, borderWidth: null, bg: null };
+      const st = shapeRec && !pics.length ? shapeStyle(shapeRec) : { borderColor: null, borderWidth: null, bg: null, gradient: null, dash: null };
       const bgImage = pics.length === 1 ? this.pictureSrc(pics[0]) : null;
       let radius: string | null = null;
       if (ellipse) radius = '50%';
       else if (rectRec) {
         const ratio = u8(rectRec, 0);
-        if (ratio > 0 && w && h) radius = `${Math.round((Math.min(w, h) * Math.min(50, ratio)) / 200)}px`;
+        if (ratio > 0 && w && h) radius = `${Math.round((Math.min(w, h) * Math.min(50, ratio)) / 100)}px`;
       }
       // 묶음(그룹) 개체 안에 글상자가 여럿이면(예: 제목 탭 + 본문) 한 상자에 차례로 넣는다.
       // 여백은 문단이 가장 많은 글상자(본문)의 것을 쓴다.
@@ -916,8 +1112,9 @@ class HwpConverter {
       const padding = hd.data.length >= 16 ? [u16(hd, 12), u16(hd, 10), u16(hd, 14), u16(hd, 8)].map((v) => Math.round(hwpToPx(v))) : null;
       const content: JNode[] = [];
       const groupW = u32(ctrl, 16);
+      const innerW = w && padding ? w - padding[1] - padding[3] : undefined;
       for (const t of texts) {
-        const paras = this.convertParagraphs(t.paras, true);
+        const paras = this.convertParagraphs(t.paras, true, undefined, innerW);
         // 묶음 안의 작은 글상자(제목 탭 등)는 그 가로 자리만큼 양쪽 여백을 줘서 원래 자리에 글이 오게 한다
         if (t !== main && texts.length > 1 && t.shape.tag === T.SHAPE_COMPONENT) {
           const base = shapeBase(t.shape);
@@ -931,9 +1128,26 @@ class HwpConverter {
         }
         content.push(...paras);
       }
+      // 글의 세로 맞춤: LIST_HEADER 의 속성(문단 수 4바이트 뒤) bit 5~6 (0 위, 1 가운데, 2 아래)
+      const va = hd.data.length >= 8 ? (u32(hd, 4) >>> 5) & 3 : 0;
+      // 세로 맞춤은 떠 있는 개체까지 넣은 내용 높이로: 글 아래로 나온 개체만큼 아래 안 여백을 늘린다
+      const over = va === 1 || va === 2 ? floatOverhang(content) : 0;
       blocks.push({
         type: 'textBox',
-        attrs: { width: w || null, height: h || null, bg: st.bg, bgImage, borderColor: st.borderColor, borderWidth: st.borderWidth, radius, padding, ...(fp ? { float: fp } : {}) },
+        attrs: {
+          width: w || null,
+          height: h || null,
+          bg: st.bg,
+          bgImage,
+          bgGradient: st.gradient,
+          borderColor: st.borderColor,
+          borderWidth: st.borderWidth,
+          borderDash: st.dash,
+          radius,
+          padding: over > 0 ? (Array.isArray(padding) ? padding : [4, 4, 4, 4]).map((v: number, i: number) => (i === 2 ? v + over : v)) : padding,
+          ...(va === 1 ? { valign: 'middle' } : va === 2 ? { valign: 'bottom' } : {}),
+          ...(fp ? { float: fp } : {}),
+        },
         content: content.length ? content : [paragraph()],
       });
       if (pics.length > 1) for (const p of pics) blocks.push(paragraph({ textAlign: 'center' }, [this.picture(p, w, h)]));
@@ -946,6 +1160,158 @@ class HwpConverter {
     }
     for (const t of texts) blocks.push(...this.convertParagraphs(t.paras, true));
     return blocks;
+  }
+
+  /**
+   * 그리기 개체 요소(SHAPE_COMPONENT)를 도형 항목으로 (묶음이면 자식들까지). 자식의 행렬에는 묶음의 변환이 이미 들어 있어
+   * 모두 최상위 개체의 틀 기준이다
+   */
+  private gsoItems(sc: Rec, out: ShapeItem[], depth = 0) {
+    if (depth > 16) return;
+    const kind = ctrlIdOf(sc);
+    if (kind === '$con') {
+      for (const c of sc.children) if (c.tag === T.SHAPE_COMPONENT) this.gsoItems(c, out, depth + 1);
+      return;
+    }
+    const mt = shapeMatrixOf(sc);
+    if (!mt) return;
+    const { m, w, h } = mt;
+    const look = shapeLook(sc, this.images);
+    const raw: ShapeRaw = { ...mt.raw, ...(look.lw != null ? { lw: look.lw } : {}) };
+    delete look.lw;
+    const base = { m, w, h, raw };
+    const rec = (tag: number) => sc.children.find((c) => c.tag === tag) || null;
+    const px = (r: Rec, o: number) => hwpToPx(i32(r, o));
+    switch (kind) {
+      case '$pic': {
+        const p = rec(T.SHAPE_COMPONENT_PICTURE);
+        if (!p) return;
+        const pic = this.picture(p, 0, 0);
+        const src = pic.attrs?.src;
+        if (typeof src !== 'string' || !/^data:image\/(png|jpeg|gif|webp|bmp)/.test(src)) return;
+        out.push({ k: 'img', ...base, src, crop: pic.attrs?.crop || null });
+        return;
+      }
+      case '$lin':
+      case '$col': {
+        const r = rec(T.SHAPE_COMPONENT_LINE);
+        if (!r || r.data.length < 16) return;
+        const a = [px(r, 0), px(r, 4)];
+        const b = [px(r, 8), px(r, 12)];
+        if (kind === '$col') {
+          // 개체 연결선: 종류(4: 0~2 직선, 3~5 꺾인 선, 6~8 곡선; 나머지 3 = 화살표 없음·한쪽·양쪽), 이어진 개체와 그 변, 조절점
+          const type = u32(r, 16);
+          const cnt = Math.min(64, u32(r, 36));
+          const cps: number[] = [];
+          for (let k = 0; k < cnt && 40 + k * 10 + 8 <= r.data.length; k++) cps.push(px(r, 40 + k * 10), px(r, 44 + k * 10));
+          const lineOnly = { ...look, fc: null, fg: null, fi: null };
+          if (cps.length > 4) out.push({ k: 'poly', ...base, ...lineOnly, p: cps });
+          else if (type >= 3 && type <= 5) {
+            // 꺾인 연결선: 이어진 변(오른쪽·왼쪽이면 가로로, 위·아래면 세로로 나간다)에 맞춰 직각으로 꺾는다
+            const sH = u32(r, 24) % 2 === 1;
+            const eH = u32(r, 32) % 2 === 1;
+            const mid = sH && eH ? [(a[0] + b[0]) / 2, a[1], (a[0] + b[0]) / 2, b[1]] : !sH && !eH ? [a[0], (a[1] + b[1]) / 2, b[0], (a[1] + b[1]) / 2] : sH ? [b[0], a[1]] : [a[0], b[1]];
+            out.push({ k: 'poly', ...base, ...lineOnly, p: [...a, ...mid, ...b] });
+          } else out.push({ k: 'line', ...base, ...look, p: [...a, ...b] });
+          const it = out[out.length - 1];
+          if (type % 3 >= 1 && !it.ts) Object.assign(it, { ts: 'ARROW', tf: true, tz: [1, 1] });
+          if (type % 3 === 2 && !it.hs) Object.assign(it, { hs: 'ARROW', hf: true, hz: [1, 1] });
+        } else out.push({ k: 'line', ...base, ...look, p: [...a, ...b] });
+        break;
+      }
+      case '$rec': {
+        const r = rec(T.SHAPE_COMPONENT_RECTANGLE);
+        const ratio = r ? u8(r, 0) : 0;
+        const c = r && r.data.length >= 33 ? [0, 1, 2, 3].map((k) => [px(r, 1 + k * 8), px(r, 5 + k * 8)]) : null;
+        // 꼭짓점이 상자 모서리와 다르면(기울인 사각형) 다각형으로
+        const boxLike = !c || (Math.abs(c[0][0]) < 0.5 && Math.abs(c[0][1]) < 0.5 && Math.abs(c[2][0] - w) < 0.5 && Math.abs(c[2][1] - h) < 0.5 && Math.abs(c[1][1]) < 0.5 && Math.abs(c[3][0]) < 0.5);
+        if (boxLike) out.push({ k: 'rect', ...base, ...look, ...(ratio > 0 ? { r: Math.min(50, ratio) } : {}) });
+        else out.push({ k: 'poly', ...base, ...look, p: c!.flat(), z: true });
+        break;
+      }
+      case '$ell':
+        out.push({ k: 'ellipse', ...base, ...look });
+        break;
+      case '$arc': {
+        const r = rec(T.SHAPE_COMPONENT_ARC);
+        if (!r || r.data.length < 25) return;
+        const t = u8(r, 0);
+        out.push({ k: 'arc', ...base, ...look, at: t === 1 ? 'PIE' : t === 2 ? 'CHORD' : 'NORMAL', p: [px(r, 1), px(r, 5), px(r, 9), px(r, 13), px(r, 17), px(r, 21)] });
+        break;
+      }
+      case '$pol': {
+        const r = rec(T.SHAPE_COMPONENT_POLYGON);
+        if (!r) return;
+        const n = Math.min(10000, i32(r, 0));
+        const p: number[] = [];
+        for (let k = 0; k < n && 4 + k * 8 + 8 <= r.data.length; k++) p.push(px(r, 4 + k * 8), px(r, 8 + k * 8));
+        if (p.length < 4) return;
+        const closed = p.length > 4 && Math.abs(p[0] - p[p.length - 2]) < 0.01 && Math.abs(p[1] - p[p.length - 1]) < 0.01;
+        out.push({ k: 'poly', ...base, ...look, p, ...(closed ? { z: true } : {}) });
+        break;
+      }
+      case '$cur': {
+        const r = rec(T.SHAPE_COMPONENT_CURVE);
+        if (!r) return;
+        const n = Math.min(10000, i32(r, 0));
+        const p: number[] = [];
+        for (let k = 0; k < n && 4 + k * 8 + 8 <= r.data.length; k++) p.push(px(r, 4 + k * 8), px(r, 8 + k * 8));
+        if (p.length < 4) return;
+        // 구간 종류 (점 수 - 1 개): 0 직선, 1 곡선
+        let seg = '';
+        const so = 4 + n * 8;
+        for (let k = 0; k < n - 1; k++) seg += so + k < r.data.length && u8(r, so + k) === 0 ? 'L' : 'C';
+        out.push({ k: 'curve', ...base, ...look, p, seg });
+        break;
+      }
+      case '$tat': {
+        const r = rec(T.SHAPE_COMPONENT_TEXTART);
+        if (!r || r.data.length < 36) return;
+        const text = wstr(r, 32);
+        const font = wstr(r, text.end);
+        if (!text.s.trim()) return;
+        out.push({ k: 'art', ...base, text: text.s.replace(/\r\n?/g, '\n'), font: font.s || undefined, fc: look.fc || '#000000', sc: look.sc });
+        return;
+      }
+      default:
+        return;
+    }
+    // 도형 안의 글 (화면 전용: 도형의 개체 좌표 상자에 놓는다)
+    const li = sc.children.findIndex((c) => c.tag === T.LIST_HEADER);
+    if (li >= 0) {
+      const hd = sc.children[li];
+      const paras = sc.children.slice(li + 1).filter((c) => c.tag === T.PARA_HEADER);
+      if (paras.some((p) => paraHasContent(p))) {
+        // LIST_HEADER(글상자): 문단 수(2) 속성(4) 예비(2) 왼쪽·오른쪽·위·아래 여백(각 2)
+        const pad = hd.data.length >= 16 ? [u16(hd, 12), u16(hd, 10), u16(hd, 14), u16(hd, 8)].map((v) => Math.round(hwpToPx(v) * 100) / 100) : [3.77, 3.77, 3.77, 3.77];
+        const content = this.convertParagraphs(paras, true, undefined, w - pad[1] - pad[3]).map(stripLayoutAttrs);
+        const va = hd.data.length >= 8 ? (u32(hd, 4) >>> 5) & 3 : 0;
+        if (content.length) out.push({ k: 'text', m, w, h, content, pad, ...(va === 1 ? { va: 'middle' as const } : va === 2 ? { va: 'bottom' as const } : {}) });
+      }
+    }
+  }
+
+  /** 그리기 개체(묶음 포함) → 도형 노드 (틀 크기 w×h px). 그릴 것이 없으면 null */
+  private shapeNode(top: Rec, w: number, h: number): JNode | null {
+    const items: ShapeItem[] = [];
+    try {
+      this.gsoItems(top, items);
+    } catch {
+      return null;
+    }
+    if (!items.length) return null;
+    const d: ShapeData = { items };
+    if (ctrlIdOf(top) === '$con') {
+      d.group = true;
+      const mt = shapeMatrixOf(top);
+      if (mt) d.raw = mt.raw;
+    }
+    if (!(w > 0) || !(h > 0)) {
+      const b = shapeBounds(d);
+      if (!(w > 0)) w = b ? Math.max(1, Math.round(b.x1)) : 1;
+      if (!(h > 0)) h = b ? Math.max(1, Math.round(b.y1)) : 1;
+    }
+    return { type: 'shape', attrs: { width: w, height: h, d } };
   }
 
   /** 그림 개체의 데이터 URL (없으면 null) */
@@ -966,6 +1332,27 @@ class HwpConverter {
     if (ow > 0 && oh > 0) crop = normCrop(i32(p, 48) / oh, 1 - i32(p, 52) / ow, 1 - i32(p, 56) / oh, i32(p, 44) / ow);
     return { type: 'image', attrs: { src, width: w || null, height: h || null, crop } };
   }
+}
+
+/** 문단에 글자나 개체가 있는가 (문단 끝 표시만 있는 빈 문단이 아닌가) */
+function paraHasContent(p: Rec): boolean {
+  if (p.children.some((c) => c.tag === T.CTRL_HEADER)) return true;
+  const t = p.children.find((c) => c.tag === T.PARA_TEXT);
+  if (!t) return false;
+  for (let i = 0; i + 2 <= t.data.length; i += 2) if (u16(t, i) !== 13) return true;
+  return false;
+}
+
+/** 편집기 밖에서 그리는 블록(도형 안의 글)용 사본: 쪽 나누기·줄 바꿈이 쓰는 배치 정보는 빼고 한 줄 문단의 줄 높이만 남긴다 */
+function stripLayoutAttrs(n: JNode): JNode {
+  const out: JNode = { ...n };
+  if (n.attrs) {
+    const a: Record<string, any> = {};
+    for (const k of Object.keys(n.attrs)) if (!/^hwp(Lines|Len|Top|Seq|Page)$/.test(k)) a[k] = n.attrs[k];
+    out.attrs = a;
+  }
+  if (n.content) out.content = n.content.map(stripLayoutAttrs);
+  return out;
 }
 
 /**
@@ -993,6 +1380,8 @@ function objPosOf(ctrl: Rec): ObjPos {
     h: px(20, false),
     omT: m(32),
     omB: m(34),
+    omL: m(28),
+    omR: m(30),
   };
 }
 
@@ -1054,7 +1443,7 @@ function fitLinesToCell(content: JNode[], innerPx: number) {
     const lines = p.attrs?.hwpLines as [number, number][] | undefined;
     if (p.type !== 'paragraph' || !lines) continue;
     const max = innerPx - ((+p.attrs!.indentLeft || 0) + (+p.attrs!.indentRight || 0)) * (96 / 72);
-    if (max > 0) p.attrs!.hwpLines = lines.map(([a, lw]) => [a, Math.min(lw, Math.round(max * 100) / 100)]);
+    if (max > 0) p.attrs!.hwpLines = lines.map(([a, lw, x]: number[]) => (x ? [a, Math.min(lw, Math.round(max * 100) / 100), x] : [a, Math.min(lw, Math.round(max * 100) / 100)]));
   }
 }
 
@@ -1266,9 +1655,10 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
     if (brk && conv.sectionPage) brk.attrs = { sectionPage: conv.sectionPage };
   }
   while (blocks.length && blocks[0].type === 'pageBreak') blocks.shift();
-  const content = docNode(blocks);
+  // 줄 정보가 형식뿐인 문서(한글이 배치하지 않은 파일)는 그 값을 따르지 않고 자연 배치로 흐르게 한다
+  const content = docNode(conv.segStats.fake ? blocks.map(dropHwpLayout) : blocks);
   // 한글이 줄 정보를 적지 않은 문단의 줄 높이를 같은 모양의 다른 문단에서 빌린다
-  estimateMissingLines(content);
+  if (!conv.segStats.fake) estimateMissingLines(content);
   return { content, settings: conv.settings, meta: {}, warnings: [...new Set(warnings)].slice(0, 20) };
 }
 
@@ -1276,33 +1666,186 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
  * SHAPE_COMPONENT(그리기 개체 공통)에서 선·채우기 정보.
  * 공통 부분(id 2개, 위치, 크기, 뒤집기, 회전, 렌더링 행렬 cnt 개) 뒤에 선 정보(색 4, 굵기 4, 속성 4)와 채우기 정보(종류 4, 색 4 …)가 온다.
  */
+/**
+ * 단 정의(cold) → 다단 값. ctrl ID 뒤: 속성 u16 (bit 2~9 단 수, bit 12 너비 같게), 너비가 같으면 단 사이 간격 u16 · 속성2 u16,
+ * 다르면 속성2 u16 뒤에 단마다 너비 u16 · 간격 u16 (본문 폭에 대한 비율), 이어서 구분선 종류 u8 · 굵기 u8 · 색 u32
+ */
+function columnsOfCold(r: Rec, bodyMm: number): Columns {
+  const a = u16(r, 4);
+  const n = Math.max(1, Math.min(20, (a >>> 2) & 0xff));
+  const same = !!(a & 0x1000);
+  if (n < 2) return { count: 1, gap: 0 };
+  const out: Columns = { count: n, gap: 0 };
+  let o = 6;
+  if (same) {
+    out.gap = round(hwpToMm(u16(r, o)), 2);
+    o += 4;
+  } else {
+    o += 2;
+    const ws: number[] = [];
+    const gs: number[] = [];
+    for (let i = 0; i < n && o + 4 <= r.data.length; i++, o += 4) {
+      ws.push(u16(r, o));
+      gs.push(u16(r, o + 2));
+    }
+    const total = ws.reduce((x, y) => x + y, 0) + gs.slice(0, n - 1).reduce((x, y) => x + y, 0);
+    if (ws.length === n && total > 0 && ws.every((w) => w > 0)) {
+      const k = bodyMm / total;
+      out.widths = ws.map((w) => round(w * k, 2));
+      out.gaps = gs.map((g, i) => (i < n - 1 ? round(g * k, 2) : 0));
+    }
+  }
+  if (o + 6 <= r.data.length) {
+    const type = u8(r, o);
+    if (type > 0) out.line = { w: HWP_BORDER_WIDTHS[u8(r, o + 1)] ?? 0.12, c: colorRefToHex(u32(r, o + 2)), s: hwpBorderStyle(type) };
+  }
+  return out;
+}
+
 /** SHAPE_COMPONENT 의 공통 정보 시작 위치: 최상위 개체는 ctrl ID 를 두 번 쓰고(8), 묶음 안의 개체는 한 번 쓴다(4) */
 function shapeBase(sc: Rec): number {
   return u32(sc, 0) === u32(sc, 4) ? 8 : 4;
 }
 
-function shapeStyle(sc: Rec): { borderColor: string | null; borderWidth: number | null; bg: string | null } {
-  const none = { borderColor: null, borderWidth: null, bg: null };
+/** SHAPE_COMPONENT 의 렌더링 행렬 뒤 (선 정보가 시작하는 곳). 행렬 수가 이상하면 -1 */
+function shapeAfterMats(sc: Rec): number {
   const base = shapeBase(sc);
   // base 뒤: x(4) y(4) 그룹(2) 버전(2) 원래 폭·높이(8) 현재 폭·높이(8) 뒤집기(4) 회전각(2) 회전 중심(8) → 행렬 수(2), 행렬들
   const cnt = u16(sc, base + 42);
-  if (cnt > 16) return none;
-  const off = base + 44 + 48 + 96 * cnt;
-  if (sc.data.length < off + 16) return none;
-  const lineColor = u32(sc, off);
-  const lineW = i32(sc, off + 4);
-  const fillType = u32(sc, off + 12);
-  let borderColor: string | null = null;
-  let borderWidth: number | null = null;
-  if (lineW > 0 && (lineColor & 0xff000000) === 0) {
-    borderColor = colorRefToHex(lineColor);
-    // 굵기 단위가 HWPUNIT(1/7200in)인지 0.01mm 인지 문서마다 달라 보여, 화면용으로 좁은 범위로 잘라 쓴다
-    borderWidth = Math.max(0.75, Math.min(6, lineW < 100 ? lineW * 0.0378 : hwpToPx(lineW)));
+  if (cnt > 32) return -1;
+  return base + 44 + 48 + 96 * cnt;
+}
+
+/** 채우기 정보 (BORDER_FILL·SHAPE_COMPONENT 공통): 종류(4) 뒤에 단색(12) · 그러데이션 · 그림 차례 */
+function parseFill(r: Rec, o: number): { fc: string | null; grad: Gradient | null; binId: number; end: number } {
+  const type = u32(r, o);
+  let p = o + 4;
+  const out = { fc: null as string | null, grad: null as Gradient | null, binId: 0, end: o + 8 };
+  if (!type) return out;
+  if (type & 1) {
+    const c = u32(r, p);
+    if (c !== 0xffffffff && (c & 0xff000000) === 0) out.fc = colorRefToHex(c);
+    p += 12;
   }
-  let bg: string | null = null;
-  if (fillType & 1 && sc.data.length >= off + 20) {
-    const face = u32(sc, off + 16);
-    if (face !== 0xffffffff && (face & 0xff000000) === 0) bg = colorRefToHex(face);
+  if (type & 4) {
+    // 종류(1) 기울임(4) 가로 중심(4) 세로 중심(4) 번짐 정도(4) 색 수(4) [색이 3개 이상이면 바뀌는 위치 4×n] 색 4×n
+    const gt = ['LINEAR', 'LINEAR', 'RADIAL', 'CONICAL', 'SQUARE'][u8(r, p)] || 'LINEAR';
+    const angle = u32(r, p + 1) | 0;
+    const cx = u32(r, p + 5) | 0;
+    const cy = u32(r, p + 9) | 0;
+    const n = Math.min(16, u32(r, p + 17));
+    let co = p + 21 + (n > 2 ? n * 4 : 0);
+    const colors: string[] = [];
+    for (let k = 0; k < n && co + 4 <= r.data.length; k++, co += 4) colors.push(colorRefToHex(u32(r, co)) || '');
+    out.grad = gradientOf(gt, angle, cx, cy, colors);
+    p = co;
   }
-  return { borderColor, borderWidth, bg };
+  if (type & 2) {
+    out.binId = u16(r, p + 4);
+    p += 6;
+  }
+  // 추가 속성: 길이(4) + 내용 (그러데이션의 번짐 중심 1), 그리고 채우기 종류마다 1바이트
+  const extra = u32(r, p);
+  p += 4;
+  if (extra === 1 && out.grad) {
+    const sc = u8(r, p);
+    if (sc !== 50 && sc <= 100) out.grad.sc = sc;
+  }
+  p += Math.min(extra, 64);
+  p += (type & 1 ? 1 : 0) + (type & 4 ? 1 : 0) + (type & 2 ? 1 : 0);
+  out.end = p;
+  return out;
+}
+
+/** 그리기 개체 요소(SHAPE_COMPONENT)의 선·채우기·그림자. 선 정보: 색(4) 굵기(4) 속성(4) 윤곽(1), 이어서 채우기, 그림자 */
+function shapeLook(sc: Rec, images: Map<number, string>): Partial<ShapeItem> & { lw?: number } {
+  const out: Partial<ShapeItem> & { lw?: number } = {};
+  const off = shapeAfterMats(sc);
+  if (off < 0 || sc.data.length < off + 13) return out;
+  const color = u32(sc, off);
+  const lw = i32(sc, off + 4);
+  const prop = u32(sc, off + 8);
+  const type = prop & 0x3f;
+  out.lw = lw;
+  // 선 종류 0 은 선 없음 (1 실선, 2 긴 점선 …)
+  if (type > 0 && (color & 0xff000000) === 0) {
+    out.sc = colorRefToHex(color);
+    out.sw = Math.max(0.3, hwpToPx(Math.max(0, lw)));
+    const style = HWP_LINE_STYLES[type - 1];
+    if (style && style !== 'SOLID') out.sd = style;
+    if (((prop >>> 6) & 0xf) === 0) out.cap = 'round';
+    const head = arrowOf(HWP_ARROW_STYLES[(prop >>> 10) & 0x3f], !!(prop & (1 << 30)));
+    if (head.s) {
+      out.hs = head.s;
+      out.hf = head.f;
+      out.hz = arrowSizeOf(HWP_ARROW_SIZES[(prop >>> 22) & 0xf]);
+    }
+    const tail = arrowOf(HWP_ARROW_STYLES[(prop >>> 16) & 0x3f], !!(prop & 0x80000000));
+    if (tail.s) {
+      out.ts = tail.s;
+      out.tf = tail.f;
+      out.tz = arrowSizeOf(HWP_ARROW_SIZES[(prop >>> 26) & 0xf]);
+    }
+  }
+  if (sc.data.length < off + 21) return out;
+  const fill = parseFill(sc, off + 13);
+  if (fill.fc) out.fc = fill.fc;
+  if (fill.grad) out.fg = fill.grad;
+  const fi = fill.binId ? images.get(fill.binId) : null;
+  if (fi && /^data:image\//.test(fi)) out.fi = fi;
+  // 그림자: 종류(4) 색(4) 가로·세로 거리(4, 4)
+  const so = fill.end;
+  if (sc.data.length >= so + 16) {
+    const st = u32(sc, so);
+    const c = u32(sc, so + 4);
+    if (st >= 1 && st <= 4 && (c & 0xff000000) === 0) {
+      // 그림자 거리는 0.01mm 단위. 0 으로 적힌 그림자도 한글은 조금 벗어난 자리에 그린다
+      const rx = Math.min(5000, Math.abs(i32(sc, so + 8)));
+      const ry = Math.min(5000, Math.abs(i32(sc, so + 12)));
+      const dx = (rx || ry ? rx : SHADOW_DEFAULT) * SHADOW_UNIT_PX;
+      const dy = (rx || ry ? ry : SHADOW_DEFAULT) * SHADOW_UNIT_PX;
+      // 1 왼쪽 위, 2 오른쪽 위, 3 왼쪽 아래, 4 오른쪽 아래
+      out.sh = { c: colorRefToHex(c), x: st === 1 || st === 3 ? -dx : dx, y: st === 1 || st === 2 ? -dy : dy };
+    }
+  }
+  return out;
+}
+
+/** SHAPE_COMPONENT 의 행렬: 이동 × Π(회전 × 크기) 를 px 단위 행렬 하나로. raw 는 저장할 때 그대로 쓰는 한글 값 */
+function shapeMatrixOf(sc: Rec): { m: Mat; raw: ShapeRaw; w: number; h: number } | null {
+  const base = shapeBase(sc);
+  const cnt = u16(sc, base + 42);
+  if (cnt > 32 || sc.data.length < base + 44 + 48 + 96 * cnt) return null;
+  const mats: number[][] = [];
+  for (let k = 0; k < 1 + 2 * cnt; k++) {
+    const v: number[] = [];
+    for (let i = 0; i < 6; i++) v.push(sc.dv.getFloat64(base + 44 + k * 48 + i * 8, true));
+    if (!v.every(Number.isFinite)) return null;
+    mats.push(v);
+  }
+  const pairs: [Mat, Mat][] = [];
+  for (let k = 0; k < cnt; k++) pairs.push([matOfHwp(mats[1 + 2 * k]), matOfHwp(mats[2 + 2 * k])]);
+  const flip = u32(sc, base + 28);
+  const raw: ShapeRaw = {
+    off: [i32(sc, base), i32(sc, base + 4)],
+    org: [i32(sc, base + 12), i32(sc, base + 16)],
+    cur: [i32(sc, base + 20), i32(sc, base + 24)],
+    flip: [flip & 1, (flip >>> 1) & 1],
+    rot: [sc.dv.getInt16(base + 32, true), i32(sc, base + 34), i32(sc, base + 38)],
+    mats,
+    lvl: u16(sc, base + 8),
+  };
+  return { m: composeMats(matOfHwp(mats[0]), pairs, 1 / 75), raw, w: hwpToPx(Math.abs(raw.org[0])), h: hwpToPx(Math.abs(raw.org[1])) };
+}
+
+function shapeStyle(sc: Rec): { borderColor: string | null; borderWidth: number | null; bg: string | null; gradient: string | null; dash: string | null } {
+  const look = shapeLook(sc, new Map());
+  return {
+    borderColor: look.sc || null,
+    // 화면용 테두리 굵기 (가는 선도 보이게)
+    borderWidth: look.sc ? Math.max(0.75, Math.min(8, look.sw || 0.45)) : null,
+    bg: look.fc || null,
+    gradient: look.fg ? gradientCss(look.fg.t, look.fg.a, look.fg.cx, look.fg.cy, look.fg.c, look.fg.sc ?? 50) : null,
+    dash: look.sd || null,
+  };
 }

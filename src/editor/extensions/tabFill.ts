@@ -3,6 +3,7 @@ import type { Node as PMNode } from '@tiptap/pm/model';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 import { viewState } from '../viewState';
+import { measureTabs } from '../tabLayout';
 
 /**
  * 오른쪽 맞춤 채움 탭 (차례의 "제목 ······· 3").
@@ -29,12 +30,26 @@ function isAuto(mark: { attrs: Record<string, any> }, _para: PMNode): boolean {
 
 const MIN_W = 6;
 
-/** 탭 폭을 한 번 잰다: 바꿀 [위치, 새 폭] 목록 */
-function measure(view: EditorView): [number, number][] {
+/** 탭 폭을 한 번 잰다: 바꿀 [위치, 새 폭, 새 채움(바꿀 때만)] 목록 */
+function measure(view: EditorView): [number, number, number?][] {
   const root = view.dom as HTMLElement;
   if (!root.isConnected || root.offsetParent === null) return [];
   const z = viewState.zoom || 1;
-  const out: [number, number][] = [];
+  const out: [number, number, number?][] = [];
+  // Word 문서의 탭: 탭 자리까지의 폭 (tabLayout)
+  for (const f of measureTabs(root, z)) {
+    let pos: number;
+    try {
+      pos = view.posAtDOM(f.span, 0);
+    } catch {
+      continue;
+    }
+    const node = view.state.doc.nodeAt(pos);
+    const mark = node?.marks.find((m) => m.type.name === 'tab');
+    if (!node || !mark || node.text !== '\t') continue;
+    const cur = +mark.attrs.width > 0 ? +mark.attrs.width : -1;
+    if (Math.abs(cur - f.width) > 0.3 || (+mark.attrs.leader || 0) !== f.leader) out.push([pos, f.width, f.leader]);
+  }
   const spans = root.querySelectorAll('span.k-tab');
   for (const span of Array.from(spans) as HTMLElement[]) {
     if (span.closest('.pg-spacer')) continue;
@@ -49,7 +64,7 @@ function measure(view: EditorView): [number, number][] {
     if (!para.isTextblock) continue;
     const node = view.state.doc.nodeAt(pos);
     const mark = node?.marks.find((m) => m.type.name === 'tab');
-    if (!node || !mark || node.text !== '\t' || !isAuto(mark, para)) continue;
+    if (!node || !mark || node.text !== '\t' || para.attrs.tabs || !isAuto(mark, para)) continue;
     const pEl = view.nodeDOM($p.before()) as HTMLElement | null;
     if (!(pEl instanceof HTMLElement)) continue;
     const pr = pEl.getBoundingClientRect();
@@ -105,11 +120,11 @@ export const TabFill = Extension.create({
             // 잰 폭이 줄 바꿈을 바꿔 다시 달라질 수 있다: 몇 번까지만 되풀이한다
             if (++passes > 4) return;
             const tr = view.state.tr;
-            for (const [pos, w] of fix) {
+            for (const [pos, w, leader] of fix) {
               const node = tr.doc.nodeAt(pos);
               const mark = node?.marks.find((m) => m.type.name === 'tab');
               if (!node || !mark) continue;
-              tr.removeMark(pos, pos + 1, mark).addMark(pos, pos + 1, mark.type.create({ ...mark.attrs, width: w }));
+              tr.removeMark(pos, pos + 1, mark).addMark(pos, pos + 1, mark.type.create({ ...mark.attrs, width: w, ...(leader != null ? { leader } : {}) }));
             }
             tr.setMeta('addToHistory', false).setMeta(tabFillKey, true).setMeta('trackChanges:skip', true);
             ours = true;

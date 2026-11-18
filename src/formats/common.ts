@@ -643,3 +643,116 @@ export function hwpxBorderStyle(type: string): BorderSide['s'] {
   if (/DOUBLE|THICK|THIN/.test(type) && type !== 'SOLID') return 'double';
   return 'solid';
 }
+
+// ---------- 문단 테두리 ----------
+/** 문단 테두리: 변마다 '굵기mm 종류 색'(없는 변은 그리지 않는다), 글과의 간격(px: 왼·오른·위·아래), 이어진 문단과 한 상자로 */
+export interface ParaBorder {
+  l?: string;
+  r?: string;
+  t?: string;
+  b?: string;
+  o?: number[];
+  c?: boolean;
+}
+
+const PB_SIDE = /^([\d.]+)mm (solid|dashed|dotted|double) (#[0-9A-Fa-f]{6})$/;
+
+/** 문단 테두리 값 검사 (문서·붙여넣기에서 온 값): 그릴 변이 없으면 null */
+export function cleanParaBorder(v: any): ParaBorder | null {
+  if (!v || typeof v !== 'object') return null;
+  const out: ParaBorder = {};
+  for (const k of ['l', 'r', 't', 'b'] as const) {
+    const m = typeof v[k] === 'string' ? PB_SIDE.exec(v[k].trim()) : null;
+    if (m) out[k] = `${Math.max(0.1, Math.min(10, parseFloat(m[1])))}mm ${m[2]} ${m[3].toUpperCase()}`;
+  }
+  if (!out.l && !out.r && !out.t && !out.b) return null;
+  if (Array.isArray(v.o) && v.o.length === 4 && v.o.every((x: any) => Number.isFinite(+x))) {
+    const o = v.o.map((x: any) => Math.max(-50, Math.min(200, Math.round(+x * 100) / 100)));
+    if (o.some((x: number) => x)) out.o = o;
+  }
+  if (v.c) out.c = true;
+  return out;
+}
+
+/** 테두리/배경 정의의 선 → 문단 테두리의 변 값들 (noBorders: 선이 없는 변, css: 기본과 다른 선) */
+export function paraBorderSides(noBorders: string[], css: string | null | undefined): ParaBorder {
+  const det = parseBorderCss(css);
+  const out: ParaBorder = {};
+  for (const k of ['l', 'r', 't', 'b'] as const) {
+    if (noBorders.includes(k)) continue;
+    const d = det[k];
+    out[k] = d ? `${Math.max(0.1, d.w)}mm ${d.s} ${d.c}` : '0.12mm solid #000000';
+  }
+  return out;
+}
+
+/** 문단 테두리의 변 값들 → 테두리/배경 정의의 선 (없는 변 목록과 선 값) */
+export function paraBorderToFill(pb: ParaBorder): { noBorders: string[]; css: string } {
+  const noBorders = (['l', 'r', 't', 'b'] as const).filter((k) => !pb[k]);
+  const css = (['t', 'b', 'l', 'r'] as const)
+    .filter((k) => pb[k])
+    .map((k) => `${k}:${pb[k]}`)
+    .join(';');
+  return { noBorders, css };
+}
+
+// ---------------- 다단 ----------------
+
+/** 단마다의 자리 (px): 본문 왼쪽에서 단 왼쪽까지(x)와 단 너비(w) */
+export interface ColGeom {
+  n: number;
+  x: number[];
+  w: number[];
+  line: { w: number; c: string; s: string } | null;
+}
+
+/** 다단 값을 쓸 수 있는 범위로 (붙여 넣은 HTML·파일에서 온 값). 한 단이면 count 1 만 남긴다. 잘못된 값이면 null */
+export function cleanColumns(v: any): { count: number; gap: number; widths?: number[]; gaps?: number[]; line?: { w: number; c: string; s: 'solid' | 'dashed' | 'dotted' | 'double' } | null } | null {
+  if (!v || typeof v !== 'object') return null;
+  const count = Math.round(Number(v.count));
+  if (!Number.isFinite(count) || count < 1) return null;
+  const n = Math.min(count, 20);
+  const num = (x: any, hi: number) => {
+    const k = Number(x);
+    return Number.isFinite(k) ? Math.min(hi, Math.max(0, k)) : 0;
+  };
+  if (n === 1) return { count: 1, gap: 0 };
+  const out: ReturnType<typeof cleanColumns> = { count: n, gap: num(v.gap, 500) };
+  if (Array.isArray(v.widths) && v.widths.length === n && v.widths.every((w: any) => Number(w) > 0)) {
+    out!.widths = v.widths.map((w: any) => num(w, 2000));
+    out!.gaps = Array.from({ length: n }, (_x, i) => num(Array.isArray(v.gaps) ? v.gaps[i] : 0, 500));
+  }
+  const l = v.line;
+  if (l && typeof l === 'object' && Number(l.w) > 0) {
+    const s = ['solid', 'dashed', 'dotted', 'double'].includes(l.s) ? l.s : 'solid';
+    out!.line = { w: num(l.w, 10), c: typeof l.c === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(l.c) ? l.c : '#000000', s };
+  }
+  return out;
+}
+
+/** 다단의 단 자리. 한 단이거나 값이 없으면 null. 너비가 다른 단은 본문 폭에 맞게 줄이거나 늘린다 */
+export function columnGeom(cols: any, contentWidthPx: number): ColGeom | null {
+  const c = cleanColumns(cols);
+  if (!c || c.count < 2 || !(contentWidthPx > 0)) return null;
+  const n = c.count;
+  const x: number[] = [];
+  const w: number[] = [];
+  if (c.widths && c.gaps) {
+    const total = c.widths.reduce((a, b) => a + b, 0) + c.gaps.slice(0, n - 1).reduce((a, b) => a + b, 0);
+    const k = total > 0 ? contentWidthPx / (total * PX_PER_MM) : 1;
+    let at = 0;
+    for (let i = 0; i < n; i++) {
+      x.push(at);
+      w.push(c.widths[i] * PX_PER_MM * k);
+      at += (c.widths[i] + c.gaps[i]) * PX_PER_MM * k;
+    }
+  } else {
+    const gap = Math.min(c.gap * PX_PER_MM, (contentWidthPx - n * 8) / (n - 1));
+    const cw = (contentWidthPx - Math.max(0, gap) * (n - 1)) / n;
+    for (let i = 0; i < n; i++) {
+      x.push(i * (cw + Math.max(0, gap)));
+      w.push(cw);
+    }
+  }
+  return { n, x, w, line: c.line || null };
+}

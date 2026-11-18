@@ -2,6 +2,24 @@ import { useState } from 'react';
 import { app } from '../../app/controller';
 import { Modal, OkCancel, Fieldset, NumberInput, ColorField, Seg } from '../widgets';
 import { Icon } from '../Icon';
+import { cleanParaBorder, type ParaBorder } from '../../formats/common';
+
+const PB_RE = /^([\d.]+)mm (solid|dashed|dotted|double) (#[0-9A-Fa-f]{6})$/;
+/** 문단 테두리 값 → 대화 상자의 값 (그릴 변, 선 종류·굵기·색, 글과의 간격, 이어진 문단과 연결) */
+function borderState(pb: ParaBorder | null) {
+  const first = pb ? PB_RE.exec(pb.t || pb.b || pb.l || pb.r || '') : null;
+  return {
+    bl: !!pb?.l,
+    br: !!pb?.r,
+    bt: !!pb?.t,
+    bb: !!pb?.b,
+    bStyle: first ? first[2] : 'solid',
+    bWidth: first ? parseFloat(first[1]) : 0.12,
+    bColor: first ? first[3] : '#000000',
+    bGap: pb?.o ? Math.round((pb.o[0] / (96 / 25.4)) * 10) / 10 : 0,
+    bJoin: !!pb?.c,
+  };
+}
 
 export function ParaShapeDialog({ onClose }: { onClose: () => void }) {
   const editor = app.active!.editor;
@@ -19,8 +37,15 @@ export function ParaShapeDialog({ onClose }: { onClose: () => void }) {
     before: a.spaceBefore || 0,
     after: a.spaceAfter || 0,
     bg: (a.paraBg as string) || null,
+    ...borderState(cleanParaBorder(a.paraBorder)),
   });
   const up = (p: Partial<typeof s>) => setS({ ...s, ...p });
+  /** 대화 상자의 값 → 문단 테두리 값 (그릴 변이 없으면 null) */
+  const borderValue = (): ParaBorder | null => {
+    const side = `${Math.max(0.1, s.bWidth)}mm ${s.bStyle} ${s.bColor}`;
+    const gap = Math.round(s.bGap * (96 / 25.4) * 100) / 100;
+    return cleanParaBorder({ ...(s.bl ? { l: side } : {}), ...(s.br ? { r: side } : {}), ...(s.bt ? { t: side } : {}), ...(s.bb ? { b: side } : {}), o: [gap, gap, gap, gap], c: s.bJoin });
+  };
 
   const apply = () => {
     const textIndent = s.firstMode === 'normal' ? null : s.firstMode === 'indent' ? s.firstVal : -s.firstVal;
@@ -37,6 +62,7 @@ export function ParaShapeDialog({ onClose }: { onClose: () => void }) {
         spaceBefore: s.before || null,
         spaceAfter: s.after || null,
         paraBg: s.bg,
+        paraBorder: borderValue(),
       })
       .run();
     onClose();
@@ -53,6 +79,10 @@ export function ParaShapeDialog({ onClose }: { onClose: () => void }) {
     paddingTop: s.before * 0.5,
     paddingBottom: s.after * 0.5,
     background: s.bg || undefined,
+    borderLeft: s.bl ? `${Math.max(1, s.bWidth * 3.78)}px ${s.bStyle} ${s.bColor}` : undefined,
+    borderRight: s.br ? `${Math.max(1, s.bWidth * 3.78)}px ${s.bStyle} ${s.bColor}` : undefined,
+    borderTop: s.bt ? `${Math.max(1, s.bWidth * 3.78)}px ${s.bStyle} ${s.bColor}` : undefined,
+    borderBottom: s.bb ? `${Math.max(1, s.bWidth * 3.78)}px ${s.bStyle} ${s.bColor}` : undefined,
   };
   const filler = '앞 문단 '.repeat(24);
   const sample = '현재 문단의 모양을 미리 보여 줍니다. '.repeat(5);
@@ -112,6 +142,45 @@ export function ParaShapeDialog({ onClose }: { onClose: () => void }) {
           <NumberInput value={s.after} onChange={(v) => up({ after: v })} min={0} step={0.5} unit="pt" />
           <label>문단 배경</label>
           <ColorField value={s.bg} onChange={(v) => up({ bg: v })} />
+        </div>
+      </Fieldset>
+      <Fieldset legend="테두리">
+        <div className="row wrap" style={{ gap: 12, marginBottom: 8 }}>
+          {(
+            [
+              ['bt', '위'],
+              ['bb', '아래'],
+              ['bl', '왼쪽'],
+              ['br', '오른쪽'],
+            ] as const
+          ).map(([k, label]) => (
+            <label key={k} className="check">
+              <input type="checkbox" checked={s[k]} onChange={(e) => up({ [k]: e.target.checked } as any)} />
+              {label}
+            </label>
+          ))}
+          <button className="btn" onClick={() => up({ bt: true, bb: true, bl: true, br: true })}>
+            상자
+          </button>
+          <button className="btn" onClick={() => up({ bt: false, bb: false, bl: false, br: false })}>
+            없음
+          </button>
+        </div>
+        <div className="row wrap" style={{ gap: 10 }}>
+          <select value={s.bStyle} onChange={(e) => up({ bStyle: e.target.value })}>
+            <option value="solid">실선</option>
+            <option value="dashed">파선</option>
+            <option value="dotted">점선</option>
+            <option value="double">이중 실선</option>
+          </select>
+          <NumberInput value={s.bWidth} onChange={(v) => up({ bWidth: v })} min={0.1} max={5} step={0.1} unit="mm" width={64} />
+          <ColorField value={s.bColor} onChange={(v) => up({ bColor: v || '#000000' })} allowNone={false} />
+          <span>글과의 간격</span>
+          <NumberInput value={s.bGap} onChange={(v) => up({ bGap: v })} min={0} max={30} step={0.5} unit="mm" width={64} />
+          <label className="check" title="같은 테두리의 이어진 문단을 한 상자로 묶는다">
+            <input type="checkbox" checked={s.bJoin} onChange={(e) => up({ bJoin: e.target.checked })} />
+            이어진 문단과 연결
+          </label>
         </div>
       </Fieldset>
       <div className="preview-box para">

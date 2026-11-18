@@ -1,9 +1,17 @@
 import * as CFB from 'cfb';
 import { deflateRaw } from 'pako';
-import type { HeaderFooter, KDocument } from '../../types';
-import { type JNode, mmToHwp, pxToHwp, ptToHwp, parseBorderCss, HWP_BORDER_WIDTHS, FIXED_SPACE } from '../common';
-import { type CharStyle, type FlatBlock, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenDoc, paraKey, unwrapBoxes } from '../flatten';
+import type { Columns, HeaderFooter, KDocument } from '../../types';
+import { type JNode, mmToHwp, pxToHwp, ptToHwp, parseBorderCss, paraBorderToFill, cleanColumns, HWP_BORDER_WIDTHS, FIXED_SPACE } from '../common';
+import { type CharStyle, type FlatBlock, type FlatFloat, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, unwrapBoxes } from '../flatten';
 import { prepareImage } from '../imageUtil';
+import { HWP_LINE_STYLES, SHADOW_UNIT_PX, type ShapeData, type ShapeItem, type ShapeRaw } from '../shape';
+import { rawOf, shapeImageSrcs, shapeObjects } from '../hwpx/shapeWriter';
+
+const PT2PX = 96 / 72;
+/** 그림 채우는 방식의 번호 (리더의 IMG_FILL_MODES 와 같은 차례) */
+const IMG_FILL_MODES = ['TILE', 'TILE_HORZ_TOP', 'TILE_HORZ_BOTTOM', 'TILE_VERT_LEFT', 'TILE_VERT_RIGHT', 'TOTAL', 'CENTER', 'CENTER_TOP', 'CENTER_BOTTOM', 'LEFT_CENTER', 'LEFT_TOP', 'LEFT_BOTTOM', 'RIGHT_CENTER', 'RIGHT_TOP', 'RIGHT_BOTTOM', 'ZOOM'];
+/** 도형 종류 → 개체 요소의 ctrl ID 와 도형 레코드 */
+const SHAPE_IDS: Record<string, string> = { line: '$lin', rect: '$rec', ellipse: '$ell', arc: '$arc', poly: '$pol', curve: '$cur', img: '$pic' };
 
 /**
  * HWP 5.0 바이너리 쓰기.
@@ -102,6 +110,12 @@ const TAG = {
   PAGE_BORDER_FILL: 75,
   SHAPE_COMPONENT: 76,
   TABLE: 77,
+  SHAPE_COMPONENT_LINE: 78,
+  SHAPE_COMPONENT_RECTANGLE: 79,
+  SHAPE_COMPONENT_ELLIPSE: 80,
+  SHAPE_COMPONENT_ARC: 81,
+  SHAPE_COMPONENT_POLYGON: 82,
+  SHAPE_COMPONENT_CURVE: 83,
   SHAPE_COMPONENT_PICTURE: 85,
 };
 
@@ -134,6 +148,8 @@ interface BF {
   noBorders: string[];
   borders: boolean;
   css?: string | null;
+  /** 그림 채우기 (쪽 배경): BinData 번호와 채우는 방식 */
+  img?: { binId: number; mode: string } | null;
 }
 
 class Registry {
@@ -189,7 +205,10 @@ class Registry {
     let id = this.paraIds.get(k);
     if (id === undefined) {
       let bf = 2;
-      if (p.bg || p.borderBottom) bf = this.bf({ bg: p.bg, noBorders: p.borderBottom ? ['l', 'r', 't'] : ['l', 'r', 't', 'b'], borders: p.borderBottom });
+      if (p.border) {
+        const f = paraBorderToFill(p.border);
+        bf = this.bf({ bg: p.bg, noBorders: f.noBorders, borders: f.noBorders.length < 4, css: f.css });
+      } else if (p.bg || p.borderBottom) bf = this.bf({ bg: p.bg, noBorders: p.borderBottom ? ['l', 'r', 't'] : ['l', 'r', 't', 'b'], borders: p.borderBottom });
       id = this.paras.length;
       this.paras.push({ ...p, bf });
       this.paraIds.set(k, id);
@@ -210,12 +229,19 @@ function charShapeRec(r: Registry, c: CharStyle): Uint8Array {
   for (let i = 0; i < 7; i++) b.u8(Math.max(50, Math.min(200, Math.round(c.fontWidth || 100))));
   for (let i = 0; i < 7; i++) b.i8(Math.max(-50, Math.min(50, Math.round(c.letterSpacing || 0))));
   for (let i = 0; i < 7; i++) b.u8(100);
-  for (let i = 0; i < 7; i++) b.i8(0);
+  // 글자 위치 (%)
+  for (let i = 0; i < 7; i++) b.i8(Math.max(-100, Math.min(100, Math.round(c.offset || 0))));
   b.i32(ptToHwp(c.size));
+  // 선 종류 번호 (0 실선, 1 긴 점선, 2 점선 … 11 물결선)
+  const SHAPES = ['SOLID', 'DASH', 'DOT', 'DASH_DOT', 'DASH_DOT_DOT', 'LONG_DASH', 'CIRCLE', 'DOUBLE_SLIM', 'SLIM_THICK', 'THICK_SLIM', 'SLIM_THICK_SLIM', 'WAVE', 'DOUBLE_WAVE'];
+  const shapeNo = (v: string | null | undefined) => Math.max(0, SHAPES.indexOf(v || 'SOLID'));
   let attr = 0;
   if (c.italic) attr |= 1;
   if (c.bold) attr |= 2;
-  if (c.underline) attr |= 1 << 2;
+  // 밑줄: bit 2~3 종류(1 글자 아래, 3 글자 위), 4~7 모양. 강조점: bit 21~24. 취소선 모양: bit 26~29
+  if (c.underline) attr |= ((c.ulPos === 'top' ? 3 : 1) << 2) | (shapeNo(c.ulShape) << 4);
+  if (c.emphasis) attr |= Math.max(0, ['', 'DOT_ABOVE', 'RING_ABOVE', 'CARON', 'TILDE', 'SIDE', 'COLON'].indexOf(c.emphasis)) << 21;
+  if (c.strike) attr |= shapeNo(c.stShape) << 26;
   if (c.effect === 'outline') attr |= 1 << 8;
   if (c.effect === 'shadow') attr |= 1 << 11;
   if (c.effect === 'emboss') attr |= 1 << 13;
@@ -223,14 +249,14 @@ function charShapeRec(r: Registry, c: CharStyle): Uint8Array {
   if (c.sup) attr |= 1 << 15;
   if (c.sub) attr |= 1 << 16;
   if (c.strike) attr |= 1 << 18;
-  b.u32(attr);
+  b.u32(attr >>> 0);
   b.i8(10).i8(10);
   b.u32(rgb(c.color));
-  b.u32(0); // 밑줄 색
+  b.u32(c.ulColor ? rgb(c.ulColor) : c.underline ? rgb(c.color) : 0); // 밑줄 색
   b.u32(c.highlight ? rgb(c.highlight) : 0xffffffff); // 음영 색
   b.u32(0xc0c0c0); // 그림자 색
   b.u16(2); // 글자 테두리/배경
-  b.u32(0); // 취소선 색
+  b.u32(c.stColor ? rgb(c.stColor) : c.strike ? rgb(c.color) : 0); // 취소선 색
   return b.out();
 }
 
@@ -244,7 +270,8 @@ function paraShapeRec(p: ParaStyle & { bf: number }): Uint8Array {
     lsVal = ptToHwp(parseFloat(p.lineHeight)) * 2;
   } else if (p.lineHeight) lsVal = Math.round(parseFloat(p.lineHeight) * 100) || 160;
   // bit 7: 한글 줄 나눔 단위 (0 어절, 1 글자), bit 8: 편집 용지 줄 격자
-  const attr1 = 0x100 | (p.breakChar ? 0x80 : 0) | ((ALIGN[p.align] ?? 0) << 2) | (lsType === 1 ? 1 : 0);
+  // bit 28: 이어진 문단의 테두리를 한 상자로
+  const attr1 = (0x100 | (p.breakChar ? 0x80 : 0) | ((ALIGN[p.align] ?? 0) << 2) | (lsType === 1 ? 1 : 0) | (p.border?.c ? 1 << 28 : 0)) >>> 0;
   b.u32(attr1);
   // 여백 값은 2배로 저장
   b.i32(ptToHwp(p.indentLeft) * 2);
@@ -256,7 +283,9 @@ function paraShapeRec(p: ParaStyle & { bf: number }): Uint8Array {
   b.u16(0); // 탭 정의
   b.u16(0); // 문단 번호/글머리표
   b.u16(p.bf);
-  b.i16(0).i16(0).i16(0).i16(0);
+  // 문단 테두리와 글의 간격 (왼·오른·위·아래)
+  const po = (p.border?.o || [0, 0, 0, 0]).map((v) => Math.max(-32000, Math.min(32000, pxToHwp(v))));
+  b.i16(po[0]).i16(po[1]).i16(po[2]).i16(po[3]);
   b.u32(0); // 속성 2
   b.u32(lsType); // 속성 3 (줄 간격 종류)
   b.u32(lsVal);
@@ -281,9 +310,14 @@ function borderFillRec(d: BF): Uint8Array {
     } else b.u8(on ? 1 : 0).u8(on ? 1 : 0).u32(0);
   }
   b.u8(1).u8(0).u32(0); // 대각선
-  if (d.bg) {
-    b.u32(1).u32(rgb(d.bg)).u32(0x999999).i32(-1);
-    b.u32(0).u8(0);
+  if (d.bg || d.img) {
+    // 채우기: 종류(4) → 단색(바탕색·무늬색·무늬 종류) → 그림(채우는 방식 1, 밝기 1, 명암 1, 효과 1, BinData 번호 2) → 추가 속성 길이(4) → 종류마다 1바이트
+    b.u32((d.bg ? 1 : 0) | (d.img ? 2 : 0));
+    if (d.bg) b.u32(rgb(d.bg)).u32(0x999999).i32(-1);
+    if (d.img) b.u8(Math.max(0, IMG_FILL_MODES.indexOf(d.img.mode))).i8(0).i8(0).u8(0).u16(d.img.binId);
+    b.u32(0);
+    if (d.bg) b.u8(0);
+    if (d.img) b.u8(0);
   } else b.u32(0).u32(0);
   return b.out();
 }
@@ -384,7 +418,170 @@ class BodyWriter {
     for (const c of pb.ctrls) c(this.w, level + 1);
   }
 
-  private inlines(pb: ParaBuild, list: FlatInline[], level: number) {
+  /**
+   * 개체 공통 속성(CTRL_HEADER 의 앞부분): 속성, 세로·가로 오프셋, 폭, 높이, 겹침 차례, 바깥 여백.
+   * 떠 있는 개체는 한글에서 읽은 자리 값(hw)을 그대로 되돌려 쓰고, 없으면 문단 기준 오프셋으로 쓴다. 떠 있지 않으면 글자처럼 취급
+   */
+  private objHeader(id: string, fl: FlatFloat | null | undefined, wv: number, hv: number, paraLeft = 0, sb = 0): Buf {
+    const b = new Buf().u32(ctrlId(id));
+    if (!fl) return b.u32(0x042a2211).i32(0).i32(0).u32(wv).u32(hv).i32(0).u16(0).u16(0).u16(0).u16(0);
+    const hw = fl.hw || { wrap: fl.behind ? 'BEHIND_TEXT' : 'IN_FRONT_OF_TEXT', vr: 'PARA', hr: 'COLUMN', va: 'TOP', ha: 'LEFT', vo: Math.max(0, pxToHwp(fl.y - sb)), ho: pxToHwp(fl.x + paraLeft), om: [0, 0, 0, 0] };
+    const idx = (list: string[], v: string) => Math.max(0, list.indexOf(v));
+    const wrap = idx(['SQUARE', 'TOP_AND_BOTTOM', 'BEHIND_TEXT', 'IN_FRONT_OF_TEXT'], hw.wrap);
+    const vr = idx(['PAPER', 'PAGE', 'PARA'], hw.vr);
+    const hr = idx(['PAPER', 'PAGE', 'COLUMN', 'PARA'], hw.hr);
+    const va = idx(['TOP', 'CENTER', 'BOTTOM', 'INSIDE', 'OUTSIDE'], hw.va);
+    const ha = idx(['LEFT', 'CENTER', 'RIGHT', 'INSIDE', 'OUTSIDE'], hw.ha);
+    // bit 3~4 세로 기준, 5~7 세로 맞춤, 8~9 가로 기준, 10~12 가로 맞춤, 13 본문 영역으로 제한(문단 기준), 14 겹침 허용,
+    // 15~17·18~19 폭·높이 기준(절대값), 21~23 본문과의 배치, 26~ 번호 종류(그림)
+    const attr = ((vr << 3) | (va << 5) | (hr << 8) | (ha << 10) | (vr === 2 ? 1 << 13 : 0) | (wrap >= 2 ? 1 << 14 : 0) | (1 << 17) | (1 << 19) | (wrap << 21) | (1 << 26)) >>> 0;
+    const om = hw.om || [0, 0, 0, 0];
+    return b.u32(attr).i32(Math.round(hw.vo)).i32(Math.round(hw.ho)).u32(wv).u32(hv).i32(0).u16(om[0]).u16(om[1]).u16(om[2]).u16(om[3]);
+  }
+
+  /** HWP 로 쓸 수 있는 도형인가 (글맵시는 아직 쓰지 않는다) */
+  private canWriteShape(d: ShapeData): boolean {
+    const objs = shapeObjects(d);
+    return objs.length > 0 && objs.every((o) => !!SHAPE_IDS[o.it.k] && (o.it.k !== 'img' || !!this.images.get(o.it.src || '')));
+  }
+
+  /** 그리기 개체 컨트롤: 개체 공통 속성 + 개체 요소(묶음이면 자식들) */
+  private shapeCtrl(w: RecWriter, lv: number, it: Extract<FlatInline, { type: 'shape' }>, paraLeft: number, sb: number) {
+    const d = it.d;
+    const objs = shapeObjects(d);
+    const W = Math.max(1, pxToHwp(it.width));
+    const H = Math.max(1, pxToHwp(it.height));
+    w.rec(TAG.CTRL_HEADER, lv, this.objHeader('gso ', it.float, W, H, paraLeft, sb).u32(inst()).u32(0).u16(0).out());
+    if (!d.group && objs.length === 1) {
+      this.shapeComp(w, lv + 1, objs[0].it, objs[0].text, 0);
+      return;
+    }
+    // 묶은 개체: 묶음의 개체 요소 뒤에 자식 수와 자식들의 ctrl ID
+    const raw: ShapeRaw =
+      d.raw && d.raw.lvl === 0 && d.raw.mats.length === 3
+        ? d.raw
+        : { off: [0, 0], org: [W, H], cur: [W, H], flip: [0, 0], rot: [0, Math.round(W / 2), Math.round(H / 2)], mats: [[1, 0, 0, 0, 1, 0], [1, 0, 0, 0, 1, 0], [1, 0, 0, 0, 1, 0]], lvl: 0 };
+    const b = this.shapeCommon('$con', raw, true);
+    b.u16(objs.length);
+    for (const o of objs) b.u32(ctrlId(SHAPE_IDS[o.it.k]));
+    b.u32(inst());
+    w.rec(TAG.SHAPE_COMPONENT, lv + 1, b.out());
+    for (const o of objs) this.shapeComp(w, lv + 2, o.it, o.text, 1);
+  }
+
+  /** 개체 요소의 공통 부분: ctrl ID(최상위는 두 번), 묶음 안 자리, 묶음 깊이, 원래·현재 크기, 뒤집기, 회전, 렌더링 행렬 */
+  private shapeCommon(id: string, raw: ShapeRaw, top: boolean): Buf {
+    const b = new Buf().u32(ctrlId(id));
+    if (top) b.u32(ctrlId(id));
+    b.i32(raw.off[0]).i32(raw.off[1]).u16(raw.lvl).u16(1).u32(Math.abs(raw.org[0])).u32(Math.abs(raw.org[1])).u32(Math.abs(raw.cur[0])).u32(Math.abs(raw.cur[1]));
+    b.u32((raw.flip[0] ? 1 : 0) | (raw.flip[1] ? 2 : 0)).i16(Math.round(raw.rot[0])).i32(Math.round(raw.rot[1])).i32(Math.round(raw.rot[2]));
+    b.u16((raw.mats.length - 1) >> 1);
+    for (const m of raw.mats) for (const v of m) b.f64(Number.isFinite(v) ? v : 0);
+    return b;
+  }
+
+  /** 개체 요소 하나: SHAPE_COMPONENT(선·채우기·그림자) + 도형 안의 글 + 도형 레코드 */
+  private shapeComp(w: RecWriter, lv: number, it: ShapeItem, text: ShapeItem | null, lvl: number) {
+    const raw = rawOf(it, lvl);
+    const id = SHAPE_IDS[it.k];
+    const b = this.shapeCommon(id, raw, lvl === 0);
+    const hw = (v: number) => Math.round(pxToHwp(v));
+    if (it.k === 'img') {
+      const info = this.images.get(it.src || '');
+      if (!info) return;
+      w.rec(TAG.SHAPE_COMPONENT, lv, b.out());
+      this.pictureRec(w, lv + 1, Math.abs(raw.org[0]), Math.abs(raw.org[1]), info.binId, pxToHwp(info.w), pxToHwp(info.h), it.crop || null, inst());
+      return;
+    }
+    // 선 정보: 색(4) 굵기(4) 속성(4) 윤곽(1). 속성: bit 0~5 선 종류, 6~9 끝 모양, 10~15·16~21 시작·끝 화살표, 22~25·26~29 화살표 크기, 30·31 화살표 채움
+    const ARROW: Record<string, number> = { ARROW: 1, SPEAR: 2, CONCAVE_ARROW: 3, DIAMOND: 4, CIRCLE: 5, BOX: 6 };
+    const asz = (z: [number, number] | undefined) => Math.round(z?.[0] ?? 1) * 3 + Math.round(z?.[1] ?? 1);
+    if (it.sc) {
+      const type = Math.max(0, HWP_LINE_STYLES.indexOf(it.sd || 'SOLID')) + 1;
+      const prop = (type | ((it.cap === 'round' ? 0 : 1) << 6) | ((it.hs ? ARROW[it.hs] || 0 : 0) << 10) | ((it.ts ? ARROW[it.ts] || 0 : 0) << 16) | (asz(it.hz) << 22) | (asz(it.tz) << 26) | ((!it.hs || it.hf ? 1 : 0) << 30) | ((!it.ts || it.tf ? 1 : 0) << 31)) >>> 0;
+      b.u32(rgb(it.sc)).i32(raw.lw != null ? Math.round(raw.lw) : Math.max(1, hw(it.sw || 0.45))).u32(prop).u8(0);
+    } else b.u32(0).i32(0).u32(0xd1000040).u8(0);
+    // 채우기 정보
+    const img = it.fi ? this.images.get(it.fi) : null;
+    const g = it.fg;
+    const kind = (it.fc && !g ? 1 : 0) | (img ? 2 : 0) | (g ? 4 : 0);
+    if (!kind || it.k === 'line') b.u32(0).u32(0);
+    else {
+      b.u32(kind);
+      if (kind & 1) b.u32(rgb(it.fc!)).u32(0).i32(-1);
+      if (g) {
+        b.u8(Math.max(1, ['', 'LINEAR', 'RADIAL', 'CONICAL', 'SQUARE'].indexOf(g.t))).u32(Math.round(g.a) >>> 0).u32(Math.round(g.cx)).u32(Math.round(g.cy)).u32(255).u32(g.c.length);
+        if (g.c.length > 2) g.c.forEach((_c, i) => b.i32(Math.round((i * 100) / (g.c.length - 1))));
+        for (const c of g.c) b.u32(rgb(c));
+      }
+      if (img) b.u8(5).i8(0).i8(0).u8(0).u16(img.binId);
+      // 추가 속성 (그러데이션의 번짐 중심 1바이트), 그리고 채우기 종류마다 1바이트
+      if (g) b.u32(1).u8(Math.round(g.sc ?? 50));
+      else b.u32(0);
+      if (kind & 1) b.u8(0);
+      if (g) b.u8(0);
+      if (img) b.u8(0);
+    }
+    // 그림자: 종류(1 왼쪽 위, 2 오른쪽 위, 3 왼쪽 아래, 4 오른쪽 아래) 색 가로·세로 거리(0.01mm)
+    if (it.sh) b.u32(it.sh.x < 0 ? (it.sh.y < 0 ? 1 : 3) : it.sh.y < 0 ? 2 : 4).u32(rgb(it.sh.c)).i32(Math.round(Math.abs(it.sh.x) / SHADOW_UNIT_PX)).i32(Math.round(Math.abs(it.sh.y) / SHADOW_UNIT_PX));
+    else b.u32(0).u32(0xb2b2b2).i32(0).i32(0);
+    b.u32(inst()).u8(0).u8(0);
+    w.rec(TAG.SHAPE_COMPONENT, lv, b.out());
+    // 도형 안의 글: 문단 수(4) 속성(4: bit 5~6 세로 맞춤) 왼쪽·오른쪽·위·아래 여백(각 2) 글 폭(4) …
+    if (text && text.content && it.k !== 'line') {
+      const blocks = unwrapBoxes(flattenContent(text.content));
+      if (blocks.length) {
+        const pad = (text.pad || [3.77, 3.77, 3.77, 3.77]).map((v) => hw(v));
+        const va = text.va === 'middle' ? 1 : text.va === 'bottom' ? 2 : 0;
+        w.rec(TAG.LIST_HEADER, lv + 1, new Buf().i32(blocks.length).u32(va << 5).u16(pad[3]).u16(pad[1]).u16(pad[0]).u16(pad[2]).u32(Math.abs(raw.org[0])).zeros(13).out());
+        const saved = this.w;
+        this.w = w;
+        this.blocks(blocks, lv + 1);
+        this.w = saved;
+      }
+    }
+    const p = (it.p || []).map((v) => hw(v));
+    switch (it.k) {
+      case 'line':
+        w.rec(TAG.SHAPE_COMPONENT_LINE, lv + 1, new Buf().i32(p[0] || 0).i32(p[1] || 0).i32(p[2] || 0).i32(p[3] || 0).u32(0).out());
+        break;
+      case 'rect': {
+        const W = Math.abs(raw.org[0]);
+        const H = Math.abs(raw.org[1]);
+        w.rec(TAG.SHAPE_COMPONENT_RECTANGLE, lv + 1, new Buf().u8(Math.round(it.r || 0)).i32(0).i32(0).i32(W).i32(0).i32(W).i32(H).i32(0).i32(H).out());
+        break;
+      }
+      case 'ellipse': {
+        const W = Math.abs(raw.org[0]);
+        const H = Math.abs(raw.org[1]);
+        w.rec(TAG.SHAPE_COMPONENT_ELLIPSE, lv + 1, new Buf().u32(0).i32(Math.round(W / 2)).i32(Math.round(H / 2)).i32(W).i32(Math.round(H / 2)).i32(Math.round(W / 2)).i32(0).zeros(32).out());
+        break;
+      }
+      case 'arc':
+        w.rec(TAG.SHAPE_COMPONENT_ARC, lv + 1, new Buf().u8(it.at === 'PIE' ? 1 : it.at === 'CHORD' ? 2 : 0).i32(p[0] || 0).i32(p[1] || 0).i32(p[2] || 0).i32(p[3] || 0).i32(p[4] || 0).i32(p[5] || 0).out());
+        break;
+      case 'poly': {
+        const pts = p.slice(0, p.length - (p.length % 2));
+        // 닫힌 다각형은 처음 점으로 돌아온다
+        if (it.z && pts.length >= 4 && (pts[0] !== pts[pts.length - 2] || pts[1] !== pts[pts.length - 1])) pts.push(pts[0], pts[1]);
+        const pb = new Buf().i32(pts.length / 2);
+        for (const v of pts) pb.i32(v);
+        w.rec(TAG.SHAPE_COMPONENT_POLYGON, lv + 1, pb.u32(0).out());
+        break;
+      }
+      case 'curve': {
+        const n = Math.floor(p.length / 2);
+        const cb = new Buf().i32(n);
+        for (let i = 0; i < n * 2; i++) cb.i32(p[i]);
+        const seg = it.seg || '';
+        for (let i = 0; i < n - 1; i++) cb.u8(seg[i] === 'L' ? 0 : 1);
+        w.rec(TAG.SHAPE_COMPONENT_CURVE, lv + 1, cb.u32(0).out());
+        break;
+      }
+    }
+  }
+
+  private inlines(pb: ParaBuild, list: FlatInline[], level: number, paraLeft = 0, sb = 0) {
     let curLink: string | null = null;
     const endLink = () => {
       if (!curLink) return;
@@ -402,7 +599,25 @@ class BodyWriter {
           curLink = link;
         }
       }
-      if (it.type === 'text') {
+      if (it.type === 'text' && (it.ruby || it.compose) && it.text) {
+        // 덧말·글자 겹침: 컨트롤 하나 (글자 코드 23)
+        const cid = this.reg.char(it.style);
+        this.setShape(pb, cid);
+        pb.maxSize = Math.max(pb.maxSize, it.style.size);
+        const text = it.text;
+        if (it.ruby) {
+          const sub = it.ruby.text;
+          const pos = it.ruby.pos === 'bottom' ? 1 : 0;
+          this.ctrlChars(pb, 23, 'tdut');
+          // 본말, 덧말, 위치, 글자 크기 비율, 선택 사항, 스타일 번호, 정렬(가운데)
+          pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('tdut')).wstr(text).wstr(sub).u32(pos).u32(0).u32(0).u32(0).u32(2).out()));
+        } else {
+          const shape = Math.max(0, ['CHAR', 'SHAPE_CIRCLE', 'SHAPE_REVERSAL_CIRCLE', 'SHAPE_RECTANGLE', 'SHAPE_REVERSAL_RECTANGLE', 'SHAPE_TRIANGLE', 'SHAPE_REVERSAL_TIRANGLE', 'SHAPE_LIGHT', 'SHAPE_RHOMBUS', 'SHAPE_REVERSAL_RHOMBUS', 'SHAPE_ROUNDED_RECTANGLE'].indexOf(it.compose || ''));
+          this.ctrlChars(pb, 23, 'tcps');
+          // 겹칠 글자, 테두리 모양, 안 글자 크기, 펼침, 글자 모양 수와 번호
+          pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('tcps')).wstr(text).u8(shape).i8(-3).u8(1).u8(1).u32(cid).out()));
+        }
+      } else if (it.type === 'text') {
         this.setShape(pb, this.reg.char(it.style));
         pb.maxSize = Math.max(pb.maxSize, it.style.size);
         // 머리말/꼬리말 안의 쪽 번호 자리({{PAGE}})는 쪽 번호 필드로
@@ -437,16 +652,25 @@ class BodyWriter {
         this.ctrlChars(pb, 11, 'gso ');
         let wv = it.width ? pxToHwp(it.width) : pxToHwp(info.w);
         let hv = it.height ? pxToHwp(it.height) : it.width ? Math.round((pxToHwp(it.width) * info.h) / Math.max(1, info.w)) : pxToHwp(info.h);
-        if (wv > this.bodyW) {
+        // 떠 있는 그림은 본문 폭을 넘을 수 있다 (종이 기준으로 놓인 배경 그림 등)
+        if (wv > this.bodyW && !it.float) {
           hv = Math.round((hv * this.bodyW) / wv);
           wv = this.bodyW;
         }
-        pb.maxSize = Math.max(pb.maxSize, hv / 100);
+        // 떠 있는 그림은 줄 높이에 들지 않는다
+        if (!it.float) pb.maxSize = Math.max(pb.maxSize, hv / 100);
         const binId = info.binId;
         const crop = it.crop;
         const ow = pxToHwp(info.w);
         const oh = pxToHwp(info.h);
-        pb.ctrls.push((w, lv) => this.picture(w, lv, wv, hv, binId, ow, oh, crop));
+        const fl = it.float || null;
+        pb.ctrls.push((w, lv) => this.picture(w, lv, wv, hv, binId, ow, oh, crop, fl, paraLeft, sb));
+      } else if (it.type === 'shape') {
+        if (!this.canWriteShape(it.d)) continue;
+        this.setShape(pb, this.reg.char(it.style));
+        this.ctrlChars(pb, 11, 'gso ');
+        if (!it.float) pb.maxSize = Math.max(pb.maxSize, pxToHwp(it.height) / 100);
+        pb.ctrls.push((w, lv) => this.shapeCtrl(w, lv, it, paraLeft, sb));
       } else if (it.type === 'footnote') {
         this.setShape(pb, this.reg.char(it.style));
         this.ctrlChars(pb, 17, 'fn  ');
@@ -458,19 +682,20 @@ class BodyWriter {
     endLink();
   }
 
-  private picture(w: RecWriter, lv: number, wv: number, hv: number, binId: number, ow = wv, oh = hv, crop: { t: number; r: number; b: number; l: number } | null = null) {
-    const c = crop || { t: 0, r: 0, b: 0, l: 0 };
+  private picture(w: RecWriter, lv: number, wv: number, hv: number, binId: number, ow = wv, oh = hv, crop: { t: number; r: number; b: number; l: number } | null = null, fl: FlatFloat | null = null, paraLeft = 0, sb = 0) {
     const id = inst();
-    // 개체 공통 속성: 글자처럼 취급(bit0)
-    w.rec(
-      TAG.CTRL_HEADER,
-      lv,
-      new Buf().u32(ctrlId('gso ')).u32(0x042a2211).i32(0).i32(0).u32(wv).u32(hv).i32(0).u16(0).u16(0).u16(0).u16(0).u32(id).u32(0).u16(0).out(),
-    );
+    // 개체 공통 속성: 글자처럼 취급(bit0) 또는 떠 있는 자리
+    w.rec(TAG.CTRL_HEADER, lv, this.objHeader('gso ', fl, wv, hv, paraLeft, sb).u32(id).u32(0).u16(0).out());
     const sc = new Buf().u32(ctrlId('$pic')).u32(ctrlId('$pic')).i32(0).i32(0).u16(0).u16(1).u32(wv).u32(hv).u32(wv).u32(hv).u32(0).i16(0).i32(Math.round(wv / 2)).i32(Math.round(hv / 2)).u16(1);
     const ident = [1, 0, 0, 0, 1, 0];
     for (let k = 0; k < 3; k++) ident.forEach((v) => sc.f64(v));
     w.rec(TAG.SHAPE_COMPONENT, lv + 1, sc.out());
+    this.pictureRec(w, lv + 2, wv, hv, binId, ow, oh, crop, id);
+  }
+
+  /** 그림 레코드: 테두리(12), 네 꼭짓점, 자르기(원본 좌표), 안 여백, 밝기·명암·효과, BinData 번호 … */
+  private pictureRec(w: RecWriter, lv: number, wv: number, hv: number, binId: number, ow: number, oh: number, crop: { t: number; r: number; b: number; l: number } | null, id: number) {
+    const c = crop || { t: 0, r: 0, b: 0, l: 0 };
     const pic = new Buf()
       .u32(0)
       .i32(0)
@@ -501,7 +726,7 @@ class BodyWriter {
       .u32(ow)
       .u32(oh)
       .u8(0);
-    w.rec(TAG.SHAPE_COMPONENT_PICTURE, lv + 2, pic.out());
+    w.rec(TAG.SHAPE_COMPONENT_PICTURE, lv, pic.out());
   }
 
   private footnote(w: RecWriter, lv: number, no: number, text: string) {
@@ -572,6 +797,14 @@ class BodyWriter {
     pb.ctrls.push((w, lv) => {
       const secd = hex('64 63 65 73 00 00 00 00 6e 04 00 00 00 00 40 1f 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00');
       new DataView(secd.buffer).setUint16(20, s.pageNumber.start !== 1 ? s.pageNumber.start : 0, true);
+      // 구역 속성: bit 2 첫 쪽에 바탕쪽 감춤, 3 테두리 감춤, 4 배경 감춤, 8 첫 쪽에만 테두리, 9 첫 쪽에만 배경
+      const border = s.pageBorder;
+      let sp = s.hideFirst?.masterPage ? 1 << 2 : 0;
+      if (border?.borderOn === 'notFirst') sp |= 1 << 3;
+      if (border?.borderOn === 'first') sp |= 1 << 8;
+      if (border?.fillOn === 'notFirst') sp |= 1 << 4;
+      if (border?.fillOn === 'first') sp |= 1 << 9;
+      new DataView(secd.buffer).setUint32(4, sp, true);
       w.rec(TAG.CTRL_HEADER, lv, secd);
       w.rec(
         TAG.PAGE_DEF,
@@ -591,10 +824,42 @@ class BodyWriter {
       );
       w.rec(TAG.FOOTNOTE_SHAPE, lv + 1, hex('00 00 00 00 00 00 00 00 29 00 01 00 ff ff ff ff 52 03 37 02 1b 01 01 01 00 00 00 00'));
       w.rec(TAG.FOOTNOTE_SHAPE, lv + 1, hex('00 00 00 00 00 00 00 00 29 00 01 00 f8 2f e0 00 52 03 37 02 00 00 01 01 00 00 00 00'));
-      for (let i = 0; i < 3; i++) w.rec(TAG.PAGE_BORDER_FILL, lv + 1, hex('01 00 00 00 89 05 89 05 89 05 89 05 01 00'));
+      // 쪽 테두리/배경 (양쪽·짝수·홀수): 속성(bit 0 위치 기준, 1 머리말 포함, 2 꼬리말 포함, 3~4 채울 영역), 간격, 테두리/배경 번호
+      if (border) {
+        const sides = border.sides || {};
+        const noBorders = (['l', 'r', 't', 'b'] as const).filter((k) => !sides[k]);
+        const css = (['t', 'b', 'l', 'r'] as const)
+          .filter((k) => sides[k])
+          .map((k) => `${k}:${Math.max(0.1, +sides[k]!.w || 0.12)}mm ${sides[k]!.s} ${sides[k]!.c}`)
+          .join(';');
+        const img = border.image ? this.images.get(border.image) : null;
+        const bf = this.reg.bf({ bg: border.bg || null, noBorders, borders: noBorders.length < 4, css: css || null, img: img ? { binId: img.binId, mode: border.imageMode || 'TOTAL' } : null });
+        const prop = (border.body ? 1 : 0) | (border.headerInside ? 2 : 0) | (border.footerInside ? 4 : 0) | ((border.fillArea === 'border' ? 2 : border.fillArea === 'page' ? 1 : 0) << 3);
+        const off = [0, 1, 2, 3].map((i) => Math.max(0, Math.min(65535, mmToHwp(+border.offset?.[i] || 0))));
+        w.rec(TAG.PAGE_BORDER_FILL, lv + 1, new Buf().u32(prop).u16(off[0]).u16(off[1]).u16(off[2]).u16(off[3]).u16(bf).out());
+      } else w.rec(TAG.PAGE_BORDER_FILL, lv + 1, hex('01 00 00 00 89 05 89 05 89 05 89 05 01 00'));
+      for (let i = 0; i < 2; i++) w.rec(TAG.PAGE_BORDER_FILL, lv + 1, hex('01 00 00 00 89 05 89 05 89 05 89 05 01 00'));
+      // 바탕쪽: 문단 목록(문단 수, 속성, 글 폭, 글 높이)과 그 문단들. 양쪽 바탕쪽만 쓴다 (목록의 차례가 적용 쪽을 정한다)
+      const mp = (s.masterPages || []).find((x) => x.type === 'both');
+      const mBlocks = mp ? unwrapBoxes(flattenContent((mp.content || []) as any)) : [];
+      if (mBlocks.length) {
+        const pgH = pg.landscape ? Math.min(pg.width, pg.height) : pg.height;
+        const bodyH = mmToHwp(pgH - pg.marginTop - pg.marginBottom - pg.marginHeader - pg.marginFooter);
+        w.rec(TAG.LIST_HEADER, lv + 1, new Buf().i32(mBlocks.length).u32(0).u32(this.bodyW).u32(bodyH).zeros(18).out());
+        const saved = this.w;
+        this.w = w;
+        this.inHF = true;
+        try {
+          this.blocks(mBlocks, lv + 1);
+        } finally {
+          this.inHF = false;
+          this.w = saved;
+        }
+      }
     });
     this.ctrlChars(pb, 2, 'cold');
-    pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, hex('64 6c 6f 63 04 10 00 00 00 00 00 00 00 00 00 00')));
+    this.curCols = colKey(pg.columns);
+    pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, coldRec(pg.columns)));
     const hfHeight = (mm: number) => Math.max(1000, mmToHwp(mm));
     if (s.header.text.trim()) {
       this.ctrlChars(pb, 16, 'head');
@@ -620,13 +885,36 @@ class BodyWriter {
     }
   }
 
+  /** 지금까지 쓴 다단 (다단 설정 나누기를 앞 다단과 다를 때만 쓴다) */
+  private curCols = '1';
+
+  /**
+   * 본문 최상위 블록 앞의 나누기: 쪽 나누기(4), 단 나누기(8), 다단 설정 나누기(2: 문단에 단 정의를 넣는다).
+   * 문단 머리의 나누기 종류 값을 돌려준다
+   */
+  private breakOf(pb: ParaBuild, b: FlatPara | FlatTable, level: number, first: boolean): number {
+    if (first) return 3;
+    if (level !== 0 || this.inHF) return 0;
+    let bt = b.pageBreakBefore ? 4 : 0;
+    if (b.columnBreakBefore && !bt) bt |= 8;
+    if (b.columnsBefore && colKey(b.columnsBefore) !== this.curCols) {
+      const cols = b.columnsBefore;
+      this.curCols = colKey(cols);
+      this.ctrlChars(pb, 2, 'cold');
+      pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, coldRec(cols)));
+      bt |= 2;
+    }
+    return bt;
+  }
+
   para(p: FlatPara, level: number, last: boolean, first = false) {
     const pb = this.beginPara();
     pb.maxSize = p.baseChar.size;
     this.setShape(pb, this.reg.char(p.baseChar));
     if (first) this.sectionCtrls(pb);
-    this.inlines(pb, p.inlines, level);
-    this.emitPara(pb, this.reg.para(p.style), level, last, first ? 3 : p.pageBreakBefore && level === 0 ? 4 : 0);
+    const bt = this.breakOf(pb, p, level, first);
+    this.inlines(pb, p.inlines, level, (p.style.indentLeft + Math.max(0, -p.style.textIndent)) * PT2PX, p.style.spaceBefore * PT2PX);
+    this.emitPara(pb, this.reg.para(p.style), level, last, bt);
   }
 
   table(t: FlatTable, level: number, last: boolean, first = false) {
@@ -634,13 +922,14 @@ class BodyWriter {
     this.setShape(pb, 0);
     // 문서가 표로 시작하면 구역 정의를 표가 든 문단에 함께 둔다 (따로 빈 문단을 두면 그 줄만큼 본문이 내려간다)
     if (first) this.sectionCtrls(pb);
+    const bt = this.breakOf(pb, t, level, first);
     this.ctrlChars(pb, 11, 'tbl ');
     pb.ctrls.push((w, lv) => this.tableCtrl(w, lv, t));
     const pp = defaultPara();
     if (t.align !== 'left') pp.align = t.align as any;
     // 글자처럼 놓인 표의 줄: 줄 간격이 160% 면 표 아래에 글자 크기의 60% 만큼 빈자리가 더 생긴다
     if (t.inline) pp.lineHeight = '1';
-    this.emitPara(pb, this.reg.para(pp), level, last, first ? 3 : t.pageBreakBefore && level === 0 ? 4 : 0);
+    this.emitPara(pb, this.reg.para(pp), level, last, bt);
   }
 
   private tableCtrl(w: RecWriter, lv: number, t: FlatTable) {
@@ -656,7 +945,8 @@ class BodyWriter {
     const om = t.outMarginPx ? t.outMarginPx.map((v) => pxToHwp(v)) : [0, 0, 0, 0];
     const objAttr = t.inline ? 0x082a2211 : (0x082a2210 | ((t.align === 'center' ? 1 : t.align === 'right' ? 2 : 0) << 10)) >>> 0;
     w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('tbl ')).u32(objAttr).i32(0).i32(0).u32(tableW).u32(spanH(0, t.rows)).i32(0).u16(om[0]).u16(om[1]).u16(om[2]).u16(om[3]).u32(inst()).u32(0).u16(0).out());
-    const tb = new Buf().u32(0x04000006).u16(t.rows).u16(t.cols).u16(0).u16(pad).u16(pad).u16(141).u16(141);
+    // 표 속성: bit 0~1 쪽 경계에서 나눔(0 나누지 않음, 1 셀 단위로 나눔, 2 나눔), bit 2 제목 줄 자동 반복
+    const tb = new Buf().u32(0x04000004 | (t.pageSplit === 'row' ? 1 : t.pageSplit === 'none' ? 0 : 2)).u16(t.rows).u16(t.cols).u16(0).u16(pad).u16(pad).u16(141).u16(141);
     for (const row of t.cells) tb.u16(row.length);
     tb.u16(3).u16(0);
     w.rec(TAG.TABLE, lv + 1, tb.out());
@@ -708,6 +998,40 @@ class BodyWriter {
   }
 }
 
+/** 다단 값을 견주는 열쇠 (한 단은 '1') */
+function colKey(c: Columns | null | undefined): string {
+  const v = cleanColumns(c);
+  return v && v.count > 1 ? JSON.stringify(v) : '1';
+}
+
+/**
+ * 단 정의(cold) 컨트롤: 속성 u16 (bit 2~9 단 수, bit 12 너비 같게), 너비가 같으면 단 사이 간격 · 속성2,
+ * 다르면 속성2 뒤에 단마다 너비 · 간격 (본문 폭에 대한 비율, 합 32768), 이어서 구분선 종류 · 굵기 · 색
+ */
+function coldRec(c: Columns | null | undefined): Uint8Array {
+  const v = cleanColumns(c);
+  const b = new Buf().u32(ctrlId('cold'));
+  const n = v && v.count > 1 ? Math.min(255, v.count) : 1;
+  const uneven = !!(v && n > 1 && v.widths && v.gaps);
+  b.u16((n << 2) | (uneven ? 0 : 0x1000));
+  if (!uneven) b.u16(v && n > 1 ? Math.min(65535, mmToHwp(v.gap)) : 0).u16(0);
+  else {
+    b.u16(0);
+    const total = v!.widths!.reduce((x, y) => x + y, 0) + v!.gaps!.slice(0, n - 1).reduce((x, y) => x + y, 0) || 1;
+    const u = (x: number) => Math.max(0, Math.min(65535, Math.round((x / total) * 32768)));
+    for (let i = 0; i < n; i++) b.u16(u(v!.widths![i])).u16(i < n - 1 ? u(v!.gaps![i]) : 0);
+  }
+  const ln = v && n > 1 ? v.line : null;
+  if (ln) {
+    let wi = 0;
+    HWP_BORDER_WIDTHS.forEach((w, i) => {
+      if (Math.abs(w - ln.w) < Math.abs(HWP_BORDER_WIDTHS[wi] - ln.w)) wi = i;
+    });
+    b.u8(ln.s === 'dashed' ? 2 : ln.s === 'dotted' ? 3 : ln.s === 'double' ? 8 : 1).u8(wi).u32(rgb(ln.c));
+  } else b.u8(0).u8(0).u32(0);
+  return b.out();
+}
+
 /** 표·그림이 든 머리말/꼬리말의 블록 (없으면 null) */
 function richHF(def: HeaderFooter): FlatBlock[] | null {
   if (!Array.isArray(def.content) || !def.content.length) return null;
@@ -721,7 +1045,14 @@ function richHF(def: HeaderFooter): FlatBlock[] | null {
 function collectImages(blocks: FlatBlock[], out: Set<string>) {
   for (const b of blocks) {
     if (b.kind === 'para') {
-      for (const i of b.inlines) if (i.type === 'image' && i.src) out.add(i.src);
+      for (const i of b.inlines) {
+        if (i.type === 'image' && i.src) out.add(i.src);
+        else if (i.type === 'shape') {
+          shapeImageSrcs(i.d, out);
+          // 도형 안 글에 든 그림
+          for (const it of i.d.items) if (it.k === 'text' && it.content) collectImages(flattenContent(it.content), out);
+        }
+      }
     } else if (b.kind === 'box') collectImages(b.blocks, out);
     else for (const row of b.cells) for (const c of row) collectImages(c.blocks, out);
   }
@@ -748,6 +1079,8 @@ export async function writeHwp(doc: KDocument, opts: { pageCount?: number } = {}
   const srcs = new Set<string>();
   collectImages(blocks, srcs);
   for (const hf of [doc.settings.header, doc.settings.footer]) collectImages(richHF(hf) || [], srcs);
+  if (doc.settings.pageBorder?.image) srcs.add(doc.settings.pageBorder.image);
+  for (const mp of doc.settings.masterPages || []) collectImages(flattenContent((mp.content || []) as any), srcs);
   const images = new Map<string, { binId: number; w: number; h: number } | null>();
   for (const src of srcs) {
     const img = await prepareImage(src);

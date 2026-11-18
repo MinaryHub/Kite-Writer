@@ -341,6 +341,30 @@
 .hide-marks .kdoc-content .page-break::after {
   display: none;
 }
+/* 단 나누기·다단 설정 나누기 */
+.kdoc-content .column-break::after {
+  border-top-style: dotted;
+  border-top-color: #9a8fd0;
+}
+/* 다단: 블록을 제 단의 자리로 (왼쪽으로는 옮기기만 하고, 오른쪽 여백으로 단의 폭에 맞춘다. --sec-r 은 구역 용지가 다른 블록의 몫) */
+.kdoc-content .pg-col {
+  position: relative;
+  left: var(--col-x, 0px);
+  margin-right: calc(var(--col-r, 0px) + var(--sec-r, 0px)) !important;
+}
+.kdoc-content .pg-col-in {
+  position: relative;
+  left: var(--col-dx, 0px);
+}
+/* 다른 단·쪽으로 넘어간 문단 안 줄들: 제자리에서 옮겨 그린다. 잴 때는 자연 배치로 */
+.kdoc-content .pg-seg {
+  position: relative;
+}
+.kdoc-content.pg-measuring .pg-seg,
+.kdoc-content .pg-measuring .pg-seg {
+  left: 0 !important;
+  top: 0 !important;
+}
 .kdoc-content .pg-spacer {
   display: block;
   pointer-events: none;
@@ -554,7 +578,8 @@
 .print-page .k-tab[style*='width'] {
   display: inline-block;
   tab-size: 0;
-  overflow: hidden;
+  /* hidden 이면 이 상자의 기준선이 아래 끝이 되어 줄이 높아진다. clip 은 기준선을 그대로 둔다 */
+  overflow: clip;
   white-space: pre;
   vertical-align: baseline;
   max-width: 100%;
@@ -690,6 +715,16 @@
 :is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) p {
   position: relative;
 }
+/* 편집기 밖에서 그리는 한글 문서의 글(머리말·꼬리말·바탕쪽·도형 안의 글)도 문단을 기준으로 개체를 띄운다 */
+.hf-rich p,
+.k-shape-text p,
+.master-page p {
+  position: relative;
+}
+.hf-rich,
+.master-page {
+  isolation: isolate;
+}
 /* 떠 있는 글상자: 높이 없는 자리 표시 안에서 제 위치에 뜬다 (뒤따르는 문단 상자의 위쪽이 기준) */
 .kdoc-content .k-float-anchor {
   position: relative;
@@ -712,6 +747,158 @@
 .kdoc-content .k-float-anchor > .k-float.behind {
   z-index: -1;
 }
+/* ----- 문단 테두리: 문단 상자 위에 얹어 그린다 (글과의 간격만큼 바깥으로. 줄 배치는 그대로) ----- */
+.kdoc-content p[data-pb]::after,
+.print-page p[data-pb]::after {
+  content: '';
+  position: absolute;
+  left: calc(-1 * var(--pb-ol, 0px));
+  right: calc(-1 * var(--pb-or, 0px));
+  top: calc(-1 * var(--pb-ot, 0px));
+  bottom: calc(-1 * var(--pb-ob, 0px));
+  border-left: var(--pb-l, none);
+  border-right: var(--pb-r, none);
+  border-top: var(--pb-t, none);
+  border-bottom: var(--pb-b, none);
+  pointer-events: none;
+}
+/* 이어진 문단의 테두리는 한 상자로: 사이의 위·아래 선을 그리지 않는다 */
+.kdoc-content p[data-pb-join] + p[data-pb-join]::after {
+  border-top: none;
+  top: 0;
+}
+.kdoc-content p[data-pb-join]:has(+ p[data-pb-join])::after {
+  border-bottom: none;
+  bottom: 0;
+}
+
+/* ----- 덧말: 본말 위(아래)에 작은 글 ----- */
+/* 글줄 안의 상자(inline)로 둔다: 줄 높이가 0 인 한글 문서에서도 글자 상자의 위 끝이 기준이 된다 */
+.kdoc-content .k-ruby,
+.print-page .k-ruby {
+  position: relative;
+}
+.k-ruby::before {
+  content: attr(data-rt);
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  transform: translateX(-50%);
+  font-size: 0.5em;
+  line-height: 1;
+  white-space: nowrap;
+  letter-spacing: 0;
+  text-indent: 0;
+  pointer-events: none;
+}
+.k-ruby[data-rt-pos='bottom']::before {
+  bottom: auto;
+  top: 100%;
+}
+/* ----- 글자 겹침: 한 글자 자리에 줄여 쓰고 원·네모 등으로 두른다 ----- */
+.kdoc-content .k-compose,
+.print-page .k-compose {
+  display: inline-block;
+  box-sizing: border-box;
+  font-size: 0.62em;
+  min-width: 1.62em;
+  height: 1.62em;
+  line-height: 1.5em;
+  text-align: center;
+  text-indent: 0;
+  letter-spacing: -0.06em;
+  white-space: nowrap;
+  vertical-align: -0.2em;
+  border: 0.09em solid currentColor;
+  border-radius: 50%;
+}
+.k-compose[data-compose='CHAR'] {
+  border-color: transparent;
+}
+.k-compose[data-compose*='RECTANGLE'] {
+  border-radius: 0;
+}
+.k-compose[data-compose='SHAPE_ROUNDED_RECTANGLE'] {
+  border-radius: 0.3em;
+}
+/* 세모: 테두리 대신 세모 바탕 위에 글자를 아래쪽으로 */
+.k-compose[data-compose*='TRIANGLE'],
+.k-compose[data-compose*='TIRANGLE'] {
+  border-color: transparent;
+  border-radius: 0;
+  line-height: 2em;
+  background: linear-gradient(currentColor, currentColor) bottom / 100% 0.09em no-repeat,
+    linear-gradient(to top right, transparent calc(50% - 0.05em), currentColor calc(50% - 0.05em), currentColor calc(50% + 0.05em), transparent calc(50% + 0.05em)) left / 50% 100% no-repeat,
+    linear-gradient(to top left, transparent calc(50% - 0.05em), currentColor calc(50% - 0.05em), currentColor calc(50% + 0.05em), transparent calc(50% + 0.05em)) right / 50% 100% no-repeat;
+}
+/* 반전: 바탕을 채우고 글자를 흰색으로 */
+.k-compose[data-compose*='REVERSAL'] {
+  background: #000;
+  border-color: #000;
+  color: #fff;
+}
+.k-compose[data-compose='SHAPE_REVERSAL_TIRANGLE'] {
+  border: none;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+}
+
+/* ----- 그리기 개체 (선·사각형·타원·다각형·곡선·묶음): 틀 안의 SVG + 도형 안의 글 ----- */
+.kdoc-content .k-shape,
+.print-page .k-shape {
+  display: inline-block;
+  position: relative;
+  line-height: 0;
+  vertical-align: bottom;
+  text-indent: 0;
+  user-select: none;
+}
+.k-shape > svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+}
+/* 화면에서는 가는 선(0.12mm)이 흐려지지 않게 바닥 굵기를 두고, 인쇄에서는 제 굵기로 */
+.kdoc-content .k-shape [style*='--sw'] {
+  stroke-width: max(0.8px, var(--sw));
+}
+.print-page .k-shape [style*='--sw'] {
+  stroke-width: var(--sw);
+}
+.kdoc-content .k-shape.k-float {
+  position: absolute;
+  z-index: 1;
+}
+.kdoc-content .k-shape.ProseMirror-selectednode {
+  outline: 1px dashed #2f6fd6;
+  outline-offset: 2px;
+}
+/* 도형 안의 글: 개체 좌표의 상자를 행렬로 제자리에 놓는다 */
+.k-shape .k-shape-text {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  transform-origin: 0 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  line-height: 1.6;
+  white-space: normal;
+  text-align: left;
+  overflow: visible;
+  pointer-events: none;
+}
+.k-shape .k-shape-text-in > :first-child {
+  margin-top: 0;
+}
+
+/* 글자처럼 취급하는 개체(그림·도형): 한글은 개체를 그 높이만 한 글자처럼 놓는다 — 기준선이 높이의 85% 자리이므로
+   개체의 아래 끝은 기준선보다 높이의 15% 만큼 아래에 온다 (줄에서 가장 큰 개체는 줄 맨 위에서 시작한다) */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(.k-image, .k-shape):not(.k-float) {
+  vertical-align: calc(var(--kh, 0px) * -0.15);
+}
+
 /* 한글이 놓은 줄: 줄 상자의 높이와 기준선을 줄 첫머리의 버팀대가 정한다 (문단 자체의 줄 높이는 0) */
 .kdoc-content .hwp-strut {
   display: inline-block;

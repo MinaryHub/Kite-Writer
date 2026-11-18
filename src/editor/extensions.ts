@@ -1,6 +1,5 @@
 import { getSchema, type AnyExtension } from '@tiptap/core';
 import StarterKit from '@tiptap/starter-kit';
-import Underline from '@tiptap/extension-underline';
 import TextStyle from '@tiptap/extension-text-style';
 import Color from '@tiptap/extension-color';
 import FontFamily from '@tiptap/extension-font-family';
@@ -20,6 +19,7 @@ import { TextStyleExt } from './extensions/textStyleExt';
 import {
   KImage,
   PageBreak,
+  ColumnBreak,
   Footnote,
   KBulletList,
   KOrderedList,
@@ -40,6 +40,8 @@ import { CommentMark } from './extensions/comments';
 import { HwpMetrics } from './extensions/hwpMetrics';
 import { TabFill } from './extensions/tabFill';
 import { Sections } from './extensions/sections';
+import { Shape } from './extensions/shape';
+import { Compose, KStrike, KUnderline, Ruby } from './extensions/charMarks';
 
 /** 문서 스키마를 구성하는 확장 (편집기 없이 변환에도 사용) */
 export function getExtensions(): AnyExtension[] {
@@ -47,10 +49,15 @@ export function getExtensions(): AnyExtension[] {
     StarterKit.configure({
       bulletList: false,
       orderedList: false,
+      // 취소선은 종류·색을 가진 것으로 바꿔 쓴다 (KStrike)
+      strike: false,
       history: { depth: 1000, newGroupDelay: 600 },
       dropcursor: { color: '#2f6fd6', width: 2 },
     }),
-    Underline,
+    KUnderline,
+    KStrike,
+    Ruby,
+    Compose,
     TextStyle,
     Color,
     // 글꼴 이름은 그대로 저장하고, 화면에는 대체 글꼴 목록을 붙여 그린다
@@ -62,7 +69,7 @@ export function getExtensions(): AnyExtension[] {
           setFontFamily:
             (fontFamily: string) =>
             ({ chain }: any) =>
-              chain().setMark('textStyle', { fontFamily, langFonts: null }).run(),
+              chain().setMark('textStyle', { fontFamily, langFonts: null, eaFont: null }).run(),
         };
       },
       addGlobalAttributes() {
@@ -76,7 +83,9 @@ export function getExtensions(): AnyExtension[] {
                 renderHTML: (a: Record<string, any>) => {
                   if (!a.fontFamily) return {};
                   const w = fontWeightFallback(String(a.fontFamily));
-                  return { style: `font-family: ${fontStack(a.fontFamily)}${w ? `; font-weight: ${w}` : ''}` };
+                  // eaFont: Word 문서의 한글 글꼴 (영문 글꼴에 없는 글자를 그린다)
+                  const ea = typeof a.eaFont === 'string' && a.eaFont.trim() ? a.eaFont : null;
+                  return { style: `font-family: ${fontStack(a.fontFamily, { ea })}${w ? `; font-weight: ${w}` : ''}` };
                 },
               },
             },
@@ -114,10 +123,12 @@ export function getExtensions(): AnyExtension[] {
     ParagraphFormat,
     TextStyleExt,
     PageBreak,
+    ColumnBreak,
     Footnote,
     MathInline,
     TextBox,
     TabStop,
+    Shape,
     // 검토: 변경 내용(넣음/지움)과 메모
     Insertion,
     Deletion,

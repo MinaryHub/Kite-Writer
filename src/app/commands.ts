@@ -11,6 +11,7 @@ import * as review from './review';
 import * as collab from '../collab/session';
 import { openSponsor, openContact, contactAvailable } from '../support';
 import { applyLeaderTab, insertToc, updateToc } from './toc';
+import { changeCase, insertTextBox, sortParagraphs, tableCalc, tableEqualHeight, tableToText, textToTable } from './editCommands';
 
 /** 차례 만들기 (제목 1~3 · 한글의 개요 1~3 문단) */
 async function runInsertToc() {
@@ -233,6 +234,11 @@ export const commands: Record<string, Command> = {
   'edit.find': { label: '찾기...', icon: 'Search', shortcut: 'Ctrl+F', keys: ['Ctrl+F'], run: () => app.set({ findOpen: 'find' }), enabled: hasDoc },
   'edit.replace': { label: '찾아 바꾸기...', icon: 'Replace', shortcut: 'Ctrl+H', keys: ['Ctrl+H', 'Ctrl+F2'], run: () => app.set({ findOpen: 'replace' }), enabled: hasDoc },
   'edit.goto': { label: '찾아가기...', icon: 'CornerDownRight', shortcut: 'Alt+G', keys: ['Alt+G'], run: () => app.openDialog('goto'), enabled: hasDoc },
+  'edit.upper': { label: '대문자로', icon: 'CaseSensitive', run: () => ed() && changeCase(ed()!, 'upper'), enabled: hasDoc },
+  'edit.lower': { label: '소문자로', icon: 'CaseSensitive', run: () => ed() && changeCase(ed()!, 'lower'), enabled: hasDoc },
+  'edit.titleCase': { label: '낱말 첫 글자만 대문자로', icon: 'CaseSensitive', run: () => ed() && changeCase(ed()!, 'title'), enabled: hasDoc },
+  'edit.sortAsc': { label: '문단 정렬 (가나다순)', icon: 'ArrowDownAZ', run: () => ed() && sortParagraphs(ed()!, false), enabled: hasDoc },
+  'edit.sortDesc': { label: '문단 정렬 (역순)', icon: 'ArrowDownAZ', run: () => ed() && sortParagraphs(ed()!, true), enabled: hasDoc },
 
   // ----- 보기 -----
   'view.ruler': { label: '눈금자', run: () => app.toggleView('ruler'), active: () => app.view.ruler },
@@ -312,6 +318,10 @@ export const commands: Record<string, Command> = {
   'format.leaderTab': { label: '제목과 쪽 사이 점선 채우기', icon: 'MoreHorizontal', run: runLeaderTab, enabled: hasDoc },
   'insert.pageBreak': { label: '쪽 나누기', icon: 'SeparatorHorizontal', shortcut: 'Ctrl+Enter', run: () => chain().setPageBreak().run(), enabled: hasDoc },
   'insert.hr': { label: '가로줄', icon: 'Minus', run: () => chain().setHorizontalRule().run(), enabled: hasDoc },
+  'insert.shape': { label: '도형...', icon: 'Shapes', run: () => app.openDialog('shape'), enabled: hasDoc },
+  'insert.textBox': { label: '글상자', icon: 'TextCursorInput', shortcut: 'Ctrl+N,B', run: () => ed() && insertTextBox(ed()!), enabled: hasDoc },
+  'insert.ruby': { label: '덧말 넣기...', icon: 'Languages', run: () => app.openDialog('ruby'), enabled: hasDoc },
+  'insert.compose': { label: '글자 겹치기...', icon: 'Layers', run: () => app.openDialog('compose'), enabled: hasDoc },
   'insert.date': { label: '날짜 (yyyy-mm-dd)', icon: 'Calendar', run: () => insertDateTime('date'), enabled: hasDoc },
   'insert.dateKo': { label: '날짜 (yyyy년 m월 d일 요일)', icon: 'Calendar', run: () => insertDateTime('korean'), enabled: hasDoc },
   'insert.time': { label: '시간 (hh:mm)', icon: 'Clock', run: () => insertDateTime('time'), enabled: hasDoc },
@@ -352,6 +362,9 @@ export const commands: Record<string, Command> = {
   'page.setup': { label: '편집 용지...', icon: 'FileText', shortcut: 'F7', keys: ['F7'], run: () => app.openDialog('pageSetup'), enabled: hasDoc },
   'page.headerFooter': { label: '머리말/꼬리말...', icon: 'PanelTop', shortcut: 'Ctrl+N,H', run: () => app.openDialog('headerFooter'), enabled: hasDoc },
   'page.number': { label: '쪽 번호 매기기...', icon: 'Hash', shortcut: 'Ctrl+N,P', run: () => app.openDialog('pageNumber'), enabled: hasDoc },
+  'page.columns': { label: '다단 설정...', icon: 'Columns2', run: () => app.openDialog('columns'), enabled: hasDoc },
+  'page.border': { label: '쪽 테두리/배경...', icon: 'Frame', run: () => app.openDialog('pageBorder'), enabled: hasDoc },
+  'insert.columnBreak': { label: '단 나누기', icon: 'Columns2', shortcut: 'Ctrl+Shift+Enter', run: () => chain().setColumnBreak().run(), enabled: hasDoc },
   'page.orientation': {
     label: '용지 방향 바꾸기 (가로/세로)',
     icon: 'RectangleHorizontal',
@@ -382,6 +395,15 @@ export const commands: Record<string, Command> = {
   'table.select': { label: '표 선택', icon: 'Table', run: selectTable, enabled: inTable },
   'table.header': { label: '제목 줄 지정/해제', icon: 'PanelTopOpen', run: () => chain().toggleHeaderRow().run(), enabled: inTable },
   'table.cellProps': { label: '셀 테두리/배경...', icon: 'PaintBucket', shortcut: 'L', run: () => app.openDialog('cellProps'), enabled: inTable },
+  'table.equalHeight': { label: '셀 높이를 같게', icon: 'Rows3', run: () => ed() && tableEqualHeight(ed()!), enabled: inTable },
+  'table.sumRow': { label: '가로 합계', icon: 'Sigma', run: () => ed() && tableCalc(ed()!, 'row', 'sum'), enabled: inTable },
+  'table.sumCol': { label: '세로 합계', icon: 'Sigma', run: () => ed() && tableCalc(ed()!, 'col', 'sum'), enabled: inTable },
+  'table.avgRow': { label: '가로 평균', icon: 'Calculator', run: () => ed() && tableCalc(ed()!, 'row', 'avg'), enabled: inTable },
+  'table.avgCol': { label: '세로 평균', icon: 'Calculator', run: () => ed() && tableCalc(ed()!, 'col', 'avg'), enabled: inTable },
+  'table.prodRow': { label: '가로 곱', icon: 'Calculator', run: () => ed() && tableCalc(ed()!, 'row', 'prod'), enabled: inTable },
+  'table.prodCol': { label: '세로 곱', icon: 'Calculator', run: () => ed() && tableCalc(ed()!, 'col', 'prod'), enabled: inTable },
+  'table.toText': { label: '표를 문자열로', icon: 'Type', run: () => ed() && tableToText(ed()!), enabled: inTable },
+  'table.fromText': { label: '문자열을 표로', icon: 'Table', run: () => ed() && textToTable(ed()!), enabled: () => hasDoc() && !inTable() },
   'table.equalWidth': {
     label: '셀 너비를 같게',
     icon: 'Columns2',
@@ -580,7 +602,7 @@ for (const [id, c] of Object.entries(commands)) for (const k of c.keys || []) ke
 
 /** Ctrl+N 다음 글자로 이어지는 한글식 단축키 */
 const CHORDS: Record<string, Record<string, string>> = {
-  'Ctrl+N': { T: 'insert.table', I: 'insert.image', H: 'page.headerFooter', P: 'page.number', N: 'insert.footnote', M: 'insert.math' },
+  'Ctrl+N': { T: 'insert.table', I: 'insert.image', H: 'page.headerFooter', P: 'page.number', N: 'insert.footnote', M: 'insert.math', B: 'insert.textBox' },
   'Ctrl+Q': { I: 'file.info' },
   'Ctrl+G': { T: 'view.marks' },
 };

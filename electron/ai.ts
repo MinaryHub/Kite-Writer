@@ -2,6 +2,7 @@ import { app, safeStorage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import Anthropic from '@anthropic-ai/sdk';
+import { loadConfigWithSource } from '@anthropic-ai/sdk/core/credentials';
 import OpenAI from 'openai';
 import { ApiError as GeminiApiError, GoogleGenAI } from '@google/genai';
 
@@ -63,13 +64,42 @@ function getKey(p: Provider): string | null {
   return null;
 }
 
-export function keyStatus(): Record<Provider, 'saved' | 'env' | 'none'> {
+export type KeyState = 'saved' | 'env' | 'login' | 'none';
+
+/**
+ * Claude: API 키 없이 '로그인한 계정'으로 쓸 수 있는가. Anthropic CLI 로 로그인해 둔 프로필(`ant auth login`)이나
+ * ANTHROPIC_AUTH_TOKEN 이 있으면 SDK 가 그 로그인 정보로 요청한다 (키를 넣지 않아도 된다)
+ */
+let claudeLogin = false;
+export async function refreshClaudeLogin(): Promise<boolean> {
+  try {
+    claudeLogin = !!process.env.ANTHROPIC_AUTH_TOKEN || !!(await loadConfigWithSource());
+  } catch {
+    claudeLogin = false;
+  }
+  return claudeLogin;
+}
+
+export function keyStatus(): Record<Provider, KeyState> {
   const store = readStore();
-  const out = {} as Record<Provider, 'saved' | 'env' | 'none'>;
+  const out = {} as Record<Provider, KeyState>;
   for (const p of ['claude', 'openai', 'gemini', 'ollama'] as Provider[]) {
-    out[p] = store[p] ? 'saved' : ENV_KEYS[p].some((n) => process.env[n]) ? 'env' : 'none';
+    out[p] = store[p] ? 'saved' : ENV_KEYS[p].some((n) => process.env[n]) ? 'env' : p === 'claude' && claudeLogin ? 'login' : 'none';
   }
   return out;
+}
+
+/** 지금 Claude 요청이 API 키가 아니라 로그인해 둔 계정으로 나가는가 (오류 안내를 그에 맞춘다) */
+let claudeViaLogin = false;
+
+/** Claude 클라이언트: 저장한 키(또는 환경 변수의 키)가 있으면 그것으로, 없으면 로그인해 둔 계정으로 */
+async function claudeClient(): Promise<Anthropic> {
+  const k = getKey('claude');
+  claudeViaLogin = !k;
+  if (k) return new Anthropic({ apiKey: k });
+  // 키를 주지 않으면 SDK 가 로그인 정보(ANTHROPIC_AUTH_TOKEN, `ant auth login` 프로필)를 찾아 쓴다
+  if (await refreshClaudeLogin()) return new Anthropic();
+  throw new Error('Claude API 키가 없습니다. AI 도우미의 설정(⚙)에서 키를 넣거나, 터미널에서 `ant auth login` 으로 로그인해 두세요.');
 }
 
 export function setKey(p: Provider, key: string | null) {
@@ -194,6 +224,7 @@ export const CLAUDE_MODELS = [
   { id: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
   { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
   { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' },
+  { id: 'claude-fable-5-2', label: 'Claude Fable 5.2' },
   { id: 'claude-fable-5-1', label: 'Claude Fable 5.1' },
 ];
 
@@ -223,10 +254,10 @@ export async function listModels(p: Provider): Promise<{ id: string; label: stri
 
 // ---------------- 채팅 ----------------
 /** 서버 측 대체 모델(fallbacks: "default")을 지원하는 Claude 모델 */
-const CLAUDE_FALLBACK_MODELS = new Set(['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', 'claude-opus-5']);
+const CLAUDE_FALLBACK_MODELS = new Set(['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-2', 'claude-fable-5-1', 'claude-opus-5']);
 
 async function chatClaude(req: ChatRequest, emit: (e: ChatEvent) => void, signal: AbortSignal) {
-  const client = new Anthropic({ apiKey: requireKey('claude') });
+  const client = await claudeClient();
   const useFallback = CLAUDE_FALLBACK_MODELS.has(req.model);
   const stream = client.beta.messages.stream(
     {
@@ -294,13 +325,15 @@ async function chatGemini(req: ChatRequest, emit: (e: ChatEvent) => void, signal
 function friendlyError(p: Provider, e: any): string {
   if (e?.name === 'AbortError' || e instanceof Anthropic.APIUserAbortError) return '중지했습니다.';
   if (p === 'claude') {
-    if (e instanceof Anthropic.AuthenticationError) return 'Claude API 키가 올바르지 않습니다.';
+    if (e instanceof Anthropic.AuthenticationError) return claudeViaLogin ? 'Claude 로그인 정보가 만료되었거나 올바르지 않습니다. 터미널에서 `ant auth login` 으로 다시 로그인하거나, 설정(⚙)에서 API 키를 넣으세요.' : 'Claude API 키가 올바르지 않습니다.';
     if (e instanceof Anthropic.PermissionDeniedError) return '이 Claude 모델을 사용할 권한이 없습니다.';
     if (e instanceof Anthropic.NotFoundError) return '모델을 찾을 수 없습니다. 모델 이름을 확인하세요.';
     if (e instanceof Anthropic.RateLimitError) return '요청이 너무 많습니다. 잠시 후 다시 시도하세요.';
     if (e instanceof Anthropic.BadRequestError) return '요청 오류: ' + e.message;
     if (e instanceof Anthropic.APIConnectionError) return '인터넷 연결을 확인하세요.';
     if (e instanceof Anthropic.APIError) return `Claude 오류 (${e.status}): ${e.message}`;
+    // 로그인해 둔 계정으로 보내려다 로그인 정보를 읽지 못했다 (만료, 파일 권한 등: SDK 가 알려 준 까닭을 덧붙인다)
+    if (claudeViaLogin) return `Claude 로그인 정보를 쓸 수 없습니다. 터미널에서 \`ant auth login\` 으로 다시 로그인하거나, 설정(⚙)에서 API 키를 넣으세요. (${String(e?.message || e).slice(0, 300)})`;
   }
   if (p === 'openai') {
     if (e instanceof OpenAI.AuthenticationError) return 'OpenAI API 키가 올바르지 않습니다.';

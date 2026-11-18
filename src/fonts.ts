@@ -50,7 +50,10 @@ export const FONT_SIZES = [8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 26,
 
 const SERIF_RE = /바탕|명조|궁서|신명|Batang|Myeongjo|Gungsuh|serif|Times|Georgia|Cambria|Garamond|Mincho|Song|Ming|윤명조|한양신|본명조/i;
 
-const SANS_RE = /고딕|돋움|굴림|헤드라인|그래픽|Gothic|Dotum|Gulim|Sans|Arial|Helvetica|Verdana|Tahoma|Segoe|Calibri|Malgun|맑은|나눔스퀘어|Pretendard|Noto Sans|Roboto|Inter/i;
+const SANS_RE = /고딕|돋움|굴림|헤드라인|그래픽|Gothic|Dotum|Gulim|Sans|Arial|Helvetica|Verdana|Tahoma|Segoe|Calibri|Malgun|맑은|나눔스퀘어|Pretendard|Noto Sans|Roboto|Inter|Aptos|Candara|Corbel|Franklin|Lucida|Trebuchet|Lato|Montserrat|Optima|Futura|Avenir|Myriad|Frutiger|Univers|Impact|Bahnschrift|Carlito|Ubuntu/i;
+
+/** 영문 이름이지만 한글 글꼴인 것 (없을 때 영문 글꼴로 대신하지 않는다) */
+const KOREAN_ASCII_RE = /Batang|Gulim|Dotum|Gungsuh|Myeongjo|Myungjo|Nanum|HCR|^HY|Hancom|Haansoft|Malgun|Noto (Sans|Serif) (CJK|KR)|Pretendard|Gothic|D2Coding|Yoon|Sandoll|Mincho|SimSun|SimHei|MingLiU|Meiryo|Source Han|kite-/i;
 
 /** 시스템에 설치된 글꼴 이름 (앱이 시작할 때 채워진다; 비어 있으면 모름). 글꼴 목록 UI 용 —
  * 한글이 자기 폴더 글꼴을 세션에 등록해 두면 여기 이름이 있어도 브라우저(DirectWrite)는 그리지 못하므로 사용 가능 여부는 fontUsable 로 본다 */
@@ -311,7 +314,7 @@ export function applyPdfFontVars(families: string[]) {
 }
 
 /** 설치되지 않은 글꼴을 위한 대체 글꼴 목록 (한글처럼 명조/고딕 계열 유지) */
-export function fontStack(name: string, opts: { canvas?: boolean } = {}): string {
+export function fontStack(name: string, opts: { canvas?: boolean; ea?: string | null } = {}): string {
   // 문서에서 온 글꼴 이름이므로 CSS 구문을 바꿀 수 있는 문자는 모두 제거
   const safe = name.replace(/[\u0000-\u001f\u007f'"\\;:{}()<>@[\]]/g, '').trim().slice(0, 80) || '함초롬바탕';
   // 그 이름으로는 못 그리지만 다른 이름(영문 이름·HY 이름)으로 설치되어 있으면 그 이름을 먼저 둔다
@@ -322,16 +325,24 @@ export function fontStack(name: string, opts: { canvas?: boolean } = {}): string
   // 캔버스(글자 폭 재기)는 CSS 변수를 풀지 못하므로 PDF 글꼴 이름을 바로 쓴다
   const direct = embeddedAliases.get(safe);
   const pdfAlias = opts.canvas ? (direct ? `'${direct.replace(/['"\\]/g, '')}', ` : '') : `var(${pdfFontVar(safe)}, kite-none), `;
+  // ea: 한글·한자에 쓰는 글꼴 (Word 문서의 '한글 글꼴'). 영문 글꼴에 없는 글자는 그다음에 둔 이 글꼴로 그려진다
+  const eaSafe = opts.ea ? opts.ea.replace(/[\u0000-\u001f\u007f'"\\;:{}()<>@[\]]/g, '').trim().slice(0, 80) : '';
+  const eaAlias = eaSafe && !fontUsable(eaSafe) ? usableAlias(eaSafe) : null;
+  const eaPart = eaSafe && eaSafe !== safe ? (eaAlias ? `, '${eaAlias}', '${eaSafe}'` : `, '${eaSafe}'`) : '';
   const q = pdfAlias + (alias ? `'${alias}', '${safe}'` : `'${safe}'`);
-  if (/D2Coding|Consolas|Courier|Mono|코딩/i.test(name)) return `${q}, D2Coding, Consolas, monospace`;
+  if (/D2Coding|Consolas|Courier|Mono|코딩/i.test(name)) return `${q}${eaPart}, D2Coding, Consolas, monospace`;
   // kite-sym: 가운뎃점(·) 등 몇몇 기호만 맡는 글꼴(editor.css 의 @font-face, unicode-range).
   // 휴먼명조·HY 계열 글꼴은 이 기호를 전각으로 그리지만 한글은 기호 글꼴로 반각으로 보여 주므로 그에 맞춘다.
   // 한글은 설치되지 않은 글꼴을 기본 글꼴(함초롬바탕)로 보여 준다. 이름이 분명히 고딕 계열일 때만 고딕으로 대신한다
   // macOS: 일반 serif/sans-serif 는 'Apple SD Gothic Neo' 로 풀리는데 그 글꼴의 한글 폭은 0.865em 이라
   // 한글 글꼴(모두 1em)보다 좁아 줄 바꿈이 달라진다. 한글 폭이 1em 에 가깝고 계열이 맞는 나눔·애플 글꼴을 앞에 둔다
-  return SANS_RE.test(name) && !SERIF_RE.test(name)
-    ? `'kite-sym', ${q}, '함초롬돋움', 'HCR Dotum', '맑은 고딕', 'Malgun Gothic', 'NanumGothic', 'AppleGothic', sans-serif, 'Segoe UI Symbol', Wingdings`
-    : `'kite-sym', ${q}, '함초롬바탕', 'HCR Batang', '휴먼명조', '바탕', Batang, 'NanumMyeongjo', 'AppleMyungjo', serif, 'Segoe UI Symbol', Wingdings`;
+  const sans = SANS_RE.test(name) && !SERIF_RE.test(name);
+  // 영문 글꼴(Word·PDF 문서의 Aptos, Garamond 등)이 이 컴퓨터에 없으면 영문 글자는 같은 계열의 흔한 영문 글꼴로 대신 그린다.
+  // 한글은 그 글꼴에 없으므로 뒤의 한글 글꼴로 넘어간다. 한글 글꼴(이름이 영문인 것 포함)에는 끼워 넣지 않는다
+  const latin = /^[\x20-\x7e]+$/.test(safe) && !KOREAN_ASCII_RE.test(safe) ? (sans ? `, Arial, 'Liberation Sans', Helvetica` : `, 'Times New Roman', 'Liberation Serif'`) : '';
+  return sans
+    ? `'kite-sym', ${q}${latin}${eaPart}, '함초롬돋움', 'HCR Dotum', '맑은 고딕', 'Malgun Gothic', 'NanumGothic', 'AppleGothic', sans-serif, 'Segoe UI Symbol', Wingdings`
+    : `'kite-sym', ${q}${latin}${eaPart}, '함초롬바탕', 'HCR Batang', '휴먼명조', '바탕', Batang, 'NanumMyeongjo', 'AppleMyungjo', serif, 'Segoe UI Symbol', Wingdings`;
 }
 
 export function cssFontFamily(name: string): string {

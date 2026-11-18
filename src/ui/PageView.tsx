@@ -4,7 +4,7 @@ import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
 import type { PageSetup } from '../types';
 import { useApp } from '../app/hooks';
-import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
+import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, pagePaintHtml, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
 import { sectionsKey } from '../editor/extensions/sections';
 import { formatPageNumber, splitExt } from '../formats/common';
 import { applyFormatPainter, insertImagesFromFiles } from '../app/commands';
@@ -13,6 +13,7 @@ import { FN_FONT_PX, FN_LINE, FN_SEP } from '../editor/extensions/pagination';
 import { showContextMenu } from './ContextMenu';
 import { platform } from '../platform';
 import { hfRichHtml } from '../hfRich';
+import { layoutTabsHtml } from '../editor/tabLayout';
 
 export function PageView({ tab, active, hidden = false }: { tab: DocTab; active: boolean; hidden?: boolean }) {
   const app = useApp();
@@ -38,9 +39,9 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     const s = tab.settings;
     const resolve = (p: PageSetup) => {
       const x = geomFor(s, p, PAGE_GAP);
-      return { pageHeight: x.H, gap: x.gap, contentHeight: x.contentH, contentWidth: x.contentW, mt: x.mt };
+      return { pageHeight: x.H, gap: x.gap, contentHeight: x.contentH, contentWidth: x.contentW, mt: x.mt, columns: p.columns || null };
     };
-    const geo = { pageHeight: g.H, gap: g.gap, contentHeight: g.contentH, contentWidth: g.contentW, mt: g.mt, resolve };
+    const geo = { pageHeight: g.H, gap: g.gap, contentHeight: g.contentH, contentWidth: g.contentW, mt: g.mt, columns: s.page.columns || null, resolve, rest: s.firstPage ? s.page : null };
     const prev = storage.geometry;
     const secStore = tab.editor.storage.sections;
     const secKey = W + '|' + JSON.stringify(s.page);
@@ -55,10 +56,10 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       tab.editor.view.dispatch(tab.editor.state.tr.setMeta(sectionsKey, true).setMeta('addToHistory', false));
       changed = true;
     }
-    if (!prev || prev.pageHeight !== geo.pageHeight || prev.contentHeight !== geo.contentHeight || prev.contentWidth !== geo.contentWidth || prev.gap !== geo.gap || prev.mt !== geo.mt) {
+    if (!prev || prev.pageHeight !== geo.pageHeight || prev.contentHeight !== geo.contentHeight || prev.contentWidth !== geo.contentWidth || prev.gap !== geo.gap || prev.mt !== geo.mt || JSON.stringify(prev.columns || null) !== JSON.stringify(geo.columns) || JSON.stringify(prev.rest || null) !== JSON.stringify(geo.rest)) {
       storage.geometry = geo;
       changed = true;
-    } else storage.geometry = { ...prev, resolve };
+    } else storage.geometry = { ...prev, resolve, rest: geo.rest };
     if (changed) storage.schedule();
   });
 
@@ -190,19 +191,29 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     const top = pl.top;
     const left = pl.left;
     const z = hfZones(pl.settings, g);
+    // 쪽 테두리/배경·바탕쪽: 용지와, 용지를 덮는 쪽 경계 가리개에 같은 그림을 깐다
+    const paint = pagePaintHtml(pl.settings, g, k);
+    const next = plans[k + 1];
+    const nextPaint = next ? pagePaintHtml(next.settings, next.g, k + 1) : '';
     pages.push(
       <div key={k} className="paper" style={{ top, left, width: g.W, height: g.H, ...(pageBackgroundStyle(s, k) || {}) }}>
+        {paint && <div className="pg-paint-host" dangerouslySetInnerHTML={{ __html: paint }} />}
         <Corners g={g} />
       </div>,
     );
     // 쪽 경계 가리개 (본문 끝 → 다음 쪽 본문 시작). 다음 쪽의 용지가 다를 수 있다
     const maskTop = top + g.mt + g.contentH;
-    const next = plans[k + 1];
     chrome.push(
       <div key={'m' + k} className="mask" style={{ top: maskTop, width: W, height: next ? next.top + next.g.mt - maskTop : g.mb }}>
-        <div className="m-paper" style={{ top: 0, left, width: g.W, height: g.mb, ...(pageBackgroundStyle(s, k, g.mt + g.contentH) || {}) }} />
+        <div className="m-paper" style={{ top: 0, left, width: g.W, height: g.mb, ...(pageBackgroundStyle(s, k, g.mt + g.contentH) || {}) }}>
+          {paint && <div className="pg-paint-host" style={{ top: -(g.mt + g.contentH) }} dangerouslySetInnerHTML={{ __html: paint }} />}
+        </div>
         {next && <div className="m-gap" style={{ top: g.mb, height: g.gap }} />}
-        {next && <div className="m-paper" style={{ top: next.top - maskTop, left: next.left, width: next.g.W, height: next.g.mt, ...(pageBackgroundStyle(s, k + 1) || {}) }} />}
+        {next && (
+          <div className="m-paper" style={{ top: next.top - maskTop, left: next.left, width: next.g.W, height: next.g.mt, ...(pageBackgroundStyle(s, k + 1) || {}) }}>
+            {nextPaint && <div className="pg-paint-host" dangerouslySetInnerHTML={{ __html: nextPaint }} />}
+          </div>
+        )}
       </div>,
     );
     const num = pageNumAt(s, k);
@@ -218,7 +229,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     const ft = hfAt(s, 'footer', k);
     const hRich = hd ? hfRichHtml(hd) : null;
     const fRich = ft ? hfRichHtml(ft) : null;
-    const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: hfText(html, num, total, s.pageNumber.format) }} />;
+    const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: layoutTabsHtml(hfText(html, num, total, s.pageNumber.format), g.contentW) }} />;
     chrome.push(
       <div
         key={'h' + k}
@@ -261,7 +272,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       );
     }
     // 표가 이어지는 쪽 맨 위의 제목 줄 (쪽 나누기가 비워 둔 자리)
-    if (tab.layout.repeats?.some((r) => r.page === k) || tab.layout.cuts?.some((c) => c.page === k)) {
+    if (tab.layout.repeats?.some((r) => r.page === k) || tab.layout.cuts?.some((c) => c.page === k) || tab.layout.colLines?.some((c) => c.page === k)) {
       chrome.push(<div key={'rh' + k} className="pg-repeat-layer" style={{ position: 'absolute', left, top, width: g.W, height: g.H, pointerEvents: 'none' }} dangerouslySetInnerHTML={{ __html: repeatHeadsHtml(tab, g, k) }} />);
     }
     const fns = tab.layout.footnotes.filter((f) => f.page === k);

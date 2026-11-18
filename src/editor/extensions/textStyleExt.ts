@@ -21,6 +21,33 @@ export const TEXT_EFFECT_CSS: Record<string, string> = {
   engrave: 'text-shadow: 1px 1px 0 #fff, -1px -1px 0 #999',
 };
 
+/** 강조점 → CSS text-emphasis 모양과 자리 (over 위, under 아래) */
+export const EMPHASIS_CSS: Record<string, [string, string]> = {
+  DOT_ABOVE: ['filled dot', 'over'],
+  RING_ABOVE: ['open circle', 'over'],
+  TILDE: ["'~'", 'over'],
+  CARON: ["'ˇ'", 'over'],
+  SIDE: ['filled sesame', 'over'],
+  COLON: ["':'", 'over'],
+  GRAVE_ACCENT: ["'`'", 'over'],
+  ACUTE_ACCENT: ["'´'", 'over'],
+  CIRCUMFLEX: ["'^'", 'over'],
+  MACRON: ["'¯'", 'over'],
+  HOOK_ABOVE: ["'ˀ'", 'over'],
+  DOT_BELOW: ['filled dot', 'under'],
+};
+/** 강조점 이름의 한글 표시 */
+export const EMPHASIS_LABELS: [string, string][] = [
+  ['', '없음'],
+  ['DOT_ABOVE', '검은 점 ·'],
+  ['RING_ABOVE', '흰 동그라미 ˚'],
+  ['CARON', 'ˇ'],
+  ['TILDE', '~'],
+  ['SIDE', '、'],
+  ['COLON', ':'],
+  ['DOT_BELOW', '아래 점'],
+];
+
 export const TextStyleExt = Extension.create({
   name: 'textStyleExt',
 
@@ -71,6 +98,39 @@ export const TextStyleExt = Extension.create({
             renderHTML: (a: Record<string, any>) => {
               const v = cleanLangFonts(a.langFonts);
               return v ? { 'data-lang-fonts': JSON.stringify(v) } : {};
+            },
+          },
+          /**
+           * 한글·한자 글꼴 (Word 문서): 글꼴(fontFamily)은 영문 글꼴이고, 그 글꼴에 없는 한글·한자는 이 글꼴로 그린다.
+           * 화면의 글꼴 목록에서 영문 글꼴 바로 다음에 놓인다 (extensions.ts 의 fontFamily)
+           */
+          eaFont: {
+            default: null,
+            parseHTML: (el: HTMLElement) => (el.getAttribute('data-ea-font') || '').slice(0, 80) || null,
+            renderHTML: (a: Record<string, any>) => (typeof a.eaFont === 'string' && a.eaFont.trim() ? { 'data-ea-font': a.eaFont.trim().slice(0, 80) } : {}),
+          },
+          /** 강조점 (한글의 강조점 이름: DOT_ABOVE, RING_ABOVE, TILDE …) */
+          emphasis: {
+            default: null,
+            parseHTML: (el: HTMLElement) => {
+              const v = el.getAttribute('data-emphasis') || '';
+              return EMPHASIS_CSS[v] ? v : null;
+            },
+            renderHTML: (a: Record<string, any>) => {
+              const e = EMPHASIS_CSS[a.emphasis];
+              return e ? { 'data-emphasis': a.emphasis, style: `text-emphasis: ${e[0]}; -webkit-text-emphasis: ${e[0]}; text-emphasis-position: ${e[1]} right; -webkit-text-emphasis-position: ${e[1]} right` } : {};
+            },
+          },
+          /** 글자 위치 (%: 글자 크기에 대한 비율. 양수면 아래로 — 한글과 같다) */
+          offset: {
+            default: null,
+            parseHTML: (el: HTMLElement) => {
+              const v = parseFloat(el.getAttribute('data-offset') || '');
+              return Number.isFinite(v) && v ? Math.max(-100, Math.min(100, v)) : null;
+            },
+            renderHTML: (a: Record<string, any>) => {
+              const v = +a.offset;
+              return Number.isFinite(v) && v ? { 'data-offset': String(v), style: `position: relative; top: ${Math.max(-100, Math.min(100, v)) / 100}em` } : {};
             },
           },
           /** 외곽선/그림자/양각/음각 */

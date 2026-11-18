@@ -1,6 +1,7 @@
 import type { Node as PMNode } from '@tiptap/pm/model';
 import type { DocSettings, HeaderFooter, PageSetup } from './types';
-import { hfRichHtml } from './hfRich';
+import { blocksHtml, hfRichHtml } from './hfRich';
+import { layoutTabsHtml } from './editor/tabLayout';
 import type { DocTab } from './doc/docTab';
 import { PX_PER_MM, formatPageNumber, xmlEscape } from './formats/common';
 import { FN_FONT_PX, FN_LINE, FN_SEP } from './editor/extensions/pagination';
@@ -24,8 +25,14 @@ export interface PageGeom {
   P: number;
 }
 
+/** 첫 쪽의 용지: 첫 쪽만의 본문 영역(firstPage)이 있으면 그것을 넣은 것 */
+export function firstPageSetup(s: DocSettings): PageSetup {
+  return s.firstPage ? { ...s.page, ...s.firstPage } : s.page;
+}
+
+/** 문서의 쪽 기하 (첫 쪽의 것. 첫 쪽만 본문 영역이 다른 문서는 둘째 쪽부터 geomFor(s, s.page) 를 쓴다) */
 export function computeGeom(s: DocSettings, gap = PAGE_GAP): PageGeom {
-  const p = s.page;
+  const p = firstPageSetup(s);
   const wMm = p.landscape ? Math.max(p.width, p.height) : p.width;
   const hMm = p.landscape ? Math.min(p.width, p.height) : p.height;
   const W = wMm * PX_PER_MM;
@@ -52,7 +59,7 @@ export function computeGeom(s: DocSettings, gap = PAGE_GAP): PageGeom {
 
 /** 구역 용지(없으면 문서 용지)로 본 쪽 기하 */
 export function geomFor(s: DocSettings, setup: PageSetup | null, gap = PAGE_GAP): PageGeom {
-  return computeGeom(setup ? { ...s, page: setup } : s, gap);
+  return computeGeom(setup ? { ...s, page: setup, firstPage: undefined } : s, gap);
 }
 
 /** 문서의 구역 용지들 (구역 나누기에 담긴 것) */
@@ -90,6 +97,8 @@ export interface PagePlan {
 /** 쪽마다의 자리. 쪽 나누기 엔진(pagination)의 쪽 위치 계산과 같은 식이다 */
 export function planPages(s: DocSettings, pageCount: number, pageSetups: (PageSetup | null)[] | undefined, W: number, gap = PAGE_GAP): PagePlan[] {
   const base = computeGeom(s, gap);
+  // 용지가 따로 없는 쪽(첫 구역)의 설정: 첫 쪽만의 본문 영역을 넣은 것
+  const s0 = s.firstPage ? { ...s, page: firstPageSetup(s) } : s;
   const hostLeft = (W - base.W) / 2 + base.ml;
   const out: PagePlan[] = [];
   let top = 0;
@@ -97,7 +106,7 @@ export function planPages(s: DocSettings, pageCount: number, pageSetups: (PageSe
     const setup = pageSetups?.[k] ?? null;
     const g = setup ? geomFor(s, setup, gap) : base;
     const left = (W - g.W) / 2;
-    out.push({ g, settings: setup ? { ...s, page: setup } : s, left, top, contentTop: top + g.mt - base.mt, dx: left + g.ml - hostLeft });
+    out.push({ g, settings: setup ? { ...s, page: setup } : s0, left, top, contentTop: top + g.mt - base.mt, dx: left + g.ml - hostLeft });
     top += g.H + gap;
   }
   return out;
@@ -128,6 +137,7 @@ export function pageNumShown(s: DocSettings, k: number): boolean {
 export function hfAt(s: DocSettings, which: 'header' | 'footer', k: number): HeaderFooter | null {
   const def = s[which];
   if (k === 0 && s.hideFirst?.[which]) return null;
+  if (k === 0 && def.first) return def.first;
   if (def.from != null && k < def.from) return null;
   if (pageNumAt(s, k) % 2 === 0) return def.even ?? (def.oddOnly ? null : def);
   return def;
@@ -169,6 +179,72 @@ export function pageBackgroundStyle(s: DocSettings, k: number, dy = 0): Record<s
   };
 }
 
+const SAFE_IMG = /^data:image\/(png|jpeg|gif|webp|bmp);base64,[A-Za-z0-9+/=]+$/;
+const SAFE_GRADIENT = /^(linear|radial|conic)-gradient\([\w\s%.,#()-]{1,400}\)$/;
+
+/**
+ * k 번째 쪽의 바탕 그림 HTML: 쪽 테두리/배경과 바탕쪽. 종이의 왼쪽 위를 (0,0) 으로 하는 종이 크기의 층이며 본문 뒤에 깔린다.
+ * 화면(PageView)의 용지와 쪽 경계 가리개, 인쇄용 쪽이 같은 것을 쓴다. 그릴 것이 없으면 빈 문자열
+ */
+export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number): string {
+  const pb = s.pageBorder;
+  const first = k === 0;
+  let html = '';
+  const on = (v: 'first' | 'notFirst' | null | undefined) => !v || (v === 'first' ? first : !first);
+  if (pb && typeof pb === 'object') {
+    const off = (Array.isArray(pb.offset) ? pb.offset : []).map((v) => (Number.isFinite(+v) ? Math.max(-100, Math.min(200, +v)) * PX_PER_MM : 0));
+    const p = s.page;
+    // 테두리 상자: 본문 기준은 본문 영역에서 바깥으로(머리말·꼬리말을 넣으면 그 영역까지), 종이 기준은 종이 끝에서 안으로
+    const bx = pb.body
+      ? { x0: g.ml - (off[0] || 0), x1: g.W - g.mr + (off[1] || 0), y0: (pb.headerInside ? p.marginTop * PX_PER_MM : g.mt) - (off[2] || 0), y1: g.H - (pb.footerInside ? p.marginBottom * PX_PER_MM : g.mb) + (off[3] || 0) }
+      : { x0: off[0] || 0, x1: g.W - (off[1] || 0), y0: off[2] || 0, y1: g.H - (off[3] || 0) };
+    const color = (c: unknown) => (typeof c === 'string' && /^#[0-9A-Fa-f]{6}$/.test(c) ? c : null);
+    const bg = color(pb.bg);
+    const grad = typeof pb.gradient === 'string' && SAFE_GRADIENT.test(pb.gradient) && !/url|var|expression/i.test(pb.gradient) ? pb.gradient : null;
+    const img = typeof pb.image === 'string' && SAFE_IMG.test(pb.image) ? pb.image : null;
+    if ((bg || grad || img) && on(pb.fillOn)) {
+      const area = pb.fillArea === 'border' ? bx : pb.fillArea === 'page' ? { x0: g.ml, x1: g.W - g.mr, y0: g.mt, y1: g.H - g.mb } : { x0: 0, x1: g.W, y0: 0, y1: g.H };
+      const st = [`position:absolute`, `left:${area.x0}px`, `top:${area.y0}px`, `width:${Math.max(0, area.x1 - area.x0)}px`, `height:${Math.max(0, area.y1 - area.y0)}px`];
+      if (bg) st.push(`background-color:${bg}`);
+      if (img) {
+        const mode = String(pb.imageMode || 'TOTAL');
+        st.push(`background-image:url('${img}')`);
+        if (mode === 'TOTAL') st.push('background-size:100% 100%', 'background-repeat:no-repeat');
+        else if (mode === 'ZOOM') st.push('background-size:contain', 'background-repeat:no-repeat', 'background-position:center');
+        else if (mode.startsWith('TILE')) st.push('background-repeat:repeat');
+        else st.push('background-repeat:no-repeat', `background-position:${mode.includes('LEFT') ? 'left' : mode.includes('RIGHT') ? 'right' : 'center'} ${mode.includes('TOP') ? 'top' : mode.includes('BOTTOM') ? 'bottom' : 'center'}`);
+      } else if (grad) st.push(`background-image:${grad}`);
+      html += `<div class="pg-fill" style="${st.join(';')}"></div>`;
+    }
+    const sides = pb.sides || {};
+    if (on(pb.borderOn) && (sides.l || sides.r || sides.t || sides.b)) {
+      const names = { l: 'left', r: 'right', t: 'top', b: 'bottom' } as const;
+      const st = [`position:absolute`, `box-sizing:border-box`, `left:${bx.x0}px`, `top:${bx.y0}px`, `width:${Math.max(0, bx.x1 - bx.x0)}px`, `height:${Math.max(0, bx.y1 - bx.y0)}px`];
+      for (const k2 of ['l', 'r', 't', 'b'] as const) {
+        const b = sides[k2];
+        const c = b ? color(b.c) : null;
+        if (!b || !c) continue;
+        const w = Math.max(0.1, Math.min(10, +b.w || 0.12));
+        const style = ['solid', 'dashed', 'dotted', 'double'].includes(b.s) ? b.s : 'solid';
+        // 가는 선도 화면에서 보이게 (이중선은 세 배 굵기가 있어야 두 줄로 보인다)
+        st.push(`border-${names[k2]}:max(${style === 'double' ? 3 : 1}px, ${w}mm) ${style} ${c}`);
+      }
+      html += `<div class="pg-border" style="${st.join(';')}"></div>`;
+    }
+  }
+  // 바탕쪽: 본문 영역의 왼쪽 위를 기준으로 그린다 (개체는 종이·쪽 기준 자리에 놓여 있다)
+  const mps = Array.isArray(s.masterPages) ? s.masterPages : [];
+  if (mps.length && !(first && s.hideFirst?.masterPage)) {
+    const even = pageNumAt(s, k) % 2 === 0;
+    for (const mp of mps) {
+      if (!mp || (mp.type === 'even' && !even) || (mp.type === 'odd' && even)) continue;
+      const inner = blocksHtml(mp.content);
+      if (inner) html += `<div class="kdoc-content master-page${s.hwpMetrics ? ' hwp-metrics' : ''}" style="position:absolute;left:${g.ml}px;top:${g.mt}px;width:${g.contentW}px;height:${g.contentH}px">${inner}</div>`;
+    }
+  }
+  return html ? `<div class="pg-paint" style="position:absolute;left:0;top:0;width:${g.W}px;height:${g.H}px;pointer-events:none">${html}</div>` : '';
+}
+
 /**
  * k 번째 쪽 맨 위에 되풀이할 표 제목 줄의 HTML. 쪽 나누기가 그 자리를 비워 두었으므로(LayoutResult.repeats)
  * 편집 화면의 표에서 제목 줄만 복제해 본문 맨 위에 놓는다. 편집 대상은 아니다.
@@ -176,9 +252,18 @@ export function pageBackgroundStyle(s: DocSettings, k: number, dy = 0): Record<s
 export function repeatHeadsHtml(tab: DocTab, g: PageGeom, k: number): string {
   const reps = (tab.layout.repeats || []).filter((r) => r.page === k);
   const cuts = (tab.layout.cuts || []).filter((c) => c.page === k);
-  if (!reps.length && !cuts.length) return '';
+  const lines = (tab.layout.colLines || []).filter((c) => c.page === k);
+  if (!reps.length && !cuts.length && !lines.length) return '';
   const cls = 'kdoc-content' + (tab.settings.hwpMetrics ? ' hwp-metrics' : '') + (tab.settings.fixedLines ? ' fixed-lines' : '');
   let html = '';
+  // 다단의 단 구분선
+  for (const l of lines) {
+    const w = Math.max(0.5, l.w * PX_PER_MM);
+    const st = l.s === 'dashed' || l.s === 'dotted' || l.s === 'double' ? l.s : 'solid';
+    const bw = st === 'double' ? Math.max(3, w) : w;
+    const col = /^#[0-9a-fA-F]{3,8}$/.test(l.c) ? l.c : '#000';
+    html += `<div class="pg-col-line" style="position:absolute;left:${(g.ml + l.x - bw / 2).toFixed(2)}px;top:${(g.mt + l.y1).toFixed(2)}px;height:${Math.max(0, l.y2 - l.y1).toFixed(2)}px;width:0;border-left:${bw.toFixed(2)}px ${st} ${col};pointer-events:none"></div>`;
+  }
   for (const r of reps) {
     let dom: Node | null = null;
     try {
@@ -228,7 +313,7 @@ export function pageChromeHtml(tab: DocTab, g: PageGeom, k: number, pageCount: n
     if (rich) {
       // 영역 안 세로 맞춤 (아래·가운데면 영역 높이 안에서 맞춘다. 넘치는 내용은 자르지 않는다)
       const va = def.valign === 'bottom' ? 'flex-end' : def.valign === 'middle' ? 'center' : 'flex-start';
-      return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;flex-direction:column;justify-content:${va}"><div class="kdoc-content hf-rich">${hfText(rich, num, total, s.pageNumber.format)}</div></div>`;
+      return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;flex-direction:column;justify-content:${va}"><div class="kdoc-content hf-rich">${layoutTabsHtml(hfText(rich, num, total, s.pageNumber.format), g.contentW)}</div></div>`;
     }
     if (!def.text.trim()) return '';
     return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;align-items:${valign};justify-content:${def.align === 'left' ? 'flex-start' : def.align === 'right' ? 'flex-end' : 'center'};font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:9pt;white-space:pre;overflow:hidden">${xmlEscape(hfText(def.text, num, total, s.pageNumber.format))}</div>`;
@@ -258,6 +343,9 @@ export interface PageBox {
   el: HTMLElement;
   top: number;
   bottom: number;
+  /** 다단에서 다른 단·쪽으로 옮겨 그린 줄까지 넣은 세로 범위 (없으면 top~bottom) */
+  vTop?: number;
+  vBottom?: number;
   /** 편집기 본문 왼쪽에서 블록 왼쪽(여백 포함 자리)까지와 블록 폭 */
   left: number;
   width: number;
@@ -266,9 +354,28 @@ export interface PageBox {
 /** 편집기 최상위 블록들의 자리 (쪽 나누기 공간은 제외) */
 export function collectPageBoxes(root: HTMLElement): PageBox[] {
   const children = Array.from(root.children) as HTMLElement[];
+  const rootRect = root.getBoundingClientRect();
+  // 화면 배율(CSS 변환)이 걸려 있으면 화면 좌표를 문서 px 로 되돌린다
+  const z = root.offsetHeight > 0 ? rootRect.height / root.offsetHeight || 1 : 1;
   return children
     .filter((el) => !el.classList.contains('pg-spacer') && !el.classList.contains('ProseMirror-gapcursor'))
-    .map((el) => ({ el, top: el.offsetTop, bottom: el.offsetTop + el.offsetHeight, left: el.offsetLeft, width: el.offsetWidth }));
+    .map((el) => {
+      const box: PageBox = { el, top: el.offsetTop, bottom: el.offsetTop + el.offsetHeight, left: el.offsetLeft, width: el.offsetWidth };
+      const segs = el.querySelectorAll('.pg-seg');
+      if (segs.length) {
+        let vTop = box.top;
+        let vBottom = box.bottom;
+        segs.forEach((sg) => {
+          for (const r of Array.from(sg.getClientRects())) {
+            vTop = Math.min(vTop, (r.top - rootRect.top) / z);
+            vBottom = Math.max(vBottom, (r.bottom - rootRect.top) / z);
+          }
+        });
+        box.vTop = vTop;
+        box.vBottom = vBottom;
+      }
+      return box;
+    });
 }
 
 /** 편집 화면의 쪽 배치 (구역마다 용지가 다르면 쪽마다 다르다) */
@@ -288,6 +395,13 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
   (page.style as any).page = pageName(g);
   const bg = pageBackgroundStyle(tab.settings, k);
   if (bg) Object.assign(page.style, bg);
+  // 쪽 테두리/배경·바탕쪽 (본문 뒤에)
+  const paint = pagePaintHtml(plan.settings, g, k);
+  if (paint) {
+    const holder = document.createElement('div');
+    holder.innerHTML = paint;
+    while (holder.firstChild) page.appendChild(holder.firstChild);
+  }
   const body = document.createElement('div');
   body.className = 'print-body';
   Object.assign(body.style, { left: `${g.ml}px`, top: `${g.mt}px`, width: `${g.contentW}px`, height: `${g.contentH}px` });
@@ -298,7 +412,9 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
   const y1 = y0 + g.contentH;
   for (const b of boxes) {
     // 높이 없는 블록(떠 있는 개체의 자리 표시)은 쪽 맨 위에 걸쳐 있어도 이 쪽 것이다
-    if (b.bottom < y0 || b.top >= y1 || (b.bottom === y0 && b.bottom > b.top)) continue;
+    const bt = b.vTop ?? b.top;
+    const bb = b.vBottom ?? b.bottom;
+    if (bb < y0 || bt >= y1 || (bb === y0 && bb > bt)) continue;
     const clone = b.el.cloneNode(true) as HTMLElement;
     clone.style.position = 'absolute';
     clone.style.top = `${b.top - y0}px`;

@@ -2,7 +2,8 @@ import { Extension } from '@tiptap/core';
 import type { EditorState } from '@tiptap/pm/state';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { cssToPt, normLineHeight, r2 } from '../cssUnits';
-import { normColor } from '../../formats/common';
+import { cleanParaBorder, normColor } from '../../formats/common';
+import { cleanTabs } from '../tabLayout';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -39,6 +40,13 @@ export function forEachSelectedPara(state: EditorState, fn: (node: PMNode, pos: 
     });
   }
   return seen.size;
+}
+
+/** 쪽 나눔 규칙 값: w·n·l 가운데 든 것만 (없으면 null) */
+export function cleanKeep(v: any): string | null {
+  if (typeof v !== 'string') return null;
+  const out = ['w', 'n', 'l'].filter((c) => v.includes(c)).join('');
+  return out || null;
 }
 
 const ptAttr = (cssProp: string, styleProp: string) => ({
@@ -128,6 +136,30 @@ export const ParagraphFormat = Extension.create({
             },
             renderHTML: (attrs: Record<string, any>) => (attrs.spaceAfter ? { style: `padding-bottom: ${attrs.spaceAfter}pt` } : {}),
           },
+          /** 쪽 나눔 규칙: w 외톨이줄 방지(쪽에 한 줄만 남기지 않는다), n 다음 문단과 함께, l 문단을 나누지 않음 (쪽 나누기가 따른다) */
+          pageKeep: {
+            default: null,
+            parseHTML: (el: HTMLElement) => cleanKeep(el.getAttribute('data-keep')),
+            renderHTML: (attrs: Record<string, any>) => {
+              const k = cleanKeep(attrs.pageKeep);
+              return k ? { 'data-keep': k } : {};
+            },
+          },
+          /** 탭 자리 (Word 문서): { d: 기본 탭 간격 pt, s: [자리 pt, 맞춤, 채움][] }. 탭 폭은 화면에서 재서 맞춘다 (tabLayout) */
+          tabs: {
+            default: null,
+            parseHTML: (el: HTMLElement) => {
+              try {
+                return cleanTabs(JSON.parse(el.getAttribute('data-tabs') || 'null'));
+              } catch {
+                return null;
+              }
+            },
+            renderHTML: (attrs: Record<string, any>) => {
+              const t = cleanTabs(attrs.tabs);
+              return t ? { 'data-tabs': JSON.stringify(t) } : {};
+            },
+          },
           /** 한글 줄 나눔 단위: 글자 (한글의 '줄 나눔 기준 - 한글 단위: 글자'). 기본은 어절 */
           breakChar: {
             default: null,
@@ -175,6 +207,32 @@ export const ParagraphFormat = Extension.create({
           hwpGap: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
           /** 한글(HWP)에서 이 문단이 새 쪽의 맨 위에서 시작했다 (쪽 나누기가 그 자리에서 쪽을 넘긴다) */
           hwpPage: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 한글에서 이 문단이 시작한 단 (다단. 0 = 첫 단) */
+          hwpCol: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /**
+           * 문단 테두리 (한글의 문단 모양 → 테두리/배경): { l, r, t, b: '굵기mm 종류 색', o: 글과의 간격 px [왼, 오른, 위, 아래], c: 이어진 문단과 한 상자 }.
+           * 줄 배치를 바꾸지 않도록 문단 상자 위에 얹어 그린다 (editor.css 의 p[data-pb]::after)
+           */
+          paraBorder: {
+            default: null,
+            keepOnSplit: true,
+            parseHTML: (el: HTMLElement) => {
+              try {
+                return cleanParaBorder(JSON.parse(el.getAttribute('data-pb') || 'null'));
+              } catch {
+                return null;
+              }
+            },
+            renderHTML: (attrs: Record<string, any>) => {
+              const pb = cleanParaBorder(attrs.paraBorder);
+              if (!pb) return {};
+              const o = pb.o || [0, 0, 0, 0];
+              const st = ['position: relative'];
+              for (const k of ['l', 'r', 't', 'b'] as const) st.push(`--pb-${k}: ${pb[k] ? pb[k]!.replace(/^([\d.]+)mm (double)/, (_m, w) => `max(3px, ${Math.round(parseFloat(w) * 240) / 100}mm) double`).replace(/^([\d.]+)mm (solid|dashed|dotted)/, 'max(1px, $1mm) $2') : 'none'}`);
+              st.push(`--pb-ol: ${o[0]}px`, `--pb-or: ${o[1]}px`, `--pb-ot: ${o[2]}px`, `--pb-ob: ${o[3]}px`);
+              return { 'data-pb': JSON.stringify(pb), ...(pb.c ? { 'data-pb-join': '1' } : {}), style: st.join('; ') };
+            },
+          },
           paraBg: {
             default: null,
             parseHTML: (el: HTMLElement) => normColor(el.getAttribute('data-bg')),

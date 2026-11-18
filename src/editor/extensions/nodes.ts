@@ -10,28 +10,41 @@ import type { Node as PMNode } from '@tiptap/pm/model';
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from '@tiptap/pm/state';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import { viewState } from '../viewState';
+import type { Columns } from '../../types';
 import { cleanMargins } from '../../formats/flatten';
-import { normColor } from '../../formats/common';
+import { cleanColumns, normColor } from '../../formats/common';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
     pageBreak: { setPageBreak: () => ReturnType };
+    columnBreak: { setColumnBreak: (columns?: Columns | null) => ReturnType };
     footnote: { insertFootnote: (text: string) => ReturnType; updateFootnote: (pos: number, text: string) => ReturnType };
     overwrite: { toggleOverwrite: () => ReturnType };
   }
 }
 
 /** 떠 있는 개체의 자리 (px). 값이 이상하면 null */
-export function floatOf(v: any): { x: number; y: number; behind: boolean } | null {
+export function floatOf(v: any): { x: number; y: number; behind: boolean; py: number | null } | null {
   if (!v || typeof v !== 'object') return null;
   const x = Number(v.x);
   const y = Number(v.y);
   if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 20000 || Math.abs(y) > 20000) return null;
-  return { x, y, behind: v.behind === true };
+  // py: 쪽·종이 기준으로 놓인 개체의 쪽 본문 안 세로 자리 (쪽 나누기가 그 자리에 놓는다: placePageFloats)
+  const py = v.py != null && Number.isFinite(+v.py) && Math.abs(+v.py) < 20000 ? +v.py : null;
+  return { x, y, behind: v.behind === true, py };
 }
 
 // ---------------- 글상자 (도형 안의 글) ----------------
 const RADIUS_RE = /^[\d.]+(px|%)$/;
+
+/** 한글의 선 종류 → CSS 테두리 종류 */
+function boxBorderStyle(v: unknown): string {
+  const s = typeof v === 'string' ? v : '';
+  if (/^(DASH|LONG_DASH|DASH_DOT|DASH_DOT_DOT)$/.test(s)) return 'dashed';
+  if (/^(DOT|CIRCLE)$/.test(s)) return 'dotted';
+  if (/^(DOUBLE_SLIM|SLIM_THICK|THICK_SLIM|SLIM_THICK_SLIM)$/.test(s)) return 'double';
+  return 'solid';
+}
 
 /** 한글의 글상자·도형 안 글. 크기가 정해진 상자 안에 문단이 들어가며, 배경(색·그림)과 테두리를 가진다 */
 export const TextBox = Node.create({
@@ -49,6 +62,10 @@ export const TextBox = Node.create({
       bgImage: plain,
       borderColor: plain,
       borderWidth: plain,
+      /** 테두리 선 종류 (한글의 선 종류: DASH, DOT, DASH_DOT, DOUBLE_SLIM …). 없으면 실선 */
+      borderDash: plain,
+      /** 그러데이션 채우기 (CSS 그러데이션: 우리가 만든 꼴만 받는다) */
+      bgGradient: plain,
       radius: plain,
       padding: plain,
       /** 떠 있는 자리 { x, y, behind? } (px: x 는 본문·칸 왼쪽, y 는 뒤따르는 문단 상자 위쪽 기준). 있으면 높이 없이 그 자리에 띄운다 */
@@ -60,6 +77,7 @@ export const TextBox = Node.create({
       hwpSeq: plain,
       hwpLen: plain,
       hwpPage: plain,
+      hwpCol: plain,
     };
   },
   parseHTML() {
@@ -94,15 +112,17 @@ export const TextBox = Node.create({
     if (num(a.height)) st.push(fl ? `height:${num(a.height)}px` : `min-height:${num(a.height)}px`);
     const bg = normColor(a.bg);
     if (bg) st.push(`background-color:${bg}`);
+    const grad = cleanGradient(a.bgGradient);
     if (typeof a.bgImage === 'string' && /^data:image\//.test(a.bgImage)) st.push(`background-image:url("${a.bgImage}")`);
+    else if (grad) st.push(`background-image:${grad}`);
     const bc = normColor(a.borderColor);
-    if (bc) st.push(`border:${num(a.borderWidth) || 1}px solid ${bc}`);
+    if (bc) st.push(`border:${num(a.borderWidth) || 1}px ${boxBorderStyle(a.borderDash)} ${bc}`);
     if (typeof a.radius === 'string' && RADIUS_RE.test(a.radius)) st.push(`border-radius:${a.radius}`);
     if (Array.isArray(a.padding) && a.padding.length === 4) st.push(`padding:${a.padding.map((v: any) => Math.max(0, +v || 0) + 'px').join(' ')}`);
     if (a.valign === 'middle' || a.valign === 'bottom') st.push('display:flex', 'flex-direction:column', `justify-content:${a.valign === 'middle' ? 'center' : 'flex-end'}`);
     if (fl) {
       st.push(`left:${fl.x}px`, `top:${fl.y}px`);
-      return ['div', { class: 'k-float-anchor' }, ['div', { class: 'k-textbox k-float' + (fl.behind ? ' behind' : ''), style: st.join(';') }, 0]];
+      return ['div', { class: 'k-float-anchor' }, ['div', { class: 'k-textbox k-float' + (fl.behind ? ' behind' : ''), style: st.join(';'), ...(fl.py != null ? { 'data-py': String(fl.py) } : {}) }, 0]];
     }
     return ['div', { class: 'k-textbox', style: st.join(';') }, 0];
   },
@@ -132,6 +152,21 @@ export const TabStop = Mark.create({
         default: 0,
         parseHTML: (el: HTMLElement) => +(el.getAttribute('data-tab-type') || 0),
         renderHTML: (a: Record<string, any>) => (+a.type ? { 'data-tab-type': String(+a.type) } : {}),
+      },
+      /** 절대 위치 탭 (Word 의 ptab): 글 영역의 왼쪽 끝(l)·가운데(c)·오른쪽 끝(r)에 뒤 글을 맞춘다 (tabLayout) */
+      ptab: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          const v = el.getAttribute('data-ptab');
+          return v === 'l' || v === 'c' || v === 'r' ? v : null;
+        },
+        renderHTML: (a: Record<string, any>) => (a.ptab === 'l' || a.ptab === 'c' || a.ptab === 'r' ? { 'data-ptab': a.ptab } : {}),
+      },
+      /** 구분 값: 이웃한 탭이 모양이 같아도 한 글자 조각으로 합쳐지지 않게 번갈아 0·1 을 준다 (합쳐지면 탭 둘이 한 폭으로 그려진다) */
+      k: {
+        default: 0,
+        parseHTML: (el: HTMLElement) => (el.getAttribute('data-k') === '1' ? 1 : 0),
+        renderHTML: (a: Record<string, any>) => (+a.k === 1 ? { 'data-k': '1' } : {}),
       },
       /** 오른쪽 맞춤 채움 탭 (차례): 뒤 글이 문단 오른쪽 끝에 닿도록 폭을 저절로 맞춘다 (tabFill) */
       right: {
@@ -206,6 +241,31 @@ export const KImage = Image.extend({
     };
   },
 
+  // 편집기 밖에서 그릴 때(머리말·꼬리말·바탕쪽·도형 안의 글, HTML 저장): 떠 있는 자리·자르기·회전을 편집 화면과 같게
+  renderHTML({ node, HTMLAttributes }) {
+    const a = node.attrs;
+    const fl = floatOf(a.float);
+    const c = cropOf(a.crop);
+    const rot = Number(a.rotate);
+    const turned = Number.isFinite(rot) && rot % 360 !== 0;
+    const base = mergeAttributes(this.options.HTMLAttributes, HTMLAttributes);
+    if (!fl && !c && !turned) return ['img', base];
+    const st: string[] = [];
+    const w = +a.width || 0;
+    const h = +a.height || 0;
+    let imgStyle = '';
+    if (c && w && h) {
+      const iw = w / Math.max(0.01, 1 - c.l - c.r);
+      const ih = h / Math.max(0.01, 1 - c.t - c.b);
+      st.push(`width:${w}px`, `height:${h}px`, 'overflow:hidden');
+      imgStyle = `width:${iw}px;height:${ih}px;max-width:none;display:block;margin-left:${-c.l * iw}px;margin-top:${-c.t * ih}px`;
+    } else if (w && h) imgStyle = `width:${w}px;height:${h}px`;
+    if (fl) st.push(`left:${fl.x}px`, `top:${fl.y}px`);
+    if (turned) st.push(`transform:rotate(${rot}deg)`);
+    const cls = 'k-image' + (fl ? ' k-float' + (fl.behind ? ' behind' : '') : '') + (c ? ' cropped' : '');
+    return ['span', { class: cls, style: st.join(';'), ...(fl && fl.py != null ? { 'data-py': String(fl.py) } : {}) }, ['img', imgStyle ? mergeAttributes(base, { style: imgStyle }) : base]];
+  },
+
   addNodeView() {
     return ({ node, getPos, editor }) => {
       let current = node;
@@ -249,6 +309,11 @@ export const KImage = Image.extend({
         wrap.classList.toggle('behind', !!fl?.behind);
         wrap.style.left = fl ? fl.x + 'px' : '';
         wrap.style.top = fl ? fl.y + 'px' : '';
+        if (fl && fl.py != null) wrap.setAttribute('data-py', String(fl.py));
+        else wrap.removeAttribute('data-py');
+        // 글줄 안에서의 세로 자리 (한글 문서: 개체 높이에 따라 기준선 아래로 내린다 — editor.css)
+        if (n.attrs.height) wrap.style.setProperty('--kh', n.attrs.height + 'px');
+        else wrap.style.removeProperty('--kh');
         const rot = Number(n.attrs.rotate);
         wrap.style.transform = Number.isFinite(rot) && rot % 360 ? `rotate(${rot}deg)` : '';
       };
@@ -328,7 +393,7 @@ export const KImage = Image.extend({
 }).configure({ inline: true, allowBase64: true });
 
 /** 붙여 넣은 HTML 의 구역 용지: 숫자만 받아 쓸 수 있는 범위로 (용지 10~2000mm, 여백은 용지 안에) */
-function cleanPageSetup(v: any): Record<string, number | boolean> | null {
+function cleanPageSetup(v: any): Record<string, any> | null {
   if (!v || typeof v !== 'object') return null;
   const num = (x: any, lo: number, hi: number) => {
     const n = Number(x);
@@ -349,7 +414,42 @@ function cleanPageSetup(v: any): Record<string, number | boolean> | null {
     marginFooter: num(v.marginFooter, 0, mh),
     gutter: num(v.gutter, 0, mh),
     landscape: v.landscape === true,
+    ...(cleanColumns(v.columns) ? { columns: cleanColumns(v.columns) } : {}),
   };
+}
+
+/** 쪽 나누기·단 나누기 같은 '나누기' 블록을 커서 자리에 넣는다 (문단 가운데면 문단을 쪼갠다) */
+function insertBreak(state: any, tr: Transaction, dispatch: ((tr: Transaction) => void) | undefined, pb: PMNode): boolean {
+  const para = state.schema.nodes.paragraph;
+  if (!state.selection.empty) tr.deleteSelection();
+  const $from = tr.selection.$from;
+  let caretPos: number;
+  if ($from.depth > 1 || !$from.parent.isTextblock) {
+    // 표/목록 안: 해당 최상위 블록 뒤에 넣는다
+    const after = $from.after(1);
+    tr.insert(after, [pb, para.create()]);
+    caretPos = after + 2;
+  } else if ($from.parentOffset === 0 && $from.parent.content.size > 0) {
+    tr.insert($from.before(), pb);
+    caretPos = $from.pos + 1;
+  } else if ($from.parentOffset === $from.parent.content.size) {
+    const after = $from.after();
+    const next = tr.doc.resolve(after).nodeAfter;
+    if (next && next.isTextblock) {
+      tr.insert(after, pb);
+      caretPos = after + 2;
+    } else {
+      tr.insert(after, [pb, para.create($from.parent.attrs)]);
+      caretPos = after + 2;
+    }
+  } else {
+    tr.split($from.pos);
+    tr.insert($from.pos + 1, pb);
+    caretPos = $from.pos + 3;
+  }
+  tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(caretPos, tr.doc.content.size))));
+  if (dispatch) dispatch(tr.scrollIntoView());
+  return true;
 }
 
 // ---------------- 쪽 나누기 ----------------
@@ -388,43 +488,59 @@ export const PageBreak = Node.create({
     return {
       setPageBreak:
         () =>
-        ({ state, tr, dispatch }) => {
-          const pb = state.schema.nodes.pageBreak.create();
-          const para = state.schema.nodes.paragraph;
-          if (!state.selection.empty) tr.deleteSelection();
-          const $from = tr.selection.$from;
-          let caretPos: number;
-          if ($from.depth > 1 || !$from.parent.isTextblock) {
-            // 표/목록 안: 해당 최상위 블록 뒤에 넣는다
-            const after = $from.after(1);
-            tr.insert(after, [pb, para.create()]);
-            caretPos = after + 2;
-          } else if ($from.parentOffset === 0 && $from.parent.content.size > 0) {
-            tr.insert($from.before(), pb);
-            caretPos = $from.pos + 1;
-          } else if ($from.parentOffset === $from.parent.content.size) {
-            const after = $from.after();
-            const next = tr.doc.resolve(after).nodeAfter;
-            if (next && next.isTextblock) {
-              tr.insert(after, pb);
-              caretPos = after + 2;
-            } else {
-              tr.insert(after, [pb, para.create($from.parent.attrs)]);
-              caretPos = after + 2;
-            }
-          } else {
-            tr.split($from.pos);
-            tr.insert($from.pos + 1, pb);
-            caretPos = $from.pos + 3;
-          }
-          tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(caretPos, tr.doc.content.size))));
-          if (dispatch) dispatch(tr.scrollIntoView());
-          return true;
-        },
+        ({ state, tr, dispatch }) =>
+          insertBreak(state, tr, dispatch, state.schema.nodes.pageBreak.create()),
     };
   },
   addKeyboardShortcuts() {
     return { 'Mod-Enter': () => this.editor.commands.setPageBreak() };
+  },
+});
+
+// ---------------- 단 나누기 ----------------
+/**
+ * 단 나누기 (한글의 Ctrl+Shift+Enter): 뒤 내용을 다음 단으로 넘긴다 (마지막 단이면 다음 쪽).
+ * columns 가 있으면 '다단 설정 나누기': 여기서부터 그 다단으로 새로 시작한다 (같은 쪽, 앞 다단 아래에서. count 1 이면 한 단으로)
+ */
+export const ColumnBreak = Node.create({
+  name: 'columnBreak',
+  priority: 1000,
+  group: 'block',
+  atom: true,
+  selectable: true,
+  addAttributes() {
+    return {
+      columns: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          try {
+            return cleanColumns(JSON.parse(el.getAttribute('data-columns') || 'null'));
+          } catch {
+            return null;
+          }
+        },
+        renderHTML: (a: Record<string, any>) => (a.columns ? { 'data-columns': JSON.stringify(a.columns) } : {}),
+      },
+      /** 한글 문서에 있던 나누기 (블록마다 적힌 단을 따르므로 쪽 나누기가 한글 배치를 끊지 않는다) */
+      hwp: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'div[data-type="column-break"]' }];
+  },
+  renderHTML({ HTMLAttributes, node }) {
+    return ['div', { ...HTMLAttributes, 'data-type': 'column-break', class: 'page-break column-break' + (node.attrs.columns ? ' column-def' : '') }];
+  },
+  addCommands() {
+    return {
+      setColumnBreak:
+        (columns) =>
+        ({ state, tr, dispatch }) =>
+          insertBreak(state, tr, dispatch, state.schema.nodes.columnBreak.create(columns ? { columns: cleanColumns(columns) } : null)),
+    };
+  },
+  addKeyboardShortcuts() {
+    return { 'Mod-Shift-Enter': () => this.editor.commands.setColumnBreak() };
   },
 });
 
@@ -587,7 +703,10 @@ const cellAttrs = {
         .split(';')
         .map((p: string) => {
           const [k, v] = p.split(':');
-          return names[k] && v ? `border-${names[k]}: ${v}` : '';
+          if (!names[k] || !v) return '';
+          // 이중선: 한글은 두 줄이 보이게 그린다 (적힌 굵기의 두 배 남짓). 화면에서 3px 는 되어야 두 줄로 보인다
+          const m = /^([\d.]+)mm double (#[0-9A-Fa-f]{6})$/.exec(v.trim());
+          return m ? `border-${names[k]}: max(3px, ${Math.round(parseFloat(m[1]) * 240) / 100}mm) double ${m[2]}` : `border-${names[k]}: ${v}`;
         })
         .filter(Boolean)
         .join('; ');
@@ -826,8 +945,21 @@ export const KTable = Table.extend({
           return { 'data-out-margin': JSON.stringify(v), style: st.join('; ') };
         },
       },
+      /**
+       * 쪽 경계에서 표를 나누는 방식 (한글의 표 속성): 없으면 '나눔'(칸 안의 줄 단위로 나눈다), 'row' 는 '셀 단위로 나눔'(줄을 통째로 넘긴다),
+       * 'none' 은 '나누지 않음'(표를 통째로 다음 쪽으로)
+       */
+      pageSplit: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          const v = el.getAttribute('data-page-split');
+          return v === 'row' || v === 'none' ? v : null;
+        },
+        renderHTML: (a: Record<string, any>) => (a.pageSplit === 'row' || a.pageSplit === 'none' ? { 'data-page-split': a.pageSplit } : {}),
+      },
       /** 한글(HWP)에서 이 표가 새 쪽의 맨 위에서 시작했다 (쪽 나누기가 그 자리에서 쪽을 넘긴다). 화면 전용 */
       hwpPage: { default: false, parseHTML: () => false, renderHTML: () => ({}) },
+      hwpCol: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       // 한글이 놓은 자리·차례·그때의 내용 크기 (화면 전용: 쪽 나누기가 쓴다)
       hwpTop: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       hwpSeq: { default: null, parseHTML: () => null, renderHTML: () => ({}) },

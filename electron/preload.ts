@@ -65,7 +65,10 @@ const api = {
   listPrivateFonts: (): Promise<string[][]> => ipcRenderer.invoke('fonts:private-list'),
   readPrivateFont: (name: string): Promise<{ names: string[]; data: Uint8Array } | null> => ipcRenderer.invoke('fonts:private-read', name),
   convertDoc: (data: Uint8Array): Promise<any> => ipcRenderer.invoke('doc:convert', data),
-  aiKeyStatus: (): Promise<Record<'claude' | 'openai' | 'gemini' | 'ollama', 'saved' | 'env' | 'none'>> => ipcRenderer.invoke('ai:key-status'),
+  aiKeyStatus: (): Promise<Record<'claude' | 'openai' | 'gemini' | 'ollama', 'saved' | 'env' | 'login' | 'none'>> => ipcRenderer.invoke('ai:key-status'),
+  /** '계정 로그인' 방식: Kite 안에 띄울 수 있는 공식 웹 대화창 목록, 로그인 정보 지우기 */
+  aiWebServices: (): Promise<{ id: string; label: string; company: string; url: string }[]> => ipcRenderer.invoke('ai-web:services'),
+  aiWebClear: (): Promise<boolean> => ipcRenderer.invoke('ai-web:clear'),
   aiSetKey: (p: string, key: string | null) => ipcRenderer.invoke('ai:set-key', p, key),
   aiModels: (p: string): Promise<{ ok: boolean; models?: { id: string; label: string }[]; error?: string }> => ipcRenderer.invoke('ai:models', p),
   aiChat: (req: any) => ipcRenderer.invoke('ai:chat', req),

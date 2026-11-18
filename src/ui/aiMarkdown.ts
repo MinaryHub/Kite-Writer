@@ -15,13 +15,17 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   }
 });
 
-export function renderMarkdown(md: string): string {
-  const html = marked.parse(md, { gfm: true, breaks: true, async: false }) as string;
+/** 바깥에서 온 HTML(AI 응답, 웹 대화창에서 고른 답)을 문서에 넣어도 되게 정리한다 */
+export function sanitizeAiHtml(html: string): string {
   return DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
-    FORBID_TAGS: ['style', 'form', 'iframe', 'object', 'embed', 'video', 'audio', 'source', 'link', 'meta', 'svg', 'math'],
+    FORBID_TAGS: ['style', 'form', 'iframe', 'object', 'embed', 'video', 'audio', 'source', 'link', 'meta', 'svg', 'math', 'button', 'input', 'textarea', 'select'],
     // 인라인 CSS·대체 그림 주소 등으로 바깥에 요청이 나가지 않도록
     FORBID_ATTR: ['style', 'srcset', 'poster', 'ping', 'formaction', 'background', 'target'],
   });
+}
+
+export function renderMarkdown(md: string): string {
+  return sanitizeAiHtml(marked.parse(md, { gfm: true, breaks: true, async: false }) as string);
 }
 

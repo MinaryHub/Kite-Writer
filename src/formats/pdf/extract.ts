@@ -24,6 +24,8 @@ export interface Glyph {
   /** 장평 (%) */
   hscale: number;
   invisible: boolean;
+  /** 그린 순서 (뒤에 칠한 흰 사각형에 덮인 글자를 가려내는 데 쓴다) */
+  z?: number;
 }
 
 export interface FillRect {
@@ -36,6 +38,8 @@ export interface FillRect {
   tile?: boolean;
   /** 그린 순서 (나중에 칠한 사각형이 먼저 그린 선을 가린다) */
   z?: number;
+  /** 불투명하게 칠했다 (반투명 칠은 아래 글자를 가리지 않는다) */
+  opaque?: boolean;
 }
 
 export interface Seg {
@@ -62,6 +66,8 @@ export interface PdfImage {
   ref: string | any;
   /** 쪽에서 몇 번째 그림 그리기 명령인가 (그 그림만 다시 그릴 때 쓴다 — 그릴 때마다 id 가 바뀐다) */
   seq?: number;
+  /** 표·밑줄·구분선에 쓰이지 않은 선 조각(체크 상자·괄호 선 등)을 살린 그림: 글 흐름을 밀지 않는 자리에만 놓는다 */
+  stray?: boolean;
 }
 
 export interface PageContent {
@@ -213,7 +219,7 @@ export function extractPage(ops: { fnArray: number[]; argsArray: any[] }, OPS: R
     // 가는 사각형은 선으로 본다
     if (!tile && h <= 2.2 && w > 2.5) segs.push({ dir: 'h', pos: (r.y0 + r.y1) / 2, a: r.x0, b: r.x1, w: h, color, z: z++ });
     else if (!tile && w <= 2.2 && h > 2.5) segs.push({ dir: 'v', pos: (r.x0 + r.x1) / 2, a: r.y0, b: r.y1, w, color, z: z++ });
-    else fills.push({ ...r, color, tile, z: z++ });
+    else fills.push({ ...r, color, tile, z: z++, opaque: st.fillAlpha >= 0.99 });
   };
 
   const doPath = (paintOp: number, data: ArrayLike<number> | null) => {
@@ -322,8 +328,20 @@ export function extractPage(ops: { fnArray: number[]; argsArray: any[] }, OPS: R
         for (let k = 1; k < s.pts.length; k++) {
           const p = s.pts[k - 1];
           const q = s.pts[k];
+          const dx = Math.abs(p[0] - q[0]);
+          const dy = Math.abs(p[1] - q[1]);
+          // 아주 조금 기운 긴 선(쪽 높이에 2pt 쯤 기운 단 구분선 등)은 곧은 선으로 본다: 그림으로 두면 그 높이만큼 자리를 차지해 글을 밀어낸다
+          if (dx >= 0.8 && dy >= 0.8 && Math.min(dx, dy) < 3 && Math.min(dx, dy) < Math.max(dx, dy) * 0.01) {
+            if (dx < dy) {
+              const x = (p[0] + q[0]) / 2;
+              addLine([x, p[1]], [x, q[1]], lw, st.stroke);
+            } else {
+              const y = (p[1] + q[1]) / 2;
+              addLine([p[0], y], [q[0], y], lw, st.stroke);
+            }
+          }
           // 사선(가로·세로가 아닌 선)은 표·밑줄로 옮길 수 없으므로 그림으로
-          if (Math.abs(p[0] - q[0]) >= 0.8 && Math.abs(p[1] - q[1]) >= 0.8) addVector({ x0: Math.min(p[0], q[0]), y0: Math.min(p[1], q[1]), x1: Math.max(p[0], q[0]), y1: Math.max(p[1], q[1]) }, lw / 2 + 0.5, st.stroke);
+          else if (dx >= 0.8 && dy >= 0.8) addVector({ x0: Math.min(p[0], q[0]), y0: Math.min(p[1], q[1]), x1: Math.max(p[0], q[0]), y1: Math.max(p[1], q[1]) }, lw / 2 + 0.5, st.stroke);
           else addLine(p, q, lw, st.stroke);
         }
         if (s.closed || paintOp === OPS.closeStroke || paintOp === OPS.closeFillStroke || paintOp === OPS.closeEOFillStroke) addLine(s.pts[s.pts.length - 1], s.pts[0], lw, st.stroke);
@@ -389,6 +407,7 @@ export function extractPage(ops: { fnArray: number[]; argsArray: any[] }, OPS: R
             color,
             spacing: spacingPct,
             hscale: Math.round(hs * 100),
+            z,
             invisible,
           });
         }

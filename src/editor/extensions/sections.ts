@@ -27,7 +27,7 @@ export interface SectionsStorage {
 const PT2PX = 96 / 72;
 
 /** 블록 자신의 왼쪽·오른쪽 여백(px). 문단 모양의 들여쓰기·내어쓰기를 CSS 로 그릴 때와 같은 식 */
-function ownMargins(node: PMNode): [number, number] {
+export function ownMargins(node: PMNode): [number, number] {
   const a = node.attrs || {};
   if (node.type.name !== 'paragraph' && node.type.name !== 'heading') return [0, 0];
   const ml = (+a.indentLeft || 0) + Math.max(0, -(+a.textIndent || 0));
@@ -49,7 +49,8 @@ function build(doc: PMNode, shiftOf: SectionsStorage['shiftOf']): DecorationSet 
     }
     if (!cur) return;
     const [ml, mr] = ownMargins(node);
-    const style = `margin-left: ${(ml + cur.dl).toFixed(2)}px; margin-right: ${(mr + cur.dr).toFixed(2)}px`;
+    // --sec-r: 다단에서 단의 폭으로 오른쪽 여백을 다시 정할 때 더하는 몫 (editor.css 의 .pg-col)
+    const style = `margin-left: ${(ml + cur.dl).toFixed(2)}px; margin-right: ${(mr + cur.dr).toFixed(2)}px; --sec-r: ${cur.dr.toFixed(2)}px`;
     out.push(Decoration.node(pos, pos + node.nodeSize, { style }));
   });
   return DecorationSet.create(doc, out);

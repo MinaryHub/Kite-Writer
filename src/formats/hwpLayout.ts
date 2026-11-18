@@ -13,8 +13,10 @@ import type { JNode } from './common';
 const PT2PX = 96 / 72;
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
-const INLINE_LEAVES = new Set(['image', 'hardBreak', 'footnote', 'math']);
-const LEAF_BLOCKS = new Set(['pageBreak', 'horizontalRule']);
+const INLINE_LEAVES = new Set(['image', 'hardBreak', 'footnote', 'math', 'shape']);
+const LEAF_BLOCKS = new Set(['pageBreak', 'columnBreak', 'horizontalRule']);
+/** 쪽 나누기·단 나누기 (줄 정보를 갖지 않는 블록) */
+export const isBreakBlock = (b: JNode) => b.type === 'pageBreak' || b.type === 'columnBreak';
 function jsonSize(n: JNode): number {
   if (n.type === 'text') return (n.text || '').length;
   if (INLINE_LEAVES.has(n.type) || LEAF_BLOCKS.has(n.type)) return 1;
@@ -56,6 +58,9 @@ export interface ObjPos {
   h: number;
   omT: number;
   omB: number;
+  /** 왼쪽·오른쪽 바깥 여백 (없으면 0) */
+  omL?: number;
+  omR?: number;
 }
 
 /** 용지 크기와 본문 자리 (px) */
@@ -84,10 +89,26 @@ export interface LayoutState {
   seq: number;
 }
 
+/** 한글 문서에 적힌 개체 자리 (저장할 때 그대로 되돌려 쓴다): 본문과의 배치, 세로·가로 기준과 맞춤, 오프셋·바깥 여백(HWPUNIT) */
+export interface FloatHw {
+  wrap: string;
+  vr: string;
+  hr: string;
+  va: string;
+  ha: string;
+  vo: number;
+  ho: number;
+  /** 바깥 여백 [왼, 오른, 위, 아래] */
+  om?: number[];
+}
+
 export interface FloatAt {
   x: number;
   y: number;
   behind?: boolean;
+  hw?: FloatHw;
+  /** 쪽·종이 기준으로 놓인 개체: 쪽 본문 맨 위에서의 세로 자리(px). 쪽 나누기가 끝난 뒤 그 자리에 놓는다 */
+  py?: number;
 }
 
 /** 문단 하나의 배치 셈 */
@@ -102,7 +123,7 @@ export class ParaLayout {
   constructor(
     /** 줄마다 [줄 위쪽, 줄 높이, 줄 아래 간격, 기준선] (px) */
     readonly segV: number[][],
-    private o: { inSub: boolean; width?: number; geom: () => PageGeomPx; hwpPage: boolean; pageBreak: boolean; pp: ParaBox; state: LayoutState },
+    private o: { inSub: boolean; width?: number; geom: () => PageGeomPx; hwpPage: boolean; pageBreak: boolean; pp: ParaBox; state: LayoutState; origin?: { x: number; y: number } },
   ) {
     this.prevEnd = o.hwpPage || o.pageBreak ? 0 : o.state.prevEndV;
     if (!o.inSub && segV.length) {
@@ -133,15 +154,23 @@ export class ParaLayout {
     const sb = pp.spaceBefore * PT2PX;
     const v0 = this.segV.length ? this.segV[0][0] : null;
     const g = this.o.geom();
-    const vRel = inSub ? 'PARA' : p.vRel;
+    // 칸·글상자 안의 개체는 문단 기준으로만 놓인다. 머리말·꼬리말·바탕쪽(origin)은 종이에서의 자리를 알므로 종이·쪽 기준도 된다
+    const origin = this.o.origin;
+    const vRel = inSub && !origin ? 'PARA' : p.vRel;
     let y: number;
-    if (vRel === 'PARA') y = p.wrap === 'TOP_AND_BOTTOM' && this.pushed(p.h, p.omB, p.vOff) ? sb - p.omB - p.h : sb + p.vOff;
+    let py: number | null = null;
+    if (vRel === 'PARA') y = p.wrap === 'TOP_AND_BOTTOM' && this.pushed(p.h, p.omB, p.vOff) ? sb - p.omB - p.h : sb + p.vOff + p.omT;
     else {
-      if (v0 == null) return null;
       const refH = vRel === 'PAPER' ? g.H : g.bodyH;
       const top = vRel === 'PAPER' ? -g.mt : 0;
-      const Y = top + (p.vAl === 'CENTER' ? (refH - p.h) / 2 + p.vOff : p.vAl === 'BOTTOM' ? refH - p.h - p.vOff : p.vOff);
-      y = Y - (v0 - sb);
+      // 바깥 여백: 개체는 여백 상자 안쪽에 놓인다
+      const Y = top + (p.vAl === 'CENTER' ? (refH - p.h) / 2 + p.vOff : p.vAl === 'BOTTOM' ? refH - p.h - p.vOff - p.omB : p.vOff + p.omT);
+      if (origin) y = Y + g.mt - origin.y - ((v0 ?? sb) - sb);
+      else {
+        // 본문: 문단 첫 줄의 쪽 안 위치를 알면 그것으로 어림하고, 쪽 나누기가 끝나면 쪽 기준 자리(py)에 놓는다
+        y = v0 != null ? Y - (v0 - sb) : 0;
+        py = Y;
+      }
     }
     const colW = inSub ? this.o.width ?? 0 : g.bodyW;
     let base = 0;
@@ -149,12 +178,17 @@ export class ParaLayout {
     if (p.hRel === 'PARA') {
       base = pp.indentLeft * PT2PX;
       refW = colW - (pp.indentLeft + pp.indentRight) * PT2PX;
-    } else if (p.hRel === 'PAPER' && !inSub) {
-      base = -g.ml;
+    } else if (p.hRel === 'PAPER' && (!inSub || origin)) {
+      base = -(origin ? origin.x : g.ml);
       refW = g.W;
+    } else if (p.hRel === 'PAGE' && origin) {
+      base = g.ml - origin.x;
+      refW = g.bodyW;
     }
-    const x = base + (!(refW > 0) ? p.hOff : p.hAl === 'CENTER' ? (refW - p.w) / 2 + p.hOff : p.hAl === 'RIGHT' ? refW - p.w - p.hOff : p.hOff);
-    return { x: r2(x), y: r2(y), ...(p.wrap === 'BEHIND_TEXT' ? { behind: true } : {}) };
+    const omL = p.omL || 0;
+    const x = base + (!(refW > 0) ? p.hOff + omL : p.hAl === 'CENTER' ? (refW - p.w) / 2 + p.hOff : p.hAl === 'RIGHT' ? refW - p.w - p.hOff - (p.omR || 0) : p.hOff + omL);
+    const hw: FloatHw = { wrap: p.wrap, vr: p.vRel, hr: p.hRel, va: p.vAl, ha: p.hAl, vo: Math.round(p.vOff * 75), ho: Math.round(p.hOff * 75), om: [p.omL || 0, p.omR || 0, p.omT, p.omB].map((v) => Math.round(v * 75)) };
+    return { x: r2(x), y: r2(y), ...(p.wrap === 'BEHIND_TEXT' ? { behind: true } : {}), ...(py != null ? { py: r2(py) } : {}), hw };
   }
 
   /** 문단 상자의 왼쪽 (CSS margin-left, px): 문단 안에 띄우는 그림의 x 는 이만큼 뺀다 */
@@ -186,7 +220,7 @@ export class ParaLayout {
   finish(blocks: JNode[], lines: [number, number][] | null, floating: boolean): { blocks: JNode[]; lead: JNode | null } {
     const { segV } = this;
     const { inSub, pp, state } = this.o;
-    let paras = blocks.filter((b) => b.type !== 'pageBreak');
+    let paras = blocks.filter((b) => !isBreakBlock(b));
     // 글자처럼 취급하는 표·글상자 하나와 빈칸뿐인 글: 한글에서는 한 줄(개체 높이)이다
     if (segV.length === 1 && paras.length > 1) {
       const objs = paras.filter((b) => b.type !== 'paragraph');
@@ -204,7 +238,7 @@ export class ParaLayout {
       if (a.hwpLines || segV.length === 1) a.hwpVs = segV;
       one.attrs = a;
     }
-    const breaks = blocks.filter((b) => b.type === 'pageBreak');
+    const breaks = blocks.filter(isBreakBlock);
     if (inSub) return { blocks: [...this.before, ...paras, ...this.after], lead: null };
     const v0 = segV.length ? segV[0][0] : null;
     let lead: JNode | null = null;
@@ -229,11 +263,11 @@ export class ParaLayout {
     for (const [t, top] of this.tableTops) if (top > -1) t.attrs = { ...t.attrs, hwpTop: r2(Math.max(0, top)) };
     const group = [...breaks, ...this.before, ...paras, ...this.after];
     for (const b of group) {
-      if (b.type === 'pageBreak') continue;
+      if (isBreakBlock(b)) continue;
       b.attrs = { ...b.attrs, hwpSeq: ++state.seq };
       if (b.attrs.hwpLen == null) b.attrs.hwpLen = jsonContentSize(b);
     }
-    return { blocks: group, lead: lead || group.find((b) => b.type !== 'pageBreak') || null };
+    return { blocks: group, lead: lead || group.find((b) => !isBreakBlock(b)) || null };
   }
 }
 
@@ -244,7 +278,7 @@ export class ParaLayout {
 export function gapInBox(groups: JNode[][]) {
   let prevEnd: number | null = 0;
   for (const blocks of groups) {
-    const paras = blocks.filter((b) => b.type !== 'pageBreak' && !b.attrs?.float);
+    const paras = blocks.filter((b) => !isBreakBlock(b) && !b.attrs?.float);
     const one = paras.length === 1 && paras[0].type === 'paragraph' ? paras[0] : null;
     const vs = one?.attrs?.hwpVs as number[][] | undefined;
     if (one && vs && vs.length) {
@@ -265,6 +299,8 @@ export function markCellTrail(content: JNode[], cellHeightPx: number, vMarginPx:
   const lastP = content[content.length - 1];
   const vs = lastP && lastP.type === 'paragraph' ? (lastP.attrs?.hwpVs as number[][] | undefined) : undefined;
   if (!vs || !vs.length) return 0;
+  // 빈 문단 하나뿐인 칸(색 띠로 쓰는 낮은 칸 등)은 줄 높이만큼만 차지한다
+  if (content.length === 1 && !(lastP.content || []).length) return 0;
   const l = vs[vs.length - 1];
   const textOnly = l[0] + l[1] + vMarginPx;
   if (cellHeightPx >= textOnly - 1) return 0;
@@ -347,4 +383,63 @@ export function estimateMissingLines(root: JNode) {
     const s = stats.get(keyOf(p));
     if (s) p.attrs = { ...p.attrs, hwpPitch: s };
   }
+}
+
+/**
+ * 한글 배치 정보(줄 자리·쪽 안 위치·차례 등)를 모두 뺀 사본. 줄 정보가 형식만 갖춘 문서(Kite 등 다른 프로그램이 쓴 HWP:
+ * 문단마다 세로 위치 0 인 줄 하나)는 그 값을 따르면 모든 문단이 쪽 맨 위에 겹치므로, 배치 정보 없이 자연 배치로 흐르게 한다
+ */
+export function dropHwpLayout(n: JNode): JNode {
+  const out: JNode = { ...n };
+  if (n.attrs) {
+    const a: Record<string, any> = {};
+    for (const k of Object.keys(n.attrs)) if (!/^hwp(Lines|Len|Top|Seq|Page|Col|Vs|Gap|Trail|Pitch)$/.test(k)) a[k] = n.attrs[k];
+    out.attrs = a;
+  }
+  if (n.content) out.content = n.content.map(dropHwpLayout);
+  return out;
+}
+
+/** 본문 문단들의 줄 정보가 형식뿐인가: 줄 정보가 있는 문단이 둘 이상인데 모두 '세로 위치 0 인 줄 하나'일 때 */
+export class LineSegStats {
+  private paras = 0;
+  private zero = 0;
+  /** 본문 문단 하나: 줄 수와 첫 줄의 세로 위치 */
+  note(lines: number, vpos: number) {
+    if (lines < 1) return;
+    this.paras++;
+    if (lines === 1 && vpos === 0) this.zero++;
+  }
+  get fake(): boolean {
+    return this.paras >= 2 && this.zero === this.paras;
+  }
+}
+
+/**
+ * 글상자 안에서 떠 있는 개체가 글 아래로 나온 높이 (px). 한글은 글의 세로 맞춤(가운데·아래)을 떠 있는 개체까지 넣은
+ * 내용 높이로 한다: 글 아래로 나온 만큼을 상자의 아래 안 여백에 더하면 같은 자리에 온다.
+ * 줄 자리(hwpVs)를 모르는 문단이 있으면 셈하지 않는다 (0)
+ */
+export function floatOverhang(content: JNode[]): number {
+  let textBottom = 0;
+  let floatBottom = 0;
+  /** 뒤따르는 문단을 기다리는 떠 있는 상자 (자리는 그 문단 상자의 위쪽 기준) */
+  const waiting: JNode[] = [];
+  const num = (v: any) => (Number.isFinite(+v) ? +v : 0);
+  for (const b of content) {
+    if (b.attrs?.float && b.type !== 'paragraph') {
+      waiting.push(b);
+      continue;
+    }
+    if (b.type !== 'paragraph') return 0;
+    const vs = b.attrs?.hwpVs as number[][] | undefined;
+    if (!Array.isArray(vs) || !vs.length) return 0;
+    const top = vs[0][0] - num(b.attrs?.spaceBefore) * PT2PX;
+    const last = vs[vs.length - 1];
+    textBottom = Math.max(textBottom, last[0] + last[1]);
+    for (const w of waiting.splice(0)) floatBottom = Math.max(floatBottom, top + num(w.attrs!.float.y) + num(w.attrs!.height));
+    for (const n of b.content || []) if (n.attrs?.float) floatBottom = Math.max(floatBottom, top + num(n.attrs.float.y) + num(n.attrs.height));
+  }
+  const d = floatBottom - textBottom;
+  return d > 0.5 && d < 5000 ? r2(d) : 0;
 }
