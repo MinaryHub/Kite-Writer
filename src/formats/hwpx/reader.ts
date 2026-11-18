@@ -1,5 +1,6 @@
 import { LineSegStats, cellContentNeed, dropHwpLayout, floatOverhang, indentByBlanks, sideBySide, type FloatHw } from '../hwpLayout';
 import { cleanLook, type PicLook } from '../picLook';
+import { olePreview } from '../olePreview';
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
 import { CELL_VMARGIN_HWP, FLOATING, HwpPageMarks, assembleTable, fitTableLines, placeCaptions, takeFloating, type Caption, type Captions } from '../hwp/reader';
@@ -957,9 +958,43 @@ export class HwpxConverter {
               this.addCaption(child, captions, fp, before);
             }
             break;
-          case 'ole':
-            inline.push(this.sizedPlaceholder(child, 'OLE 개체'));
+          case 'ole': {
+            // OLE 개체: 개체가 그려 둔 모양을 그림처럼 그 자리에 (떠 있으면 띄운다)
+            const sz = objSize(child);
+            const w = Math.max(1, Math.round(hwpToPx(sz.w || 12000)));
+            const h = Math.max(1, Math.round(hwpToPx(sz.h || 6000)));
+            const src = this.images.get(attr(child, 'binaryItemIDRef') || '') || placeholderImage('OLE 개체', w, h);
+            const ole: JNode = { type: 'image', attrs: { src, width: w, height: h, alt: 'OLE 개체' } };
+            const fp = this.floatPos(child, pp, segV, ctx, pushed);
+            if (fp) ole.attrs = { ...ole.attrs, float: { ...fp, x: r2(fp.x - (pp.indentLeft + Math.max(0, -pp.textIndent)) * PT2PX) } };
+            else if (attr(kid(child, 'pos'), 'treatAsChar') !== '1') ole.attrs = { ...ole.attrs, [FLOATING]: true };
+            inline.push(ole);
             break;
+          }
+          case 'btn':
+          case 'checkBtn':
+          case 'radioBtn':
+          case 'comboBox':
+          case 'edit':
+          case 'listBox': {
+            // 양식 개체: 한글처럼 생긴 도형으로 (누르거나 고를 수는 없다)
+            const node = this.formNode(child);
+            if (node) this.placeShape(node, child, pp, segV, ctx, pushed, inline);
+            break;
+          }
+          case 'video': {
+            // 동영상: 문서에 든 첫 화면 그림(imageIDRef)을 그 자리에, 가운데 재생 단추와 함께 (동영상 파일은 문서 밖에 있을 수 있다)
+            const sz = objSize(child);
+            const w = Math.max(1, Math.round(hwpToPx(sz.w || 22500)));
+            const h = Math.max(1, Math.round(hwpToPx(sz.h || 15000)));
+            const thumb = this.images.get(attr(child, 'imageIDRef') || '');
+            const vid: JNode = { type: 'image', attrs: { src: thumb || placeholderImage('동영상', w, h), width: w, height: h, alt: '동영상', look: { play: true } } };
+            const fp = this.floatPos(child, pp, segV, ctx, pushed);
+            if (fp) vid.attrs = { ...vid.attrs, float: { ...fp, x: r2(fp.x - (pp.indentLeft + Math.max(0, -pp.textIndent)) * PT2PX) } };
+            else if (attr(kid(child, 'pos'), 'treatAsChar') !== '1') vid.attrs = { ...vid.attrs, [FLOATING]: true };
+            inline.push(vid);
+            break;
+          }
           case 'equation': {
             const script = kid(child, 'script')?.textContent || '';
             if (script.trim()) inline.push({ type: 'math', attrs: { latex: hwpToLatex(script), hwp: script }, marks: charMarks(cp) });
@@ -1433,13 +1468,6 @@ export class HwpxConverter {
     return content.some(visible) ? { content: content as any, type } : null;
   }
 
-  private sizedPlaceholder(el: Element, label: string): JNode {
-    const sz = objSize(el);
-    const w = Math.max(40, Math.round(hwpToPx(sz.w || 12000)));
-    const h = Math.max(20, Math.round(hwpToPx(sz.h || 6000)));
-    return { type: 'image', attrs: { src: placeholderImage(label, w, h), width: w, height: h, alt: label } };
-  }
-
   convertPic(pic: Element): JNode {
     const img = descendant(pic, 'img');
     const ref = attr(img, 'binaryItemIDRef') || '';
@@ -1679,6 +1707,90 @@ export class HwpxConverter {
       if (!(h > 0)) h = b ? Math.max(1, b.y1) : 1;
     }
     return { type: 'shape', attrs: { width: r2(w), height: r2(h), d } };
+  }
+
+  /**
+   * 양식 개체(명령 단추·선택 상자·라디오 단추·콤보 상자·입력 상자·목록 상자) → 한글(윈도 기본 모양)처럼 그린 도형.
+   * 단추는 볼록한 입체 테두리, 입력 칸은 오목한 테두리, 선택 상자·라디오 단추는 왼쪽의 작은 네모·동그라미와 글.
+   * 글은 양식 글자 모양(formCharPr)과 글자색(foreColor)으로
+   */
+  private formNode(el: Element): JNode | null {
+    const name = localName(el);
+    const sz = objSize(el);
+    const w = r2(hwpToPx(sz.w));
+    const h = r2(hwpToPx(sz.h));
+    if (!(w > 2) || !(h > 2) || w > 4000 || h > 4000) return null;
+    const fore = normColor(attr(el, 'foreColor')) || '#000000';
+    const back = normColor(attr(el, 'backColor')) || '#FFFFFF';
+    const cp = this.h.charPrs.get(attr(kid(el, 'formCharPr'), 'charPrIDRef') || '0');
+    const at = (x: number, y: number): Mat => [1, 0, 0, 1, r2(x), r2(y)];
+    const items: ShapeItem[] = [];
+    const rect = (x: number, y: number, rw: number, rh: number, fc: string | null, sc: string | null = null) => items.push({ k: 'rect', m: at(x, y), w: rw, h: rh, fc, sc, ...(sc ? { sw: 1 } : {}) });
+    const line = (pts: number[], sc: string) => items.push({ k: 'poly', m: at(0, 0), w, h, p: pts.map(r2), sc, sw: 1, fc: null });
+    /** 입체 테두리: 볼록(raised)이면 위·왼쪽이 밝고 아래·오른쪽이 어둡다 */
+    const bevel = (x: number, y: number, bw: number, bh: number, raised: boolean) => {
+      const lt = raised ? '#FFFFFF' : '#808080';
+      const rb = raised ? '#808080' : '#FFFFFF';
+      line([x + 0.5, y + bh - 0.5, x + 0.5, y + 0.5, x + bw - 0.5, y + 0.5], lt);
+      line([x + 0.5, y + bh - 0.5, x + bw - 0.5, y + bh - 0.5, x + bw - 0.5, y + 0.5], rb);
+    };
+    const text = (t: string, x: number, align: 'left' | 'center' | 'right') => {
+      if (!t) return;
+      const marks = charMarks(cp).filter((m) => m.type !== 'highlight');
+      const ts = marks.find((m) => m.type === 'textStyle');
+      if (ts) ts.attrs = { ...ts.attrs, color: fore };
+      else marks.push({ type: 'textStyle', attrs: { color: fore } });
+      const tn = textNode(t, marks);
+      if (!tn) return;
+      items.push({ k: 'text', m: at(x, 0), w: Math.max(1, w - x), h, content: [paragraph({ textAlign: align, lineHeight: '1' }, [tn])], pad: [0, 2, 0, 2], va: 'middle' });
+    };
+    const checked = attr(el, 'value') === 'CHECKED';
+    if (name === 'btn') {
+      rect(0, 0, w, h, back);
+      bevel(0, 0, w, h, true);
+      text(attr(el, 'caption') || '', 0, 'center');
+    } else if (name === 'checkBtn' || name === 'radioBtn') {
+      if (attr(el, 'backStyle') !== 'TRANSPARENT' && back !== '#FFFFFF') rect(0, 0, w, h, back);
+      const bs = Math.min(13, h - 2);
+      const by = (h - bs) / 2;
+      if (name === 'checkBtn') {
+        rect(1, by, bs, bs, '#FFFFFF', '#333333');
+        if (checked) line([3.5, by + bs * 0.5, 1 + bs * 0.42, by + bs - 3, bs - 1, by + 3], '#000000');
+      } else {
+        items.push({ k: 'ellipse', m: at(1, by), w: bs, h: bs, fc: '#FFFFFF', sc: '#808080', sw: 1 });
+        if (checked) items.push({ k: 'ellipse', m: at(1 + bs * 0.32, by + bs * 0.32), w: bs * 0.36, h: bs * 0.36, fc: '#000000', sc: null });
+      }
+      text(attr(el, 'caption') || '', bs + 3, 'left');
+    } else if (name === 'comboBox' || name === 'listBox') {
+      rect(0, 0, w, h, back);
+      bevel(0, 0, w, h, false);
+      const sel = attr(el, 'selectedValue') || '';
+      const itemsEls = kids(el, 'listItem');
+      const shown = itemsEls.find((li) => attr(li, 'value') === sel && sel) || null;
+      const label = shown ? attr(shown, 'displayText') || '' : sel;
+      if (name === 'comboBox') {
+        // 내림 단추: 오른쪽 끝의 볼록한 단추와 검은 세모
+        const bw = Math.min(w / 3, h * 1.25);
+        const bx = w - bw - 1;
+        rect(bx, 1, bw, h - 2, '#F0F0F0');
+        bevel(bx, 1, bw, h - 2, true);
+        const cx = bx + bw / 2;
+        const cy = h / 2;
+        items.push({ k: 'poly', m: at(0, 0), w, h, p: [cx - 3.5, cy - 2, cx + 3.5, cy - 2, cx, cy + 2].map(r2), z: true, fc: '#000000', sc: null });
+        const t0 = items.length;
+        text(label, 0, 'left');
+        if (items.length > t0) items[items.length - 1].w = Math.max(1, bx);
+      } else text(label || (itemsEls[0] ? attr(itemsEls[0], 'displayText') || '' : ''), 0, 'left');
+    } else if (name === 'edit') {
+      rect(0, 0, w, h, back);
+      bevel(0, 0, w, h, false);
+      const raw = kid(el, 'text')?.textContent || '';
+      const pw = attr(el, 'passwordChar') || '';
+      const al = attr(el, 'alignText');
+      text(pw && raw ? pw.charAt(0).repeat(Array.from(raw).length) : raw, 0, al === 'CENTER' ? 'center' : al === 'RIGHT' ? 'right' : 'left');
+    }
+    if (!items.length) return null;
+    return { type: 'shape', attrs: { width: w, height: h, d: { items } } };
   }
 
   /** 글상자 등 도형 → 글상자 노드 (크기·테두리·배경을 가진 상자 안의 문단) */
@@ -2115,7 +2227,10 @@ export async function readHwpx(data: Uint8Array): Promise<LoadedDoc> {
     const ext = path.split('.').pop() || '';
     const mime = it.type && it.type.startsWith('image/') && it.type !== 'image/jpg' ? it.type : mimeFromExt(ext);
     if (isBrowserImage(mime)) images.set(id, bytesToDataUrl(await readZipEntry(f, 'uint8array'), mime));
-    else images.set(id, placeholderImage(`그림(${ext.toUpperCase()})`));
+    else if (/^ole$/i.test(ext) || /ole/i.test(it.type || '')) {
+      // OLE 개체: 개체가 그려 둔 모양(비트맵)을 꺼낸다. 못 꺼내면 자리 표시
+      images.set(id, olePreview(await readZipEntry(f, 'uint8array')) || placeholderImage('OLE 개체'));
+    } else images.set(id, placeholderImage(`그림(${ext.toUpperCase()})`));
   }
 
   // 헤더

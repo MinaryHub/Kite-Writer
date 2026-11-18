@@ -1,5 +1,6 @@
 import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, floatOverhang, gapInBox, isBreakBlock, jsonContentSize, cellContentNeed, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
 import { cleanLook, type PicLook } from '../picLook';
+import { olePreview } from '../olePreview';
 import { hwpToLatex } from '../../math/hwpEq';
 import * as CFB from 'cfb';
 import { Inflate } from 'pako';
@@ -67,6 +68,7 @@ const T = {
   SHAPE_COMPONENT_ARC: 81,
   SHAPE_COMPONENT_POLYGON: 82,
   SHAPE_COMPONENT_CURVE: 83,
+  SHAPE_COMPONENT_OLE: 84,
   SHAPE_COMPONENT_PICTURE: 85,
   SHAPE_COMPONENT_CONTAINER: 86,
   CTRL_DATA: 87,
@@ -1063,6 +1065,7 @@ class HwpConverter {
     const w = Math.round(hwpToPx(u32(ctrl, 16)));
     const h = Math.round(hwpToPx(u32(ctrl, 20)));
     const pics: Rec[] = [];
+    let oleRec: Rec | null = null;
     const texts: { header: Rec; paras: Rec[]; shape: Rec }[] = [];
     let shapeRec: Rec | null = null;
     let rectRec: Rec | null = null;
@@ -1081,6 +1084,7 @@ class HwpConverter {
           continue;
         }
         if (c.tag === T.SHAPE_COMPONENT_PICTURE) pics.push(c);
+        else if (c.tag === T.SHAPE_COMPONENT_OLE && !oleRec) oleRec = c;
         else if (c.tag === T.SHAPE_COMPONENT && !shapeRec) shapeRec = c;
         else if (c.tag === T.SHAPE_COMPONENT_RECTANGLE) rectRec = c;
         else if (c.tag === T.SHAPE_COMPONENT_ELLIPSE) ellipse = true;
@@ -1109,6 +1113,16 @@ class HwpConverter {
     }
     const top = ctrl.children.find((c) => c.tag === T.SHAPE_COMPONENT) || null;
     const topKind = top ? ctrlIdOf(top) : '';
+    const oleR = oleRec as Rec | null;
+    if (oleR && topKind === '$ole' && oleR.data.length >= 14) {
+      // OLE 개체: 개체가 그려 둔 모양(BinData 에서 꺼낸 그림)을 그림처럼 그 자리에. 속성(4) 범위 x·y(8) 다음이 BinData 번호
+      const id = u16(oleR, 12);
+      const ole: JNode = { type: 'image', attrs: { src: this.images.get(id) || placeholderImage('OLE 개체', w || 120, h || 60), width: w || null, height: h || null, alt: 'OLE 개체' } };
+      if (fp && lay) ole.attrs = { ...ole.attrs, float: { ...fp, x: Math.round((fp.x - lay.paraLeft()) * 100) / 100 } };
+      else if (!(u32(ctrl, 4) & 1)) ole.attrs = { ...ole.attrs, [FLOATING]: true };
+      inline.push(ole);
+      return capFloats;
+    }
     if (pics.length === 1 && !texts.length && (topKind === '$pic' || !top)) {
       const pic = this.picture(pics[0], w, h);
       // 글자처럼 취급하지 않는(떠 있는) 그림: 한글의 줄 배치에 들지 않는다 (hasFloating)
@@ -1691,7 +1705,9 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
     const comp = b.compress === 0 ? compressed : b.compress === 1;
     if (comp) bytes = decompress(bytes, true);
     const mime = mimeFromExt(b.ext);
-    images.set(id, isBrowserImage(mime) ? bytesToDataUrl(bytes, mime) : placeholderImage(`그림(${b.ext.toUpperCase()})`));
+    // OLE 개체: 개체가 그려 둔 모양(비트맵)을 꺼낸다. 못 꺼내면 자리 표시
+    if (/^ole$/i.test(b.ext)) images.set(id, olePreview(bytes) || placeholderImage('OLE 개체'));
+    else images.set(id, isBrowserImage(mime) ? bytesToDataUrl(bytes, mime) : placeholderImage(`그림(${b.ext.toUpperCase()})`));
   }
 
   const conv = new HwpConverter(info, images, defaultSettings(), warnings);

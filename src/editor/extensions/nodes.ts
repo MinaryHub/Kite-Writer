@@ -282,7 +282,7 @@ export const KImage = Image.extend({
     const ls = look ? lookStyle(look) : null;
     if (ls?.wrap) st.push(ls.wrap);
     if (ls?.img) imgStyle = imgStyle ? imgStyle + ';' + ls.img : ls.img;
-    const cls = 'k-image' + (fl ? ' k-float' + (fl.behind ? ' behind' : '') : '') + (c ? ' cropped' : '');
+    const cls = 'k-image' + (fl ? ' k-float' + (fl.behind ? ' behind' : '') : '') + (c ? ' cropped' : '') + (look?.play ? ' k-play' : '');
     return ['span', { class: cls, style: st.join(';'), ...(fl && fl.py != null ? { 'data-py': String(fl.py) } : {}), ...(look ? { 'data-look': JSON.stringify(look) } : {}) }, ['img', imgStyle ? mergeAttributes(base, { style: imgStyle }) : base]];
   },
 
@@ -342,6 +342,7 @@ export const KImage = Image.extend({
           img.style.removeProperty(k);
         }
         const css = lookCss(n.attrs.look);
+        wrap.classList.toggle('k-play', !!cleanLook(n.attrs.look)?.play);
         for (const [k, v] of Object.entries(css.wrap)) wrap.style.setProperty(k, v);
         for (const [k, v] of Object.entries(css.img)) img.style.setProperty(k, v);
         if (Object.keys(css.wrap).length || Object.keys(css.img).length) wrap.setAttribute('data-look', JSON.stringify(cleanLook(n.attrs.look)));

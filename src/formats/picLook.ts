@@ -24,6 +24,8 @@ export interface PicLook {
   soft?: number;
   /** 반사: 그림과의 거리 px, 시작 불투명도(0~1), 반사가 보이는 길이(그림 높이에 대한 비율 0~1) */
   reflect?: { gap: number; a: number; size: number };
+  /** 동영상의 첫 화면: 가운데에 재생 단추를 겹쳐 그린다 (한글처럼) */
+  play?: boolean;
 }
 
 const HEX = /^#[0-9A-Fa-f]{6}$/;
@@ -68,6 +70,7 @@ export function cleanLook(v: any): PicLook | null {
     const size = num(v.reflect.size, 0, 1);
     if (gap != null && ra && size) out.reflect = { gap, a: ra, size };
   }
+  if (v.play === true) out.play = true;
   return Object.keys(out).length ? out : null;
 }
 
