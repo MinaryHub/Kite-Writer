@@ -177,3 +177,76 @@ export function lineNumbersHtml(tab: DocTab, g: PageGeom, k: number): string {
     .map((b) => `<div class="line-num" style="position:absolute;left:${b.left}px;top:${b.top}px;width:${b.width}px;height:${b.height}px;line-height:${b.height}px;text-align:right;font-family:${LINE_NUM_FONT.replace(/"/g, '')};font-size:${LINE_NUM_PX}px;white-space:nowrap">${b.n}</div>`)
     .join('');
 }
+
+/** 변경 막대 하나: 쪽(0부터), 그 쪽 본문 맨 위에서 위·아래 끝(px), 색 */
+export interface ChangeBar {
+  page: number;
+  top: number;
+  bottom: number;
+  color: string;
+}
+
+/** 막대의 자리: 본문 왼쪽에서 2.5mm 왼쪽 (한글 미리 보기에서 잰 자리), 굵기 1px */
+const BAR_GAP_MM = 2.5;
+
+/** 편집 화면에서 변경 내용(넣음·지움)이 있는 줄을 재어 왼쪽 여백의 변경 막대로 (같은 줄의 조각들은 하나로) */
+export function measureChangeBars(root: HTMLElement, plans: PagePlan[]): ChangeBar[] {
+  const els = root.querySelectorAll<HTMLElement>('ins.tc-ins, del.tc-del');
+  if (!els.length) return [];
+  const rootRect = root.getBoundingClientRect();
+  const z = root.offsetHeight > 0 ? rootRect.height / root.offsetHeight || 1 : 1;
+  const spans: { top: number; bottom: number; color: string }[] = [];
+  for (const el of Array.from(els)) {
+    // 떠 있는 글상자·머리말 안의 것은 그 자리가 본문 줄이 아니다
+    if (el.closest('.k-float')) continue;
+    const color = getComputedStyle(el).color || '#ff0000';
+    for (const r of Array.from(el.getClientRects())) if (r.height > 0.5) spans.push({ top: (r.top - rootRect.top) / z, bottom: (r.bottom - rootRect.top) / z, color });
+  }
+  spans.sort((a, b) => a.top - b.top);
+  const merged: typeof spans = [];
+  for (const s of spans) {
+    const l = merged[merged.length - 1];
+    if (l && s.top <= l.bottom + 0.5) l.bottom = Math.max(l.bottom, s.bottom);
+    else merged.push({ ...s });
+  }
+  const out: ChangeBar[] = [];
+  for (const s of merged) {
+    const page = pageAtY(plans, (s.top + s.bottom) / 2);
+    const pl = plans[page];
+    if (!pl) continue;
+    const top = Math.max(0, s.top - pl.contentTop);
+    const bottom = Math.min(pl.g.contentH, s.bottom - pl.contentTop);
+    if (bottom > top) out.push({ page, top: Math.round(top * 100) / 100, bottom: Math.round(bottom * 100) / 100, color: s.color });
+  }
+  return out;
+}
+
+const barCache = new WeakMap<object, ChangeBar[]>();
+
+/** 탭의 변경 막대들 (쪽 나누기 결과가 바뀔 때마다 다시 잰다) */
+export function changeBarsOf(tab: DocTab): ChangeBar[] {
+  if (typeof document === 'undefined') return [];
+  let v = barCache.get(tab.layout);
+  if (!v) {
+    try {
+      v = measureChangeBars(tab.editor.view.dom as HTMLElement, printPlans(tab));
+    } catch {
+      v = [];
+    }
+    barCache.set(tab.layout, v);
+  }
+  return v;
+}
+
+/** k 번째 쪽의 변경 막대: 쪽(용지) 왼쪽 위 기준 [왼쪽, 위, 높이]와 색 */
+export function changeBarBoxes(bars: ChangeBar[], g: PageGeom, k: number): { left: number; top: number; height: number; color: string }[] {
+  const left = Math.round((g.ml - BAR_GAP_MM * PX_PER_MM) * 100) / 100;
+  return bars.filter((b) => b.page === k).map((b) => ({ left, top: Math.round((g.mt + b.top) * 100) / 100, height: Math.round((b.bottom - b.top) * 100) / 100, color: b.color }));
+}
+
+/** 인쇄용: 한 쪽의 변경 막대 HTML */
+export function changeBarsHtml(tab: DocTab, g: PageGeom, k: number): string {
+  return changeBarBoxes(changeBarsOf(tab), g, k)
+    .map((b) => `<div class="change-bar" style="position:absolute;left:${b.left}px;top:${b.top}px;width:0;height:${b.height}px;border-left:1px solid ${b.color.replace(/[^#0-9a-zA-Z(),.\s%]/g, '')}"></div>`)
+    .join('');
+}

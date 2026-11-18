@@ -162,6 +162,8 @@ export interface HeaderInfo {
   numberings: Map<string, Numbering>;
   bullets: Map<string, string>;
   styles: Map<string, { name: string; paraPr: string; charPr: string }>;
+  /** 변경 추적: hh:trackChange id → 종류·시각·사람·사람 색 */
+  trackChanges?: Map<string, { type: 'insertion' | 'deletion'; time: number; author: string; color: string | null }>;
 }
 
 const DEFAULT_CHAR: CharPr = { fontSize: 10 };
@@ -375,6 +377,25 @@ export function parseHeader(doc: Document): HeaderInfo {
       paraPr: attr(st, 'paraPrIDRef') || '0',
       charPr: attr(st, 'charPrIDRef') || '0',
     });
+  }
+  // 변경 추적: 바뀐 내용(종류·시각·사람)과 사람 목록. 사람 번호(authorID)가 목록의 id 와 맞지 않으면 목록 차례(1부터)로 찾는다
+  const authors = descendants(doc, 'trackChangeAuthor');
+  const changes = descendants(doc, 'trackChange');
+  if (changes.length) {
+    info.trackChanges = new Map();
+    for (const c of changes) {
+      const t = (attr(c, 'type') || '').toLowerCase();
+      if (t !== 'insert' && t !== 'delete') continue;
+      const aid = attr(c, 'authorID') || '';
+      const au = authors.find((x) => attr(x, 'id') === aid) || authors[(parseInt(aid, 10) || 1) - 1] || authors[0] || null;
+      const time = Date.parse(attr(c, 'date') || '');
+      info.trackChanges.set(attr(c, 'id') || '', {
+        type: t === 'insert' ? 'insertion' : 'deletion',
+        time: Number.isFinite(time) ? time : 0,
+        author: (au && attr(au, 'name')) || '',
+        color: normColor(attr(au, 'color')),
+      });
+    }
   }
   return info;
 }
@@ -593,6 +614,8 @@ export class HwpxConverter {
   counter = new NumberingCounter();
   private linkHref: string | null = null;
   private markpen: string | null = null;
+  /** 지금 읽는 변경 추적 구간 (hp:insertBegin~insertEnd, deleteBegin~deleteEnd) */
+  private change: { type: 'insertion' | 'deletion'; id: string; author: string; time: number; color: string | null } | null = null;
   /** 한글이 배치해 둔 직전 문단 첫 줄의 세로 위치. 되돌아가면 한글이 새 쪽에 놓은 문단이다 */
   private lastVpos = 0;
   private topParas = 0;
@@ -1128,9 +1151,16 @@ export class HwpxConverter {
     (cap.top ? captions.before : captions.after).push(...cap.blocks);
   }
 
+  /** 글자 모양 표시 + 지금 읽는 변경 내용(넣음·지움) 표시 */
+  private textMarks(cp: CharPr | undefined): JMark[] {
+    const marks = charMarks(cp, this.linkHref, this.markpen);
+    if (this.change) marks.push({ type: this.change.type, attrs: { id: this.change.id, author: this.change.author, time: this.change.time, color: this.change.color } });
+    return marks;
+  }
+
   private handleT(t: Element, cp: CharPr | undefined, inline: JNode[], track: LineTrack) {
     const push = (s: string) => {
-      const n = textNode(s, charMarks(cp, this.linkHref, this.markpen));
+      const n = textNode(s, this.textMarks(cp));
       if (n) inline.push(n);
     };
     for (let n = t.firstChild; n; n = n.nextSibling) {
@@ -1148,7 +1178,7 @@ export class HwpxConverter {
           // 탭은 폭(HWPUNIT)·채움·종류를 가진다 → 탭 글자 하나에 마크로 붙인다
           const tw = numAttr(el, 'width', 0);
           const n = textNode('\t', [
-            ...charMarks(cp, this.linkHref, this.markpen),
+            ...this.textMarks(cp),
             { type: 'tab', attrs: { width: tw > 0 ? Math.round(hwpToPx(tw) * 100) / 100 : null, leader: numAttr(el, 'leader', 0), type: numAttr(el, 'type', 0) } },
           ]);
           if (n) inline.push(n);
@@ -1171,6 +1201,18 @@ export class HwpxConverter {
           break;
         case 'markpenEnd':
           this.markpen = null;
+          break;
+        case 'insertBegin':
+        case 'deleteBegin': {
+          // 변경 추적: 넣은·지운 글자 (지운 글자도 문서에 남아 취소선으로 보인다). 문단을 넘어 이어질 수 있다
+          const tc = this.h.trackChanges?.get(attr(el, 'TcId') || '');
+          const type = ln === 'insertBegin' ? 'insertion' : 'deletion';
+          this.change = { type, id: `h${attr(el, 'Id') || attr(el, 'TcId') || ''}`, author: tc?.author || '', time: tc?.time || 0, color: tc?.color || '#FF0000' };
+          break;
+        }
+        case 'insertEnd':
+        case 'deleteEnd':
+          this.change = null;
           break;
         default:
           if (el.textContent) push(el.textContent);

@@ -5,7 +5,7 @@ import { layoutTabsHtml } from './editor/tabLayout';
 import type { DocTab } from './doc/docTab';
 import { PX_PER_MM, formatPageNumber, xmlEscape } from './formats/common';
 import { FN_FONT_PX, FN_LINE, FN_SEP } from './editor/extensions/pagination';
-import { lineNumbersHtml } from './lineNumbers';
+import { changeBarsHtml, lineNumbersHtml } from './lineNumbers';
 
 export const PAGE_GAP = 18;
 
@@ -330,8 +330,9 @@ export function pageChromeHtml(tab: DocTab, g: PageGeom, k: number, pageCount: n
     const zz = v === 'top' ? z.header : z.footer;
     html += `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${zz.top}px;height:${zz.height}px;display:flex;align-items:${v === 'top' ? 'flex-start' : 'flex-end'};justify-content:${h === 'left' ? 'flex-start' : h === 'right' ? 'flex-end' : 'center'};font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:9pt">${xmlEscape(formatPageNumber(num, s.pageNumber.format))}</div>`;
   }
-  // 줄 번호 (본문 왼쪽 여백)
+  // 줄 번호와 변경 막대 (본문 왼쪽 여백)
   html += lineNumbersHtml(tab, g, k);
+  html += changeBarsHtml(tab, g, k);
   const fns = tab.layout.footnotes.filter((f) => f.page === k);
   if (fns.length) {
     html += `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;bottom:${g.mb}px;font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:${FN_FONT_PX}px;line-height:${FN_LINE}">`;

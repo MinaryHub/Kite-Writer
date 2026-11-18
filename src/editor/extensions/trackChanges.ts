@@ -36,7 +36,11 @@ const changeAttrs = {
   id: { default: null },
   author: { default: '' },
   time: { default: 0 },
+  /** 문서가 정한 사람 색 (한글의 변경 추적 사용자 색). 없으면 이름으로 정한 색 */
+  color: { default: null },
 };
+
+const HEX = /^#[0-9A-Fa-f]{6}$/;
 
 const renderChange = (tag: string, cls: string) => (props: { HTMLAttributes: Record<string, any>; mark: any }) => {
   const a = props.mark.attrs as ChangeAttrs;
@@ -49,7 +53,8 @@ const renderChange = (tag: string, cls: string) => (props: { HTMLAttributes: Rec
       'data-author': a.author,
       'data-time': String(a.time || ''),
       title: `${cls === 'tc-ins' ? '넣음' : '지움'}: ${a.author || '알 수 없음'}${when ? ' · ' + when : ''}`,
-      style: `--tc-hue: ${authorHue(a.author)}`,
+      ...(typeof (a as any).color === 'string' && HEX.test((a as any).color) ? { 'data-color': (a as any).color } : {}),
+      style: `--tc-hue: ${authorHue(a.author)}` + (typeof (a as any).color === 'string' && HEX.test((a as any).color) ? `; --tc-c: ${(a as any).color}` : ''),
     }),
     0,
   ] as any;
@@ -59,6 +64,7 @@ const parseChange = (el: HTMLElement) => ({
   id: el.getAttribute('data-change-id') || newChangeId(),
   author: el.getAttribute('data-author') || '',
   time: Number(el.getAttribute('data-time')) || 0,
+  color: HEX.test(el.getAttribute('data-color') || '') ? el.getAttribute('data-color') : null,
 });
 
 export const Insertion = Mark.create({

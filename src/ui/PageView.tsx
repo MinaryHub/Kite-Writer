@@ -14,7 +14,7 @@ import { showContextMenu } from './ContextMenu';
 import { platform } from '../platform';
 import { hfRichHtml } from '../hfRich';
 import { layoutTabsHtml } from '../editor/tabLayout';
-import { LINE_NUM_FONT, LINE_NUM_PX, lineMarksOf, lineNumberBoxes } from '../lineNumbers';
+import { LINE_NUM_FONT, LINE_NUM_PX, changeBarBoxes, changeBarsOf, lineMarksOf, lineNumberBoxes } from '../lineNumbers';
 
 export function PageView({ tab, active, hidden = false }: { tab: DocTab; active: boolean; hidden?: boolean }) {
   const app = useApp();
@@ -188,6 +188,8 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
   const chrome = [];
   // 줄 번호: 쪽 나누기가 끝난 화면에서 줄 자리를 잰다 (켜진 문서만)
   const lineMarks = s.lineNumbers ? lineMarksOf(tab) : [];
+  // 변경 막대: 변경 내용(넣음·지움)이 있는 줄의 왼쪽 여백
+  const bars = changeBarsOf(tab);
   for (let k = 0; k < pageCount; k++) {
     const pl = plans[k];
     const g = pl.g;
@@ -298,6 +300,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
             {b.n}
           </div>,
         );
+    for (const b of changeBarBoxes(bars, g, k)) chrome.push(<div key={`cb${k}-${b.top}`} className="change-bar" style={{ left: left + b.left, top: top + b.top, height: b.height, borderLeftColor: b.color }} />);
     chrome.push(
       <div key={'l' + k} className="page-label" style={{ top: top + 4 }}>
         {k + 1}

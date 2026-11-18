@@ -672,19 +672,22 @@
 .kdoc-content .chk-current { background: rgba(255, 213, 79, 0.45); }
 .print-page .chk-mark { text-decoration: none; background: none; }
 
-/* 변경 내용 (넣음/지움): 사람마다 색 */
+/* 변경 내용 (넣음/지움): 사람마다 색. 문서가 사람 색을 정했으면(--tc-c: 한글의 변경 추적) 그 색 그대로 */
 .kdoc-content ins.tc-ins {
   text-decoration: underline;
   text-decoration-thickness: 1.5px;
-  text-decoration-color: hsl(var(--tc-hue, 210), 75%, 40%);
-  color: hsl(var(--tc-hue, 210), 75%, 32%);
+  text-decoration-color: var(--tc-c, hsl(var(--tc-hue, 210), 75%, 40%));
+  color: var(--tc-c, hsl(var(--tc-hue, 210), 75%, 32%));
   background: hsla(var(--tc-hue, 210), 80%, 50%, 0.08);
+}
+.kdoc-content ins.tc-ins[data-color] {
+  background: none;
 }
 .kdoc-content del.tc-del {
   text-decoration: line-through;
   text-decoration-thickness: 1.5px;
-  text-decoration-color: hsl(var(--tc-hue, 0), 70%, 45%);
-  color: hsl(var(--tc-hue, 0), 55%, 45%);
+  text-decoration-color: var(--tc-c, hsl(var(--tc-hue, 0), 70%, 45%));
+  color: var(--tc-c, hsl(var(--tc-hue, 0), 55%, 45%));
 }
 /* 메모가 달린 글자 */
 .kdoc-content .k-comment {

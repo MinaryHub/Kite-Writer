@@ -41,6 +41,10 @@ class Registry {
   borderFills: BorderFillDef[] = [];
   bfIds = new Map<string, number>();
   images: { id: string; path: string; mime: string; bytes: Uint8Array }[] = [];
+  /** 변경 추적: 바뀐 내용(hh:trackChange, id 는 1부터)과 사람(hh:trackChangeAuthor, id 는 1부터) */
+  changes: { type: 'ins' | 'del'; author: number; time: number }[] = [];
+  changeIds = new Map<string, number>();
+  authors: string[] = [];
 
   constructor() {
     // 1: 쪽 테두리(없음), 2: 글자 기본(없음), 3: 표 기본(실선)
@@ -51,6 +55,23 @@ class Registry {
     this.font('함초롬돋움');
     this.char(defaultChar());
     this.para(defaultPara());
+  }
+
+  /** 바뀐 내용 하나의 id (같은 종류·사람·시각이면 같은 id) */
+  change(c: { type: 'ins' | 'del'; author: string; time: number }): number {
+    const key = `${c.type}|${c.author}|${c.time}`;
+    let id = this.changeIds.get(key);
+    if (id == null) {
+      let a = this.authors.indexOf(c.author);
+      if (a < 0) {
+        a = this.authors.length;
+        this.authors.push(c.author);
+      }
+      this.changes.push({ type: c.type, author: a + 1, time: c.time });
+      id = this.changes.length;
+      this.changeIds.set(key, id);
+    }
+    return id;
   }
 
   font(name: string): number {
@@ -224,6 +245,27 @@ class SectionWriter {
         tOpen = true;
       }
     };
+    // 변경 추적 구간 (hp:t 안의 insertBegin~insertEnd, deleteBegin~deleteEnd). 문단 끝에서 닫는다
+    let chKey = '';
+    let chTag = '';
+    let chId = 0;
+    const endChange = () => {
+      if (!chKey) return;
+      openT();
+      xml += `<hp:${chTag}End Id="${chId}" TcId="${chId}" paraend="0"/>`;
+      chKey = '';
+    };
+    const toChange = (ch: { type: 'ins' | 'del'; author: string; time: number } | undefined) => {
+      const key = ch ? `${ch.type}|${ch.author}|${ch.time}` : '';
+      if (key === chKey) return;
+      endChange();
+      if (!ch) return;
+      chId = this.reg.change(ch);
+      chTag = ch.type === 'ins' ? 'insert' : 'delete';
+      chKey = key;
+      openT();
+      xml += `<hp:${chTag}Begin Id="${chId}" TcId="${chId}"/>`;
+    };
     for (const it of p.inlines) {
       if (it.type === 'text' && it.math && it.math.hwp.trim()) {
         // 수식: 한글 수식 개체로 (글자처럼 취급)
@@ -244,6 +286,7 @@ class SectionWriter {
       } else if (it.type === 'text') {
         ensureRun(this.reg.char(it.style), it.link);
         openT();
+        toChange(it.review?.change);
         const parts = it.text.split('\t');
         const tb = it.tab;
         const tabXml = `<hp:tab width="${tb?.width ? pxToHwp(tb.width) : 4000}" leader="${tb?.leader || 0}" type="${tb ? tb.type : 1}"/>`;
@@ -279,6 +322,10 @@ class SectionWriter {
         closeT();
         xml += this.footnote(it.text);
       }
+    }
+    if (chKey) {
+      if (!open) ensureRun(this.reg.char(p.baseChar), null);
+      endChange();
     }
     closeRun();
     return xml;
@@ -607,6 +654,19 @@ class SectionWriter {
   masterXml: { id: string; xml: string }[] = [];
 }
 
+/** 변경 추적 목록: 바뀐 내용(종류·시각·사람)과 사람들 */
+function trackChangesXml(reg: Registry): string {
+  if (!reg.changes.length) return '';
+  const iso = (t: number) => new Date(t > 0 ? t : Date.now()).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return (
+    `<hh:trackChanges itemCnt="${reg.changes.length}">` +
+    reg.changes.map((c, i) => `<hh:trackChange type="${c.type === 'ins' ? 'Insert' : 'Delete'}" date="${iso(c.time)}" authorID="${c.author}" hide="0" id="${i + 1}"/>`).join('') +
+    `</hh:trackChanges><hh:trackChangeAuthors itemCnt="${reg.authors.length}">` +
+    reg.authors.map((a, i) => `<hh:trackChangeAuthor name="${xmlEscape(a || 'Kite')}" mark="1" id="${i + 1}"/>`).join('') +
+    `</hh:trackChangeAuthors>`
+  );
+}
+
 function headerXml(reg: Registry): string {
   const fontsXml = LANGS.map(
     (lang) =>
@@ -718,6 +778,7 @@ function headerXml(reg: Registry): string {
     numbering +
     `<hh:paraProperties itemCnt="${reg.paras.length}">${paraXml}</hh:paraProperties>` +
     `<hh:styles itemCnt="1"><hh:style id="0" type="PARA" name="바탕글" engName="Normal" paraPrIDRef="0" charPrIDRef="0" nextStyleIDRef="0" langID="1042" lockForm="0"/></hh:styles>` +
+    trackChangesXml(reg) +
     `</hh:refList><hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument>` +
     `<hh:docOption><hh:linkinfo path="" pageInherit="0" footnoteInherit="0"/></hh:docOption><hh:trackchageConfig flags="56"/></hh:head>`
   );
