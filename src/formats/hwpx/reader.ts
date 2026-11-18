@@ -1,4 +1,5 @@
-import { LineSegStats, cellContentNeed, dropHwpLayout, floatOverhang, indentByBlanks, type FloatHw } from '../hwpLayout';
+import { LineSegStats, cellContentNeed, dropHwpLayout, floatOverhang, indentByBlanks, sideBySide, type FloatHw } from '../hwpLayout';
+import { cleanLook, type PicLook } from '../picLook';
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
 import { CELL_VMARGIN_HWP, FLOATING, HwpPageMarks, assembleTable, fitTableLines, placeCaptions, takeFloating, type Caption, type Captions } from '../hwp/reader';
@@ -313,7 +314,9 @@ export function parseHeader(doc: Document): HeaderInfo {
       const e = kid(margin, name);
       if (!e) return 0;
       const v = numAttr(e, 'value', 0) * factor;
-      return attr(e, 'unit') === 'CHAR' ? v * 10 : hwpToPt(v);
+      // 글자 단위(CHAR): 한글이 놓은 줄 자리와 견주면 값 1 이 7.5 HWPUNIT 이었다 (문단 아래 간격 80 → 6pt, 글자 크기 11·14pt
+      // 모두). 예전처럼 10pt 로 셈하면 800pt 가 되어 쪽이 수십 장 늘었다
+      return attr(e, 'unit') === 'CHAR' ? hwpToPt(v * 7.5) : hwpToPt(v);
     };
     const { el: ls, factor: lsf } = pickSwitched(pp, 'lineSpacing');
     let lineHeight: string | null = null;
@@ -1015,6 +1018,7 @@ export class HwpxConverter {
     // 떠 있는 개체 표시는 늘 지운다 (문서 노드에는 없는 속성)
     const floating = blocks.map(takeFloating).some(Boolean);
     let paras = blocks.filter((b) => !isBreak(b));
+    let sideAnchor: JNode | null = null;
     // 글자처럼 취급하는 표·글상자 하나와 빈칸뿐인 글: 한글에서는 한 줄(개체 높이)이다. 빈칸 문단을 따로 세우면 줄이 하나 더 생긴다
     if (segV.length === 1 && paras.length > 1) {
       const objs = paras.filter((b) => b.type !== 'paragraph');
@@ -1023,6 +1027,14 @@ export class HwpxConverter {
         // 표 앞의 빈칸은 표를 그만큼 오른쪽으로 민다
         indentByBlanks(objs[0], paras.slice(0, paras.indexOf(objs[0])));
         paras = objs;
+      } else if (!floating && lineSegs.length) {
+        // 표와 그림이 한 줄에 나란히: 그림을 표 옆 제자리에 띄운다 (HWP 와 같게)
+        const side = sideBySide(paras, { x: lineSegs[0][2] + pp.indentLeft * PT2PX, w: lineSegs[0][1] }, pAttrs.textAlign || null, segV[0][1]);
+        if (side) {
+          before.push(side.anchor);
+          sideAnchor = side.anchor;
+          paras = [side.table];
+        }
       }
     }
     /** 한글의 줄 정보가 가리키는 블록: 글 문단 하나이거나, 글자처럼 취급하는 표·글상자 하나 */
@@ -1051,6 +1063,8 @@ export class HwpxConverter {
         lead = one;
         // 떠 있는 글상자·도형은 문단 상자와 같은 자리에서 시작한다
         for (const b of before) if (b.attrs?.float) b.attrs = { ...b.attrs, hwpTop: r2(v0 - sb) };
+        // 표 옆에 띄운 그림들의 자리 표시는 줄 위쪽에 (그림의 y 가 줄 위쪽 기준)
+        if (sideAnchor) sideAnchor.attrs = { ...sideAnchor.attrs, hwpTop: r2(v0) };
         // 글을 밀어낸 표는 앞 블록 바로 뒤로 흐른다: 한글이 적어 둔 표 높이(sz)는 여러 쪽에 걸친 표에서 실제 높이와 달라
         // 표의 위쪽을 거꾸로 셈할 수 없다. 새 쪽 표시도 글 문단이 갖는다 (표는 앞 쪽에서 시작했을 수 있다)
         if (leadTables.length && one.type === 'paragraph' && !hwpPage) {
@@ -1396,7 +1410,8 @@ export class HwpxConverter {
     }
     // 돌린 그림 (한글은 사진의 방향 정보를 따르지 않고 개체를 돌려 둔다)
     const angle = ((Math.round(numAttr(kid(pic, 'rotationInfo'), 'angle', 0)) % 360) + 360) % 360;
-    return { type: 'image', attrs: { src, width: w || null, height: h || null, crop, ...(angle ? { rotate: angle } : {}) } };
+    const look = picLookOf(pic, img);
+    return { type: 'image', attrs: { src, width: w || null, height: h || null, crop, ...(angle ? { rotate: angle } : {}), ...(look ? { look } : {}) } };
   }
 
   /** 도형 노드를 문단에 놓는다: 떠 있는 개체는 제자리에 띄우고, 글자처럼 취급하는 개체는 글줄 안에 */
@@ -1851,6 +1866,52 @@ export class HwpxConverter {
     fitTableLines(out);
     return out;
   }
+}
+
+/**
+ * 그림의 보정과 효과 (hc:img 의 밝기·대비·효과·투명도, hp:lineShape 의 선, hp:effects 의 그림자·네온·부드러운 가장자리·반사).
+ * 쓸 것이 없으면 null
+ */
+function picLookOf(pic: Element, img: Element | null): PicLook | null {
+  const look: PicLook = {};
+  const b = numAttr(img, 'bright', 0);
+  const c = numAttr(img, 'contrast', 0);
+  if (b) look.bright = b;
+  if (c) look.contrast = c;
+  const eff = attr(img, 'effect') || 'REAL_PIC';
+  if (eff === 'GRAY_SCALE') look.gray = 1;
+  else if (eff === 'BLACK_WHITE') look.gray = 2;
+  // 투명도: 0~1 이거나 0~255 로 적힌다
+  const al = parseFloat(attr(img, 'alpha') || '0') || 0;
+  if (al > 0) look.alpha = al > 1 ? al / 255 : al;
+  const ls = kid(pic, 'lineShape');
+  const lw = numAttr(ls, 'width', 0);
+  const lst = attr(ls, 'style') || 'NONE';
+  if (ls && lw > 0 && lst !== 'NONE') look.line = { w: Math.max(1, Math.round(hwpToPx(lw) * 100) / 100), c: normColor(attr(ls, 'color')) || '#000000', s: hwpxBorderStyle(lst) };
+  const fx = kid(pic, 'effects');
+  const colorOf = (el: Element | null): string => {
+    const rgb = kid(kid(el, 'effectsColor'), 'rgb');
+    if (!rgb) return '#000000';
+    const h = (k: string) => Math.max(0, Math.min(255, numAttr(rgb, k, 0))).toString(16).padStart(2, '0');
+    return ('#' + h('r') + h('g') + h('b')).toUpperCase();
+  };
+  const sh = kid(fx, 'shadow');
+  if (sh && (attr(sh, 'style') || 'OUTSIDE') === 'OUTSIDE') {
+    const d = hwpToPx(numAttr(sh, 'distance', 0));
+    const dir = (numAttr(sh, 'direction', 0) * Math.PI) / 180;
+    look.shadow = { x: Math.round(d * Math.cos(dir) * 100) / 100, y: Math.round(d * Math.sin(dir) * 100) / 100, blur: Math.round(hwpToPx(numAttr(sh, 'radius', 0)) * 100) / 100, c: colorOf(sh), a: 1 - Math.max(0, Math.min(1, parseFloat(attr(sh, 'alpha') || '0') || 0)) };
+  }
+  const gl = kid(fx, 'glow');
+  if (gl) look.glow = { r: Math.round(hwpToPx(numAttr(gl, 'radius', 0)) * 100) / 100, c: colorOf(gl), a: 1 - Math.max(0, Math.min(1, parseFloat(attr(gl, 'alpha') || '0') || 0)) };
+  const se = kid(fx, 'softEdge');
+  if (se) look.soft = Math.round(hwpToPx(numAttr(se, 'radius', 0)) * 100) / 100;
+  const rf = kid(fx, 'reflection');
+  if (rf) {
+    const a0 = parseFloat(attr(kid(rf, 'alpha'), 'start') || '0.5') || 0;
+    const end = parseFloat(attr(kid(rf, 'pos'), 'end') || '0.5') || 0.5;
+    look.reflect = { gap: Math.round(hwpToPx(numAttr(rf, 'distance', 0)) * 100) / 100, a: 1 - Math.max(0, Math.min(1, a0)), size: Math.max(0.05, Math.min(1, end)) };
+  }
+  return cleanLook(look);
 }
 
 /** 구역 정의(hp:secPr)의 편집 용지. 없으면 null (base 의 값을 기본으로) */

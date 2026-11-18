@@ -13,6 +13,7 @@ import { viewState } from '../viewState';
 import type { Columns } from '../../types';
 import { cleanMargins } from '../../formats/flatten';
 import { cleanColumns, normColor, parseBorderCss } from '../../formats/common';
+import { cleanLook, lookCss, lookStyle } from '../../formats/picLook';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -192,6 +193,9 @@ export interface Crop {
   l: number;
 }
 
+/** 그림 효과가 쓰는 CSS 속성들 (바꿀 때 지난 것을 지운다) */
+const LOOK_PROPS = ['filter', 'opacity', 'outline', 'outline-offset', '-webkit-mask-image', 'mask-image', '-webkit-mask-composite', 'mask-composite', '-webkit-box-reflect'];
+
 export const cropOf = (v: any): Crop | null => {
   if (!v) return null;
   const c = { t: +v.t || 0, r: +v.r || 0, b: +v.b || 0, l: +v.l || 0 };
@@ -224,6 +228,18 @@ export const KImage = Image.extend({
       float: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       /** 돌린 각도(도, 시계 방향). 한글 문서 화면 전용 */
       rotate: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 그림 보정·효과 (밝기·대비·회색조·투명도·선·그림자·네온·부드러운 가장자리·반사: picLook). 한글 문서에서 읽은 값 */
+      look: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          try {
+            return cleanLook(JSON.parse(el.getAttribute('data-look') || 'null'));
+          } catch {
+            return null;
+          }
+        },
+        renderHTML: () => ({}),
+      },
       /** 잘라 낸 비율 (0~1): 위/오른쪽/아래/왼쪽 */
       crop: {
         default: null,
@@ -249,7 +265,8 @@ export const KImage = Image.extend({
     const rot = Number(a.rotate);
     const turned = Number.isFinite(rot) && rot % 360 !== 0;
     const base = mergeAttributes(this.options.HTMLAttributes, HTMLAttributes);
-    if (!fl && !c && !turned) return ['img', base];
+    const look = cleanLook(a.look);
+    if (!fl && !c && !turned && !look) return ['img', base];
     const st: string[] = [];
     const w = +a.width || 0;
     const h = +a.height || 0;
@@ -262,8 +279,11 @@ export const KImage = Image.extend({
     } else if (w && h) imgStyle = `width:${w}px;height:${h}px`;
     if (fl) st.push(`left:${fl.x}px`, `top:${fl.y}px`);
     if (turned) st.push(`transform:rotate(${rot}deg)`);
+    const ls = look ? lookStyle(look) : null;
+    if (ls?.wrap) st.push(ls.wrap);
+    if (ls?.img) imgStyle = imgStyle ? imgStyle + ';' + ls.img : ls.img;
     const cls = 'k-image' + (fl ? ' k-float' + (fl.behind ? ' behind' : '') : '') + (c ? ' cropped' : '');
-    return ['span', { class: cls, style: st.join(';'), ...(fl && fl.py != null ? { 'data-py': String(fl.py) } : {}) }, ['img', imgStyle ? mergeAttributes(base, { style: imgStyle }) : base]];
+    return ['span', { class: cls, style: st.join(';'), ...(fl && fl.py != null ? { 'data-py': String(fl.py) } : {}), ...(look ? { 'data-look': JSON.stringify(look) } : {}) }, ['img', imgStyle ? mergeAttributes(base, { style: imgStyle }) : base]];
   },
 
   addNodeView() {
@@ -316,6 +336,16 @@ export const KImage = Image.extend({
         else wrap.style.removeProperty('--kh');
         const rot = Number(n.attrs.rotate);
         wrap.style.transform = Number.isFinite(rot) && rot % 360 ? `rotate(${rot}deg)` : '';
+        // 그림 보정·효과: 지난번에 준 속성은 지우고 새로
+        for (const k of LOOK_PROPS) {
+          wrap.style.removeProperty(k);
+          img.style.removeProperty(k);
+        }
+        const css = lookCss(n.attrs.look);
+        for (const [k, v] of Object.entries(css.wrap)) wrap.style.setProperty(k, v);
+        for (const [k, v] of Object.entries(css.img)) img.style.setProperty(k, v);
+        if (Object.keys(css.wrap).length || Object.keys(css.img).length) wrap.setAttribute('data-look', JSON.stringify(cleanLook(n.attrs.look)));
+        else wrap.removeAttribute('data-look');
       };
       apply(node);
       // 그림이 로드되면 그 블록의 높이만 달라지므로 위치를 알려 그 부분만 다시 재게 한다

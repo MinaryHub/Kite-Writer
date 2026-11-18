@@ -1,4 +1,5 @@
 import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, floatOverhang, gapInBox, isBreakBlock, jsonContentSize, cellContentNeed, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
+import { cleanLook, type PicLook } from '../picLook';
 import { hwpToLatex } from '../../math/hwpEq';
 import * as CFB from 'cfb';
 import { Inflate } from 'pako';
@@ -563,6 +564,8 @@ class HwpConverter {
       pp: { spaceBefore: pp?.spaceBefore || 0, spaceAfter: pp?.spaceAfter || 0, indentLeft: pp?.indentLeft || 0, indentRight: pp?.indentRight || 0, textIndent: pp?.textIndent || 0 },
       state: this.layState,
       origin,
+      line0: lineSegs.length ? { x: lineSegs[0][2] + leftPx, w: lineSegs[0][1] } : undefined,
+      align: pAttrs.textAlign || null,
     });
 
     let inline: JNode[] = [];
@@ -1365,7 +1368,23 @@ class HwpConverter {
     const oh = p.data.length >= 90 ? u32(p, 86) : Math.abs(i32(p, 32) - i32(p, 16));
     let crop = null;
     if (ow > 0 && oh > 0) crop = normCrop(i32(p, 48) / oh, 1 - i32(p, 52) / ow, 1 - i32(p, 56) / oh, i32(p, 44) / ow);
-    return { type: 'image', attrs: { src, width: w || null, height: h || null, crop } };
+    // 그림 보정: 밝기(INT8 68)·대비(INT8 69)·효과(70: 0 그대로, 1 회색조, 2 흑백). 선: 색(0)·굵기(4)·속성(8, bit 0~5 종류 — 0 선 없음)
+    const look: PicLook = {};
+    if (p.data.length >= 71) {
+      const s8 = (o: number) => (p.data[o] << 24) >> 24;
+      if (s8(68)) look.bright = s8(68);
+      if (s8(69)) look.contrast = s8(69);
+      const eff = p.data[70];
+      if (eff === 1) look.gray = 1;
+      else if (eff === 2) look.gray = 2;
+    }
+    const bw = p.data.length >= 12 ? i32(p, 4) : 0;
+    const btype = p.data.length >= 12 ? u32(p, 8) & 0x3f : 0;
+    // 개체 선 종류: 1 실선, 2 긴 점선, 3 점선, 4 -.-, 5 -..-, 6 긴 대시, 7 원형 점선, 8~ 이중선 계열
+    const bstyle = btype === 3 || btype === 7 ? 'dotted' : btype >= 8 ? 'double' : btype >= 2 ? 'dashed' : 'solid';
+    if (bw > 0 && btype > 0) look.line = { w: Math.max(1, Math.round(hwpToPx(bw) * 100) / 100), c: colorRefToHex(u32(p, 0)), s: bstyle };
+    const lk = cleanLook(look);
+    return { type: 'image', attrs: { src, width: w || null, height: h || null, crop, ...(lk ? { look: lk } : {}) } };
   }
 }
 
