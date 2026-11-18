@@ -108,6 +108,20 @@ export interface DocSettings {
   pageBorder?: PageBorder | null;
   /** 바탕쪽 */
   masterPages?: MasterPage[];
+  /** 줄 번호 (한글의 쪽 → 구역 설정 → 줄 번호): 본문 줄마다 왼쪽 여백에 번호 */
+  lineNumbers?: LineNumbering | null;
+}
+
+/** 줄 번호 매기기 */
+export interface LineNumbering {
+  /** 새로 시작: 쪽마다, 구역마다, 이어서 */
+  restart: 'page' | 'section' | 'continue';
+  /** 몇 줄마다 번호를 보일지 (1: 모든 줄) */
+  countBy: number;
+  /** 번호 오른쪽 끝과 본문 사이 (mm) */
+  distance: number;
+  /** 시작 번호 */
+  start: number;
 }
 
 /** 쪽 테두리의 한 변: 굵기(mm)·색·종류 */

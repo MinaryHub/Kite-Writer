@@ -1306,6 +1306,19 @@ class DocxReader {
       if (attr(cols, 'sep') === '1' || attr(cols, 'sep') === 'true') c.line = { w: 0.12, c: '#000000', s: 'solid' };
       pg.columns = c;
     }
+    // 줄 번호 (w:lnNumType): countBy 가 있어야 켜진 것. start 는 0부터 센 값, 간격 기본은 0.25 인치
+    const lnt = kid(sectPr, 'lnNumType');
+    const lnBy = lnt ? Math.round(parseFloat(attr(lnt, 'countBy') || '0')) : 0;
+    if (lnt && lnBy >= 1) {
+      const rs = attr(lnt, 'restart');
+      const dist = parseFloat(attr(lnt, 'distance') || '360');
+      this.settings.lineNumbers = {
+        restart: rs === 'continuous' ? 'continue' : rs === 'newSection' ? 'section' : 'page',
+        countBy: Math.min(100, lnBy),
+        distance: round(twipToMm(Number.isFinite(dist) && dist >= 0 ? Math.min(dist, 28800) : 360), 2),
+        start: Math.max(1, Math.min(100000, Math.round(parseFloat(attr(lnt, 'start') || '0') || 0) + 1)),
+      };
+    }
     // 머리말/꼬리말: 기본(홀수 쪽), 첫 쪽(titlePg 일 때), 짝수 쪽(evenAndOddHeaders 일 때)
     const tp = kid(sectPr, 'titlePg');
     const titlePg = !!tp && onOff(tp) !== false;

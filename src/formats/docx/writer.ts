@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import type { Columns, HeaderFooter, KDocument } from '../../types';
+import type { Columns, HeaderFooter, KDocument, LineNumbering } from '../../types';
 import { type JNode, mmToTwip, xmlEscape, parseBorderCss, normColor, safeIsoDate, cleanColumns } from '../common';
 import { type CharStyle, type FlatBlock, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, flattenContent, flattenDoc } from '../flatten';
 import { prepareImage } from '../imageUtil';
@@ -462,6 +462,8 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
   const sectPr =
     `<w:sectPr>${sectRefs}<w:pgSz w:w="${mmToTwip(pageW)}" w:h="${mmToTwip(pageH)}"${pg.landscape ? ' w:orient="landscape"' : ''}/>` +
     `<w:pgMar w:top="${top}" w:right="${mmToTwip(pg.marginRight)}" w:bottom="${bottom}" w:left="${mmToTwip(pg.marginLeft)}" w:header="${mmToTwip(pg.marginTop)}" w:footer="${mmToTwip(pg.marginBottom)}" w:gutter="${mmToTwip(pg.gutter)}"/>` +
+    // sectPr 자식 차례 (스키마): … pgMar, lnNumType, pgNumType, cols, titlePg, docGrid
+    lnNumXml(s.lineNumbers) +
     (s.pageNumber.start !== 1 ? `<w:pgNumType w:start="${s.pageNumber.start}"/>` : '') +
     `${colsXml(pg.columns)}${titlePg ? '<w:titlePg/>' : ''}<w:docGrid w:linePitch="360"/></w:sectPr>`;
 
@@ -558,6 +560,13 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
 }
 
 /** 구역의 다단 (w:cols): 단 수·간격·구분선, 너비가 다른 단은 단마다 너비와 간격 */
+/** 줄 번호 (w:lnNumType): start 는 0부터 센 값 */
+function lnNumXml(ln: LineNumbering | null | undefined): string {
+  if (!ln) return '';
+  const restart = ln.restart === 'continue' ? 'continuous' : ln.restart === 'section' ? 'newSection' : 'newPage';
+  return `<w:lnNumType w:countBy="${Math.max(1, Math.round(+ln.countBy || 1))}" w:start="${Math.max(0, Math.round(+ln.start || 1) - 1)}" w:distance="${mmToTwip(Math.max(0, +ln.distance || 0))}" w:restart="${restart}"/>`;
+}
+
 function colsXml(c: Columns | null | undefined): string {
   const v = cleanColumns(c);
   if (!v || v.count < 2) return '<w:cols w:space="425"/>';

@@ -1357,6 +1357,17 @@ export class HwpxConverter {
       }
     }
     if (attr(kid(sec, 'visibility'), 'hideFirstMasterPage') === '1') this.settings.hideFirst = { ...this.settings.hideFirst, masterPage: true };
+    // 줄 번호: 보이기가 켜져 있을 때만 (새로 시작 1 쪽마다, 2 구역마다, 3 이어서)
+    const lns = kid(sec, 'lineNumberShape');
+    if (attr(kid(sec, 'visibility'), 'showLineNumber') === '1' && lns) {
+      const rt = attr(lns, 'restartType');
+      this.settings.lineNumbers = {
+        restart: rt === '1' ? 'page' : rt === '2' ? 'section' : 'continue',
+        countBy: Math.max(1, Math.min(100, numAttr(lns, 'countBy', 1) || 1)),
+        distance: Math.round(hwpToMm(Math.max(0, Math.min(28346, numAttr(lns, 'distance', 1417)))) * 100) / 100,
+        start: Math.max(1, Math.min(100000, numAttr(lns, 'startNumber', 1) || 1)),
+      };
+    }
   }
 
   /** 바탕쪽 (Contents/masterpageN.xml): 본문 영역의 왼쪽 위를 기준으로 그릴 블록들 */

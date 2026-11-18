@@ -14,6 +14,7 @@ import { showContextMenu } from './ContextMenu';
 import { platform } from '../platform';
 import { hfRichHtml } from '../hfRich';
 import { layoutTabsHtml } from '../editor/tabLayout';
+import { LINE_NUM_FONT, LINE_NUM_PX, lineMarksOf, lineNumberBoxes } from '../lineNumbers';
 
 export function PageView({ tab, active, hidden = false }: { tab: DocTab; active: boolean; hidden?: boolean }) {
   const app = useApp();
@@ -185,6 +186,8 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
 
   const pages = [];
   const chrome = [];
+  // 줄 번호: 쪽 나누기가 끝난 화면에서 줄 자리를 잰다 (켜진 문서만)
+  const lineMarks = s.lineNumbers ? lineMarksOf(tab) : [];
   for (let k = 0; k < pageCount; k++) {
     const pl = plans[k];
     const g = pl.g;
@@ -288,6 +291,13 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
         </div>,
       );
     }
+    if (s.lineNumbers)
+      for (const b of lineNumberBoxes(lineMarks, g, k, s.lineNumbers))
+        chrome.push(
+          <div key={`ln${k}-${b.n}-${b.top}`} className="line-num" style={{ left: left + b.left, top: top + b.top, width: b.width, height: b.height, lineHeight: b.height + 'px', fontFamily: LINE_NUM_FONT, fontSize: LINE_NUM_PX }}>
+            {b.n}
+          </div>,
+        );
     chrome.push(
       <div key={'l' + k} className="page-label" style={{ top: top + 4 }}>
         {k + 1}

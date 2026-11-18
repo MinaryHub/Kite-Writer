@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { app } from '../../app/controller';
 import { Modal, OkCancel, Fieldset, NumberInput, Seg } from '../widgets';
-import type { DocSettings, HeaderFooter, HFAlign, PageNumFormat, PageNumPos, PageSetup } from '../../types';
+import type { DocSettings, HeaderFooter, HFAlign, LineNumbering, PageNumFormat, PageNumPos, PageSetup } from '../../types';
 import { formatPageNumber } from '../../formats/common';
 
 const PAPERS: { name: string; w: number; h: number }[] = [
@@ -27,6 +27,8 @@ export function PageSetupDialog({ onClose }: { onClose: () => void }) {
   const tab = app.active!;
   const [p, setP] = useState<PageSetup>({ ...tab.settings.page });
   const up = (x: Partial<PageSetup>) => setP({ ...p, ...x });
+  // 줄 번호 (한글의 구역 설정 → 줄 번호)
+  const [ln, setLn] = useState<LineNumbering | null>(tab.settings.lineNumbers ? { ...tab.settings.lineNumbers } : null);
   const preset = PAPERS.findIndex((x) => Math.abs(x.w - p.width) < 0.6 && Math.abs(x.h - p.height) < 0.6);
   const apply = () => {
     const body = (p.landscape ? Math.max(p.width, p.height) : p.width) - p.marginLeft - p.marginRight - p.gutter;
@@ -35,7 +37,7 @@ export function PageSetupDialog({ onClose }: { onClose: () => void }) {
       app.toast('여백이 너무 커서 본문 영역이 없습니다.', 'error');
       return;
     }
-    applySettings({ ...tab.settings, page: p });
+    applySettings({ ...tab.settings, page: p, lineNumbers: ln });
     onClose();
   };
   const W = p.landscape ? Math.max(p.width, p.height) : p.width;
@@ -117,6 +119,35 @@ export function PageSetupDialog({ onClose }: { onClose: () => void }) {
         <div className="unit" style={{ marginTop: 8 }}>
           한글과 같이 본문은 '위쪽 + 머리말' 아래에서 시작하고 '아래쪽 + 꼬리말' 위에서 끝납니다.
         </div>
+      </Fieldset>
+      <Fieldset legend="줄 번호">
+        <label className="check">
+          <input type="checkbox" checked={!!ln} onChange={(e) => setLn(e.target.checked ? { restart: 'continue', countBy: 1, distance: 5, start: 1 } : null)} />
+          본문 줄마다 왼쪽 여백에 번호 넣기
+        </label>
+        {ln && (
+          <div className="row" style={{ gap: 24, alignItems: 'flex-start', marginTop: 8 }}>
+            <div className="form-grid">
+              <label>새로 시작</label>
+              <Seg
+                value={ln.restart === 'page' ? 'page' : 'continue'}
+                onChange={(v) => setLn({ ...ln, restart: v })}
+                options={[
+                  { value: 'continue', label: '이어서' },
+                  { value: 'page', label: '쪽마다' },
+                ]}
+              />
+              <label>시작 번호</label>
+              <NumberInput value={ln.start} onChange={(v) => setLn({ ...ln, start: Math.max(1, Math.round(v)) })} min={1} />
+            </div>
+            <div className="form-grid">
+              <label>번호 간격</label>
+              <NumberInput value={ln.countBy} onChange={(v) => setLn({ ...ln, countBy: Math.max(1, Math.min(100, Math.round(v))) })} min={1} max={100} unit="줄마다" />
+              <label>본문과 간격</label>
+              <NumberInput value={ln.distance} onChange={(v) => setLn({ ...ln, distance: Math.max(0, Math.min(50, v)) })} min={0} max={50} step={0.5} unit="mm" />
+            </div>
+          </div>
+        )}
       </Fieldset>
     </Modal>
   );

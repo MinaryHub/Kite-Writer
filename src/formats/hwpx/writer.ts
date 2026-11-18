@@ -524,8 +524,12 @@ class SectionWriter {
     }
     let xml = `<hp:run charPrIDRef="${charId}"><hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="1" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="${this.masterXml.length}">`;
     xml += `<hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="${s.pageNumber.start !== 1 ? s.pageNumber.start : 0}" pic="0" tbl="0" equation="0"/>`;
-    xml += `<hp:visibility hideFirstHeader="${s.hideFirst?.header ? 1 : 0}" hideFirstFooter="${s.hideFirst?.footer ? 1 : 0}" hideFirstMasterPage="${s.hideFirst?.masterPage ? 1 : 0}" border="${vis(pb?.borderOn)}" fill="${vis(pb?.fillOn)}" hideFirstPageNum="${s.hideFirst?.pageNum ? 1 : 0}" hideFirstEmptyLine="0" showLineNumber="0"/>`;
-    xml += `<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>`;
+    xml += `<hp:visibility hideFirstHeader="${s.hideFirst?.header ? 1 : 0}" hideFirstFooter="${s.hideFirst?.footer ? 1 : 0}" hideFirstMasterPage="${s.hideFirst?.masterPage ? 1 : 0}" border="${vis(pb?.borderOn)}" fill="${vis(pb?.fillOn)}" hideFirstPageNum="${s.hideFirst?.pageNum ? 1 : 0}" hideFirstEmptyLine="0" showLineNumber="${s.lineNumbers ? 1 : 0}"/>`;
+    // 줄 번호 (새로 시작: 1 쪽마다, 2 구역마다, 3 이어서)
+    const ln = s.lineNumbers;
+    xml += ln
+      ? `<hp:lineNumberShape restartType="${ln.restart === 'page' ? 1 : ln.restart === 'section' ? 2 : 3}" countBy="${Math.max(1, Math.round(+ln.countBy || 1))}" distance="${Math.max(0, mmToHwp(+ln.distance || 0))}" startNumber="${Math.max(1, Math.round(+ln.start || 1))}"/>`
+      : `<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>`;
     xml += `<hp:pagePr landscape="${pg.landscape ? 'NARROWLY' : 'WIDELY'}" width="${w}" height="${h}" gutterType="LEFT_ONLY">`;
     xml += `<hp:margin header="${mmToHwp(pg.marginHeader)}" footer="${mmToHwp(pg.marginFooter)}" gutter="${mmToHwp(pg.gutter)}" left="${mmToHwp(pg.marginLeft)}" right="${mmToHwp(pg.marginRight)}" top="${mmToHwp(pg.marginTop)}" bottom="${mmToHwp(pg.marginBottom)}"/></hp:pagePr>`;
     xml += `<hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="283" belowLine="567" aboveLine="850"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr>`;
