@@ -76,6 +76,8 @@ export interface PageGeomPx {
 /** 문단 모양 가운데 배치에 쓰는 값 (pt) */
 export interface ParaBox {
   spaceBefore: number;
+  /** 문단 아래 간격 (pt). 없으면 0 */
+  spaceAfter?: number;
   indentLeft: number;
   indentRight: number;
   textIndent: number;
@@ -238,6 +240,11 @@ export class ParaLayout {
       if (a.hwpLines || segV.length === 1) a.hwpVs = segV;
       one.attrs = a;
     }
+    // 칸·글상자 안에서 글자처럼 취급하는 표 하나뿐인 문단: 표 아래에 그 줄의 아래 간격과 문단 아래 간격을 둔다 (HWPX 와 같게)
+    if (inSub && one && one.type === 'table' && segV.length === 1) {
+      const after = segV[0][2] + (pp.spaceAfter || 0) * PT2PX;
+      one.attrs = { ...one.attrs, hwpVs: segV, ...(after > 0.3 && after < 400 ? { hwpAfter: r2(after) } : {}) };
+    }
     const breaks = blocks.filter(isBreakBlock);
     if (inSub) return { blocks: [...this.before, ...paras, ...this.after], lead: null };
     const v0 = segV.length ? segV[0][0] : null;
@@ -281,13 +288,26 @@ export function gapInBox(groups: JNode[][]) {
     const paras = blocks.filter((b) => !isBreakBlock(b) && !b.attrs?.float);
     const one = paras.length === 1 && paras[0].type === 'paragraph' ? paras[0] : null;
     const vs = one?.attrs?.hwpVs as number[][] | undefined;
+    // 글자처럼 취급하는 표 하나뿐인 문단: 표 아래 간격(hwpAfter)까지 그 줄이 끝난 자리
+    const tvs = paras.length === 1 && paras[0].type === 'table' ? (paras[0].attrs?.hwpVs as number[][] | undefined) : undefined;
     if (one && vs && vs.length) {
       const sb = (+one.attrs!.spaceBefore || 0) * PT2PX;
       const gap = prevEnd == null ? 0 : vs[0][0] - sb - prevEnd;
       if (gap > 0.5 && gap < 4000) one.attrs!.hwpGap = r2(gap);
       const last = vs[vs.length - 1];
       prevEnd = last[0] + last[1] + last[2] + (+one.attrs!.spaceAfter || 0) * PT2PX;
-    } else prevEnd = null;
+    } else if (tvs && tvs.length === 1) prevEnd = tvs[0][0] + tvs[0][1] + (+paras[0].attrs!.hwpAfter || 0);
+    else prevEnd = null;
+  }
+  // 칸·글상자의 마지막 줄 아래 간격은 칸 높이에 들지 않는다: 마지막 블록이 표면 그 아래 간격을 지운다
+  for (let g = groups.length - 1; g >= 0; g--) {
+    const last = [...groups[g]].reverse().find((b) => !isBreakBlock(b) && !b.attrs?.float);
+    if (!last) continue;
+    if (last.type === 'table' && last.attrs?.hwpAfter != null) {
+      const { hwpAfter: _drop, ...rest } = last.attrs;
+      last.attrs = rest;
+    }
+    break;
   }
 }
 

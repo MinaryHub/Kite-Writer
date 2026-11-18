@@ -560,7 +560,7 @@ class HwpConverter {
       // 새 단으로 넘어온 문단도 단 맨 위에서 시작한다
       hwpPage: hwpPage || newCol,
       pageBreak: !inSub && !!(breakType & 0x05),
-      pp: { spaceBefore: pp?.spaceBefore || 0, indentLeft: pp?.indentLeft || 0, indentRight: pp?.indentRight || 0, textIndent: pp?.textIndent || 0 },
+      pp: { spaceBefore: pp?.spaceBefore || 0, spaceAfter: pp?.spaceAfter || 0, indentLeft: pp?.indentLeft || 0, indentRight: pp?.indentRight || 0, textIndent: pp?.textIndent || 0 },
       state: this.layState,
       origin,
     });
@@ -675,6 +675,12 @@ class HwpConverter {
       if (id === 'secd' || id === 'cold' || id === 'head' || id === 'foot' || id === 'pgnp') this.handleCtrl(ctrls[ctrlIdx], 0, inline);
     }
     const lineSize = inline.length && !produced ? inlineSize() : 0;
+    // 표(블록)로 쪼개진 문단에 떠 있는 개체만 남았으면: 표와 같은 줄에 걸린 개체다. 새 문단(빈 줄)을 세우지 않고
+    // 높이 없는 자리 표시에 담아 표 앞에 둔다 (HWPX 와 같게)
+    if (produced && inline.length && inline.every((n) => !!n.attrs?.float && n.type !== 'text')) {
+      lay.before.push({ type: 'textBox', attrs: { width: null, height: null, padding: [0, 0, 0, 0], float: { x: 0, y: 0 } }, content: [paragraph({ ...pAttrs, fontSize }, inline)] });
+      inline = [];
+    }
     if (inline.length) flush();
     else if (!produced) blocks.push(paragraph({ ...pAttrs, fontSize }));
     // 문단이 표 등으로 쪼개지지 않고 줄 위치를 모두 찾았을 때만. 첫 줄은 문단 번호(머리 글자)부터
@@ -917,6 +923,28 @@ class HwpConverter {
     return parts.join(' ').trim();
   }
 
+  /** 칸 안 문단에 떠 있는 개체(글자처럼 취급하지 않고 문단 기준으로 놓인 것)의 아래 끝 가운데 가장 아래 (px, 칸 안쪽 위끝 기준). 없으면 0 */
+  private cellObjectsBottom(paras: Rec[]): number {
+    let bottom = 0;
+    for (const p of paras) {
+      if (p.tag !== T.PARA_HEADER) continue;
+      const seg = p.children.find((c) => c.tag === T.PARA_LINE_SEG);
+      if (!seg || seg.data.length < 8) continue;
+      const pp = this.info.paraPrs[u16(p, 8)];
+      const top = hwpToPx(i32(seg, 4)) - (pp?.spaceBefore || 0) * (96 / 72);
+      for (const c of p.children) {
+        if (c.tag !== T.CTRL_HEADER) continue;
+        const id = ctrlIdOf(c);
+        if (id !== 'gso ' && id !== 'tbl ') continue;
+        const o = objPosOf(c);
+        if (o.inline || o.vRel !== 'PARA') continue;
+        const b = top + o.vOff + o.h + o.omB;
+        if (b > bottom && b < 30000) bottom = b;
+      }
+    }
+    return bottom;
+  }
+
   convertTable(ctrl: Rec): JNode {
     const tbl = ctrl.children.find((c) => c.tag === T.TABLE);
     const nRowsDecl = tbl ? u16(tbl, 4) : 0;
@@ -947,8 +975,12 @@ class HwpConverter {
       const cellVm = hwpToPx(cmv[2] + cmv[3]);
       let content = this.convertParagraphs(cur.paras, true, null, w - hwpToPx(cmv[0] + cmv[1])).filter((n) => n.type !== 'pageBreak');
       if (!content.length) content = [paragraph()];
-      // 적힌 칸 높이가 글보다 작으면 한글은 칸 높이를 내용(마지막 줄의 글자 높이까지)으로 늘린다
-      const need = cellContentNeed(content, hwpToPx(u32(lh, 20)), cellVm);
+      // 적힌 칸 높이가 글보다 작으면 한글은 칸 높이를 내용(마지막 줄의 글자 높이까지)으로 늘린다.
+      // 칸 안에 떠 있는 개체(문단 기준)도 칸을 늘린다: 개체 아래 끝 = 문단 위끝(첫 줄 - 문단 위 간격) + 세로 오프셋 + 높이 + 바깥 아래 여백
+      const objBottom = this.cellObjectsBottom(cur.paras);
+      const objPx = objBottom > 0 ? objBottom + cellVm : 0;
+      if (rs === 1 && objPx > 0) rowH[row] = Math.max(rowH[row] || 0, objPx - VM);
+      const need = Math.max(cellContentNeed(content, hwpToPx(u32(lh, 20)), cellVm), objPx > hwpToPx(u32(lh, 20)) + 1 ? objPx : 0);
       if (rs > 1) spans.push({ row, rs, h: hwpToPx(u32(lh, 20)), need });
       const va = (attrVal >>> 21) & 3;
       const attrs: Record<string, any> = { colspan: cs, rowspan: rs, colwidth: null };
@@ -995,6 +1027,8 @@ class HwpConverter {
     solveSpanRows(rowH, spans, VM);
     const t = assembleTable(cells, nRowsDecl, nColsDecl, hwpToPx(u32(ctrl, 16)), rowH);
     if (tbl) t.attrs = { cellPadding: Math.round(hwpToPx((u16(tbl, 10) + u16(tbl, 12)) / 2) * 10) / 10 };
+    // 한글이 적어 둔 표 높이 (px, 쪽에 걸친 표는 첫 쪽 몫). 문서 노드에는 없는 값: 견주기 도구가 읽는다
+    t.attrs = { ...t.attrs, hwpH: Math.round(hwpToPx(u32(ctrl, 20)) * 100) / 100 };
     // 쪽 경계에서 나눔 (표 속성 bit 0~1): 0 나누지 않음, 1 셀 단위로 나눔(줄을 통째로 넘김), 2 나눔
     if (tbl) {
       const brk = u32(tbl, 0) & 3;

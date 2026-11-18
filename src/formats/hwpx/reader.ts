@@ -1845,6 +1845,8 @@ export class HwpxConverter {
         tAttrs.outMargin = [m[0], m[1], Math.round((m[2] + vOff) * 10) / 10, m[3]];
       }
     }
+    // 한글이 적어 둔 표 높이 (px, 쪽에 걸친 표는 첫 쪽 몫). 문서 노드에는 없는 값: 견주기 도구가 읽는다
+    tAttrs.hwpH = Math.round(hwpToPx(numAttr(kid(tbl, 'sz'), 'height', 0)) * 100) / 100;
     const out: JNode = { type: 'table', attrs: tAttrs, content: rows };
     fitTableLines(out);
     return out;
