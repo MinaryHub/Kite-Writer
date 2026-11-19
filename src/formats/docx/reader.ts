@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import type { DocMeta, HeaderFooter, LoadedDoc, PageBorder, PageBorderSide, PageSetup } from '../../types';
+import type { DocMeta, HeaderFooter, LoadedDoc, PageBorder, PageBorderSide, PageNumFormat, PageSetup, SectionHf } from '../../types';
 import {
   type FloatWrap,
   type JMark,
@@ -287,6 +287,8 @@ class DocxReader {
   sections: Element[] = [];
   /** 본문 요소 (구역 나누기는 본문의 문단에만 있다) */
   bodyEl: Element | null = null;
+  /** 새 쪽에서 시작하는 구역의 나누기 노드와 그 구역 번호 (구역마다 다른 머리말을 단다) */
+  sectionBreaks: { node: JNode; index: number }[] = [];
   /** 지금 구역의 용지 (다음 구역 용지의 바탕) */
   private secPage: PageSetup | null = null;
   /** 지금 읽는 머리말·꼬리말 */
@@ -961,7 +963,9 @@ class DocxReader {
               this.secPage = page;
               this.setGeo(next);
               if ((attr(kid(next, 'type'), 'val') || 'nextPage') !== 'continuous') {
-                out.push({ type: 'pageBreak', attrs: { sectionPage: page } });
+                const pb: JNode = { type: 'pageBreak', attrs: { sectionPage: page } };
+                this.sectionBreaks.push({ node: pb, index: k + 1 });
+                out.push(pb);
                 prev = null;
               }
             }
@@ -2480,6 +2484,57 @@ class DocxReader {
     return pg;
   }
 
+  /**
+   * 구역마다의 머리말·꼬리말과 쪽 번호 (Word: 구역에 적지 않은 종류는 앞 구역의 것을 이어 쓴다, '첫 쪽 다르게'는 구역마다).
+   * 구역끼리 다르면 첫 구역의 것은 문서 설정으로, 뒤 구역의 것은 그 구역 나누기(sectionHf)에 단다
+   */
+  async sectionHeaders(sections: Element[]) {
+    type Kind = 'header' | 'footer';
+    type Refs = Record<Kind, Record<string, string | null>>;
+    let refs: Refs = { header: {}, footer: {} };
+    const cache = new Map<string, HeaderFooter | null>();
+    const conv = async (rid: string | null | undefined, which: Kind): Promise<HeaderFooter | null> => {
+      if (!rid) return null;
+      const key = which + ':' + rid;
+      if (!cache.has(key)) cache.set(key, (await this.convertHeaderFooter(rid, which)).hf);
+      return cache.get(key) || null;
+    };
+    const FMT: Record<string, PageNumFormat> = { lowerRoman: 'roman', upperRoman: 'ROMAN', numberInDash: 'dash' };
+    const all: SectionHf[] = [];
+    for (const sp of sections) {
+      refs = { header: { ...refs.header }, footer: { ...refs.footer } };
+      for (const which of ['header', 'footer'] as const) for (const r of kids(sp, which + 'Reference')) refs[which][attr(r, 'type') || 'default'] = attr(r, 'id');
+      const tp = kid(sp, 'titlePg');
+      const titlePg = !!tp && onOff(tp) !== false;
+      const build = async (which: Kind): Promise<HeaderFooter> => {
+        const base = await conv(refs[which].default, which);
+        const hf: HeaderFooter = base ? { ...base } : { text: '', align: 'center' };
+        delete hf.first;
+        delete hf.even;
+        delete hf.oddOnly;
+        if (titlePg) hf.first = (await conv(refs[which].first, which)) || { text: '', align: 'center' };
+        if (this.evenOdd) {
+          const even = await conv(refs[which].even, which);
+          if (even) hf.even = even;
+          else if (base) hf.oddOnly = true;
+        }
+        return hf;
+      };
+      const pn = kid(sp, 'pgNumType');
+      const st = parseInt(attr(pn, 'start') || '', 10);
+      all.push({ header: await build('header'), footer: await build('footer'), start: Number.isFinite(st) ? Math.max(0, Math.min(100000, st)) : null, fmt: FMT[attr(pn, 'fmt') || ''] || null });
+    }
+    // 첫 구역의 쪽 번호
+    if (all[0]?.start != null) this.settings.pageNumber.start = all[0].start;
+    if (all[0]?.fmt) this.settings.pageNumber.format = all[0].fmt as PageNumFormat;
+    const same = all.every((x) => JSON.stringify([x.header, x.footer, x.start, x.fmt]) === JSON.stringify([all[0].header, all[0].footer, null, all[0].fmt]));
+    if (same) return;
+    this.settings.header = all[0].header;
+    this.settings.footer = all[0].footer;
+    delete this.settings.hideFirst;
+    for (const b of this.sectionBreaks) if (all[b.index]) b.node.attrs = { ...b.node.attrs, sectionHf: all[b.index] };
+  }
+
   async applySection(sectPr: Element | null) {
     if (!sectPr) return;
     const keepCols = this.settings.page.columns;
@@ -2692,10 +2747,18 @@ export async function readDocx(data: Uint8Array): Promise<LoadedDoc> {
   reader.setGeo(sections[0] || sectPr);
   const blocks = body ? reader.convertBody(body) : [];
   await reader.applySection(sectPr);
-  // 구역이 여럿이면 문서의 용지는 첫 구역의 것 (뒤 구역들의 용지는 구역 나누기에 담았다). 머리말·꼬리말은 끝 구역의 것
+  // 구역이 여럿이면 문서의 용지는 첫 구역의 것 (뒤 구역들의 용지는 구역 나누기에 담았다). 머리말·꼬리말·쪽 번호는 구역마다
   if (sections.length > 1) {
     const first = reader.pageSetupOf(sections[0], reader.settings.page);
     reader.settings.page = first;
+    await reader.sectionHeaders(sections);
+  } else if (sectPr) {
+    // 한 구역: 쪽 번호 시작·모양
+    const pn = kid(sectPr, 'pgNumType');
+    const st = parseInt(attr(pn, 'start') || '', 10);
+    if (Number.isFinite(st)) reader.settings.pageNumber.start = Math.max(0, Math.min(100000, st));
+    const fmt = attr(pn, 'fmt');
+    if (fmt === 'lowerRoman' || fmt === 'upperRoman') reader.settings.pageNumber.format = fmt === 'lowerRoman' ? 'roman' : 'ROMAN';
   }
   reader.applyBackground(doc);
   const meta: DocMeta = {};

@@ -530,6 +530,8 @@ export const PageBreak = Node.create({
         },
         renderHTML: (a: Record<string, any>) => (a.sectionPage ? { 'data-section': JSON.stringify(a.sectionPage) } : {}),
       },
+      /** 여기서 시작하는 구역의 머리말·꼬리말·쪽 번호 (Word 의 구역마다 다른 머리말: SectionHf). 화면에 적지 않는다 */
+      sectionHf: { default: null, rendered: false },
     };
   },
   parseHTML() {

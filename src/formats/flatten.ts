@@ -2,7 +2,7 @@ import { cleanLook, type PicLook } from './picLook';
 import { latexToHwp } from '../math/hwpEq';
 import { cleanTabs, type TabDefs } from '../editor/tabLayout';
 import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type FloatWrap, type JMark, type JNode, type ParaBorder, cleanColumns, cleanFloatWrap, cleanPageHide, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
-import type { Columns, PageSetup } from '../types';
+import type { Columns, PageSetup, SectionHf } from '../types';
 import { cleanShape, type ShapeData } from './shape';
 import type { FloatHw } from './hwpLayout';
 
@@ -153,6 +153,8 @@ export interface FlatColumnBreak {
   columnsBefore?: Columns | null;
   /** 이 블록에서 새 구역이 시작한다: 그 구역의 용지 (구역 나누기의 sectionPage) */
   sectionPageBefore?: PageSetup | null;
+  /** 그 구역의 머리말·꼬리말·쪽 번호 (구역 나누기의 sectionHf: 구역마다 다른 머리말) */
+  sectionHfBefore?: SectionHf | null;
   /** 한글의 감추기: 이 블록이 놓인 쪽에서 감출 것 (h 머리말, f 꼬리말, m 바탕쪽, b 쪽 테두리, x 쪽 배경, n 쪽 번호) */
   pageHide?: string | null;
 }
@@ -473,6 +475,7 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
   let pendingCol = false;
   let pendingCols: Columns | null = null;
   let pendingSection: PageSetup | null = null;
+  let pendingHf: SectionHf | null = null;
   const push = (b: FlatBlock) => {
     if (pendingBreak) {
       b.pageBreakBefore = true;
@@ -480,7 +483,9 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
     }
     if (pendingSection) {
       b.sectionPageBefore = pendingSection;
+      if (pendingHf) b.sectionHfBefore = pendingHf;
       pendingSection = null;
+      pendingHf = null;
     }
     if (pendingCol) {
       b.columnBreakBefore = true;
@@ -510,6 +515,7 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
         if (n.attrs?.sectionPage) {
           pendingCols = cleanColumns(n.attrs.sectionPage.columns) || { count: 1, gap: 0 };
           pendingSection = n.attrs.sectionPage as PageSetup;
+          pendingHf = n.attrs.sectionHf && typeof n.attrs.sectionHf === 'object' ? (n.attrs.sectionHf as SectionHf) : null;
         }
         break;
       case 'columnBreak':

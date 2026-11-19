@@ -1,5 +1,5 @@
 import type { Node as PMNode } from '@tiptap/pm/model';
-import type { DocSettings, HeaderFooter, PageSetup } from './types';
+import type { DocSettings, HeaderFooter, PageNumFormat, PageNumbering, PageSetup, SectionHf } from './types';
 import { blocksHtml, hfRichHtml } from './hfRich';
 import { layoutTabsHtml } from './editor/tabLayout';
 import type { DocTab } from './doc/docTab';
@@ -96,18 +96,36 @@ export interface PagePlan {
 }
 
 /** 쪽마다의 자리. 쪽 나누기 엔진(pagination)의 쪽 위치 계산과 같은 식이다 */
-export function planPages(s: DocSettings, pageCount: number, pageSetups: (PageSetup | null)[] | undefined, W: number, gap = PAGE_GAP): PagePlan[] {
+export function planPages(
+  s: DocSettings,
+  pageCount: number,
+  pageSetups: (PageSetup | null)[] | undefined,
+  W: number,
+  gap = PAGE_GAP,
+  pageHfs?: ({ hf: SectionHf; start: number } | null)[],
+): PagePlan[] {
   const base = computeGeom(s, gap);
   // 용지가 따로 없는 쪽(첫 구역)의 설정: 첫 쪽만의 본문 영역을 넣은 것
   const s0 = s.firstPage ? { ...s, page: firstPageSetup(s) } : s;
   const hostLeft = (W - base.W) / 2 + base.ml;
   const out: PagePlan[] = [];
   let top = 0;
+  /** 지금까지의 쪽 번호 매김 (구역에서 다시 시작하면 그 구역부터 바뀐다) */
+  let numbering: PageNumbering = s.pageNumber;
   for (let k = 0; k < Math.max(1, pageCount); k++) {
     const setup = pageSetups?.[k] ?? null;
     const g = setup ? geomFor(s, setup, gap) : base;
     const left = (W - g.W) / 2;
-    out.push({ g, settings: setup ? { ...s, page: setup } : s0, left, top, contentTop: top + g.mt - base.mt, dx: left + g.ml - hostLeft });
+    let settings: DocSettings = setup ? { ...s, page: setup } : s0;
+    // 구역마다 다른 머리말·꼬리말: 그 구역의 것과 그 구역의 첫 쪽, 쪽 번호 다시 시작·모양
+    const sh = pageHfs?.[k];
+    if (sh) {
+      if (sh.start === k && (sh.hf.start != null || sh.hf.fmt)) {
+        numbering = { ...numbering, ...(sh.hf.start != null ? { start: sh.hf.start, base: k } : {}), ...(sh.hf.fmt ? { format: sh.hf.fmt as PageNumFormat } : {}) };
+      }
+      settings = { ...settings, header: sh.hf.header, footer: sh.hf.footer, hideFirst: undefined, sectionStart: sh.start, pageNumber: numbering };
+    } else if (numbering !== s.pageNumber) settings = { ...settings, pageNumber: numbering };
+    out.push({ g, settings, left, top, contentTop: top + g.mt - base.mt, dx: left + g.ml - hostLeft });
     top += g.H + gap;
   }
   return out;
@@ -126,7 +144,8 @@ export function hfText(text: string, page: number, pages: number, fmt: string): 
 
 /** k 번째 쪽(0부터)의 쪽 번호 */
 export function pageNumAt(s: DocSettings, k: number): number {
-  return Math.max(1, s.pageNumber.start + k - (s.pageNumber.base || 0));
+  // Word 는 0 부터 매길 수 있다 (표지를 0 쪽으로)
+  return Math.max(0, s.pageNumber.start + k - (s.pageNumber.base || 0));
 }
 
 /** k 번째 쪽에 쪽 번호를 찍는가 */
@@ -138,7 +157,8 @@ export function pageNumShown(s: DocSettings, k: number): boolean {
 export function hfAt(s: DocSettings, which: 'header' | 'footer', k: number): HeaderFooter | null {
   const def = s[which];
   if (k === 0 && s.hideFirst?.[which]) return null;
-  if (k === 0 && def.first) return def.first;
+  // 첫 쪽: 문서의 첫 쪽, 구역마다 다른 머리말이면 그 구역의 첫 쪽
+  if (k === (s.sectionStart ?? 0) && def.first) return def.first;
   if (def.from != null && k < def.from) return null;
   if (pageNumAt(s, k) % 2 === 0) return def.even ?? (def.oddOnly ? null : def);
   return def;
@@ -471,7 +491,7 @@ function addWrapCarries(clone: HTMLElement, b: PageBox, carries: WrapCarry[]) {
 /** 편집 화면의 쪽 배치 (구역마다 용지가 다르면 쪽마다 다르다) */
 export function printPlans(tab: DocTab): PagePlan[] {
   const pageCount = Math.max(1, tab.layout.pageCount);
-  return planPages(tab.settings, pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP);
+  return planPages(tab.settings, pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP, tab.layout.pageHfs);
 }
 
 /** k 번째 쪽: 편집 화면의 블록 사본을 쪽 안 자리에 놓고 머리말·꼬리말·쪽 번호·각주를 붙인다 */

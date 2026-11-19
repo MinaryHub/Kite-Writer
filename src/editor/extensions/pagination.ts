@@ -4,7 +4,7 @@ import { Mapping } from '@tiptap/pm/transform';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { viewState } from '../viewState';
-import type { Columns, PageSetup } from '../../types';
+import type { Columns, PageSetup, SectionHf } from '../../types';
 import { columnGeom, type ColGeom } from '../../formats/common';
 import { hwpLineBoxes } from './hwpMetrics';
 import { ownMargins } from './sections';
@@ -122,6 +122,8 @@ export interface LayoutResult {
   cuts?: TableCut[];
   /** 쪽마다의 편집 용지 (구역마다 용지가 다른 문서만. null 은 문서 용지) */
   pageSetups?: (PageSetup | null)[];
+  /** 쪽마다 그 쪽이 든 구역의 머리말·꼬리말(구역 나누기의 sectionHf)과 그 구역이 시작한 쪽. 구역마다 다른 머리말이 있는 문서에만 */
+  pageHfs?: ({ hf: SectionHf; start: number } | null)[];
   /** 다단의 단 구분선 */
   colLines?: ColLine[];
 }
@@ -372,6 +374,8 @@ function computeLayout(
     CH: number;
     mt: number;
     setup: PageSetup | null;
+    /** 이 구역의 머리말·꼬리말 (구역 나누기에 담긴 것) */
+    hf?: SectionHf | null;
   }
   const basePg: Pg = { H: g.pageHeight, CH: g.contentHeight, mt: g.mt ?? 0, setup: null };
   /** 확정된 쪽(지금 쪽까지)의 기하와 본문 맨 위 */
@@ -1275,7 +1279,7 @@ function computeLayout(
       const sp = child.attrs?.sectionPage as PageSetup | null;
       if (sp && g.resolve) {
         const sg = g.resolve(sp);
-        curPg = { H: sg.pageHeight, CH: sg.contentHeight, mt: sg.mt ?? 0, setup: sp };
+        curPg = { H: sg.pageHeight, CH: sg.contentHeight, mt: sg.mt ?? 0, setup: sp, hf: (child.attrs?.sectionHf as SectionHf | null) || null };
         pendingZone = { cols: columnGeom(sp.columns, sg.contentWidth), w: sg.contentWidth };
       }
       return;
@@ -1474,6 +1478,14 @@ function computeLayout(
     page = pageCount - 1;
     commit();
     result.pageSetups = pgs.slice(0, pageCount).map((x) => x.setup);
+    // 구역의 머리말·꼬리말: 같은 구역의 쪽은 같은 기하 객체를 나눠 가진다 (구역이 시작한 쪽 = 처음 나온 쪽)
+    if (pgs.some((x) => x.hf)) {
+      const startOf = new Map<Pg, number>();
+      result.pageHfs = pgs.slice(0, pageCount).map((x, k) => {
+        if (!startOf.has(x)) startOf.set(x, k);
+        return x.hf ? { hf: x.hf, start: startOf.get(x)! } : null;
+      });
+    }
   }
   // 쪽마다 본문 맨 위 (편집기 좌표): 쪽·종이 기준으로 놓인 개체를 놓는 데 쓴다
   const topsOut: number[] = [];

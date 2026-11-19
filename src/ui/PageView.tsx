@@ -28,7 +28,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
   const pageCount = Math.max(1, tab.layout.pageCount);
   // 구역마다 용지가 다를 수 있다: 무대 폭은 가장 넓은 용지, 쪽은 저마다의 크기로 무대 가운데에
   const W = stageWidth(tab.settings, tab.editor.state.doc);
-  const plans = planPages(tab.settings, pageCount, tab.layout.pageSetups, W, PAGE_GAP);
+  const plans = planPages(tab.settings, pageCount, tab.layout.pageSetups, W, PAGE_GAP, tab.layout.pageHfs);
   const lastPlan = plans[plans.length - 1];
   const stageH = lastPlan.top + lastPlan.g.H;
   /** 편집기(문서 용지의 본문 칸) 왼쪽 */
@@ -224,7 +224,9 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
         )}
       </div>,
     );
-    const num = pageNumAt(s, k);
+    // 이 쪽의 설정 (구역마다 다른 머리말·꼬리말·쪽 번호를 담은 것)
+    const ps = pl.settings;
+    const num = pageNumAt(ps, k);
     const hfStyle = (align: string): React.CSSProperties => ({
       left: left + g.ml,
       width: g.contentW,
@@ -233,33 +235,33 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     // 표·그림이 든 머리말/꼬리말은 한글처럼 영역 위쪽부터 모양 그대로 그린다
     // 첫 쪽 감추기 (표지): 영역은 그대로 두고(두 번 눌러 편집) 내용만 그리지 않는다
     // 이 쪽의 머리말·꼬리말 (짝수 쪽, 시작 쪽, 첫 쪽 감추기). 없는 쪽도 영역은 둔다 (두 번 눌러 편집)
-    const hd = hide.includes('h') ? null : hfAt(s, 'header', k);
-    const ft = hide.includes('f') ? null : hfAt(s, 'footer', k);
+    const hd = hide.includes('h') ? null : hfAt(ps, 'header', k);
+    const ft = hide.includes('f') ? null : hfAt(ps, 'footer', k);
     const hRich = hd ? hfRichHtml(hd) : null;
     const fRich = ft ? hfRichHtml(ft) : null;
-    const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: layoutTabsHtml(hfText(html, num, total, s.pageNumber.format), g.contentW) }} />;
+    const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: layoutTabsHtml(hfText(html, num, total, ps.pageNumber.format), g.contentW) }} />;
     chrome.push(
       <div
         key={'h' + k}
         className={'hf-zone' + (hd?.text || hRich ? '' : ' empty') + (hRich ? ' rich' : '')}
         data-hint="머리말 (두 번 누르면 편집)"
-        style={{ ...hfStyle((hd || s.header).align), top: top + z.header.top, height: z.header.height, alignItems: hRich && hd?.valign === 'bottom' ? 'flex-end' : hRich && hd?.valign === 'middle' ? 'center' : 'flex-start' }}
+        style={{ ...hfStyle((hd || ps.header).align), top: top + z.header.top, height: z.header.height, alignItems: hRich && hd?.valign === 'bottom' ? 'flex-end' : hRich && hd?.valign === 'middle' ? 'center' : 'flex-start' }}
         onDoubleClick={() => app.openDialog('headerFooter', { tab: 'header' })}
       >
-        {hRich ? rich(hRich) : hd?.text ? hfText(hd.text, num, total, s.pageNumber.format) : ''}
+        {hRich ? rich(hRich) : hd?.text ? hfText(hd.text, num, total, ps.pageNumber.format) : ''}
       </div>,
       <div
         key={'f' + k}
         className={'hf-zone' + (ft?.text || fRich ? '' : ' empty') + (fRich ? ' rich' : '')}
         data-hint="꼬리말 (두 번 누르면 편집)"
-        style={{ ...hfStyle((ft || s.footer).align), top: top + z.footer.top, height: z.footer.height, alignItems: fRich ? (ft?.valign === 'bottom' ? 'flex-end' : ft?.valign === 'middle' ? 'center' : 'flex-start') : 'flex-end' }}
+        style={{ ...hfStyle((ft || ps.footer).align), top: top + z.footer.top, height: z.footer.height, alignItems: fRich ? (ft?.valign === 'bottom' ? 'flex-end' : ft?.valign === 'middle' ? 'center' : 'flex-start') : 'flex-end' }}
         onDoubleClick={() => app.openDialog('headerFooter', { tab: 'footer' })}
       >
-        {fRich ? rich(fRich) : ft?.text ? hfText(ft.text, num, total, s.pageNumber.format) : ''}
+        {fRich ? rich(fRich) : ft?.text ? hfText(ft.text, num, total, ps.pageNumber.format) : ''}
       </div>,
     );
-    if (pageNumShown(s, k) && !hide.includes('n')) {
-      const [v, h] = s.pageNumber.pos.split('-');
+    if (pageNumShown(ps, k) && !hide.includes('n')) {
+      const [v, h] = ps.pageNumber.pos.split('-');
       const zz = v === 'top' ? z.header : z.footer;
       chrome.push(
         <div
@@ -275,7 +277,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
             justifyContent: h === 'left' ? 'flex-start' : h === 'right' ? 'flex-end' : 'center',
           }}
         >
-          {formatPageNumber(num, s.pageNumber.format)}
+          {formatPageNumber(num, ps.pageNumber.format)}
         </div>,
       );
     }
@@ -385,7 +387,7 @@ export function caretPage(tab: DocTab): number {
     const view = tab.editor.view;
     const c = view.coordsAtPos(view.state.selection.head);
     const r = view.dom.getBoundingClientRect();
-    const plans = planPages(tab.settings, tab.layout.pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP);
+    const plans = planPages(tab.settings, tab.layout.pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP, tab.layout.pageHfs);
     const y = (c.top - r.top) / (viewState.zoom || 1);
     return Math.max(1, Math.min(tab.layout.pageCount, pageAtY(plans, y) + 1));
   } catch {

@@ -31,6 +31,17 @@ export interface Columns {
 
 export type HFAlign = 'left' | 'center' | 'right';
 
+/**
+ * 구역의 머리말·꼬리말 (Word 의 구역마다 다른 머리말: 구역 나누기의 sectionHf). 그 구역의 쪽에 문서의 것 대신 쓴다.
+ * start: 이 구역에서 쪽 번호를 다시 시작하는 번호, fmt: 쪽 번호 모양 (없으면 앞 구역의 것을 이어 간다)
+ */
+export interface SectionHf {
+  header: HeaderFooter;
+  footer: HeaderFooter;
+  start?: number | null;
+  fmt?: string | null;
+}
+
 export interface HeaderFooter {
   /** 텍스트. {{PAGE}} = 현재 쪽, {{PAGES}} = 전체 쪽 수 */
   text: string;
@@ -85,6 +96,8 @@ export interface DocSettings {
   firstPage?: { marginHeader?: number; marginFooter?: number };
   /** 첫 쪽에서 감추는 것 (한글의 '감추기': 표지 쪽의 머리말·꼬리말·쪽 번호) */
   hideFirst?: { header?: boolean; footer?: boolean; pageNum?: boolean; masterPage?: boolean };
+  /** (쪽마다의 설정에서만) 이 쪽이 든 구역이 시작한 쪽 (0부터): 머리말·꼬리말의 '첫 쪽'은 구역의 첫 쪽이다 */
+  sectionStart?: number;
   /**
    * 줄 높이를 문단 줄 간격으로만 정한다 (PDF 처럼). 글꼴이 섞인 줄이 글꼴마다 다른 위아래 높이 때문에
    * 줄 간격보다 높아지지 않게 한다. PDF 에서 불러온 문서에 켠다.

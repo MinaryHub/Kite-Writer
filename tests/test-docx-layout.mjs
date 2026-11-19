@@ -369,5 +369,36 @@ const text = (n) => (n.type === 'text' ? n.text : (n.content || []).map(text).jo
   ok(JSON.stringify(parts) === JSON.stringify([['K', 10], ['ITE', 8], [' W', 10], ['RITER', 8]]), '작은 대문자: 소문자는 80% 크기의 대문자로', JSON.stringify(parts));
 }
 
+// ---- 12. 구역마다 다른 머리말·꼬리말 (적지 않은 종류는 앞 구역의 것), 구역의 쪽 번호 다시 시작, 저장 후 다시 읽기 ----
+{
+  const hdr = (txt) => `<w:p>${t(txt)}</w:p>`;
+  const parts = { header1: hdr('표지 머리말'), header2: hdr('본문 머리말'), footer1: hdr('본문 꼬리말') };
+  const sp = (refs, extra = '') => `<w:sectPr>${refs}<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>${extra}</w:sectPr>`;
+  const body =
+    p(t('표지')) +
+    `<w:p><w:pPr>${sp('<w:headerReference w:type="default" r:id="r_header1"/>')}</w:pPr>${t('표지 끝')}</w:p>` +
+    p(t('본문')) +
+    `<w:p><w:pPr>${sp('<w:headerReference w:type="default" r:id="r_header2"/><w:footerReference w:type="default" r:id="r_footer1"/>', '<w:pgNumType w:fmt="lowerRoman" w:start="1"/><w:titlePg/>')}</w:pPr>${t('본문 끝')}</w:p>` +
+    p(t('부록'));
+  // 마지막 구역(본문 끝의 sectPr)은 아무 참조도 없다: 앞 구역의 머리말·꼬리말을 이어 쓴다
+  const doc = await m.readDocx(await makeDocx({ body, parts }));
+  const txt = (h) => (h?.content ? JSON.stringify(h.content).match(/"text":"([^"]*)"/)?.[1] : h?.text) || '';
+  ok(txt(doc.settings.header) === '표지 머리말' && !txt(doc.settings.footer), '문서(첫 구역)의 머리말은 첫 구역의 것', JSON.stringify(doc.settings.header).slice(0, 120));
+  const breaks = doc.content.content.filter((n) => n.type === 'pageBreak' && n.attrs?.sectionHf);
+  ok(breaks.length === 2, '구역 나누기마다 그 구역의 머리말·꼬리말', String(breaks.length));
+  const [s2, s3] = breaks.map((b) => b.attrs.sectionHf);
+  ok(txt(s2.header) === '본문 머리말' && txt(s2.footer) === '본문 꼬리말' && s2.start === 1 && s2.fmt === 'roman' && s2.header.first && !txt(s2.header.first), '둘째 구역: 제 머리말·꼬리말, 쪽 번호 i 부터, 첫 쪽은 비운다', JSON.stringify(s2).slice(0, 200));
+  ok(txt(s3.header) === '본문 머리말' && txt(s3.footer) === '본문 꼬리말' && s3.start == null && !s3.header.first, '셋째 구역: 적지 않은 종류는 앞 구역의 것을 이어 쓴다 (첫 쪽 다르게는 구역마다)', JSON.stringify(s3).slice(0, 200));
+  // 저장: 구역마다 제 참조
+  const out = await m.writeDocx({ content: doc.content, settings: doc.settings, meta: {} });
+  const zip = await JSZip.loadAsync(out);
+  const dx = await zip.file('word/document.xml').async('string');
+  const sects = dx.match(/<w:sectPr>.*?<\/w:sectPr>/g) || [];
+  ok(sects.length === 3 && /<w:pgNumType w:fmt="lowerRoman" w:start="1"\/>/.test(sects[1]) && /<w:titlePg\/>/.test(sects[1]) && !/<w:titlePg\/>/.test(sects[2]), '저장: 구역마다 머리말 참조·쪽 번호 다시 시작·첫 쪽 다르게', sects.map((x) => x.slice(0, 160)).join(' || '));
+  const back = await m.readDocx(out);
+  const b2 = back.content.content.filter((n) => n.type === 'pageBreak' && n.attrs?.sectionHf).map((b) => b.attrs.sectionHf);
+  ok(txt(back.settings.header) === '표지 머리말' && b2.length === 2 && txt(b2[0].header) === '본문 머리말' && txt(b2[1].footer) === '본문 꼬리말' && b2[0].start === 1, '저장 후 다시 읽어도 구역마다의 머리말이 같다', JSON.stringify(b2).slice(0, 200));
+}
+
 console.log(failed ? `실패 ${failed}건` : '모두 통과');
 process.exit(failed ? 1 : 0);

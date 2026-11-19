@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import type { Columns, HeaderFooter, KDocument, LineNumbering, PageBorder, PageSetup } from '../../types';
+import type { Columns, DocSettings, HeaderFooter, KDocument, LineNumbering, PageBorder, PageSetup, SectionHf } from '../../types';
 import { type JNode, type ParaBorder, mmToTwip, xmlEscape, parseBorderCss, normColor, safeIsoDate, cleanColumns } from '../common';
 import { type CharStyle, type FlatBlock, type FlatBox, type FlatFloat, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, flattenContent, flattenDoc } from '../flatten';
 import { prepareImage } from '../imageUtil';
@@ -762,6 +762,9 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
   collectImages(blocks, srcs);
   // 머리말·꼬리말(기본·첫 쪽·짝수 쪽)의 그림도 함께 담는다
   for (const def of [s.header, s.header.first, s.header.even, s.footer, s.footer.first, s.footer.even]) collectImages(richHF(def) || [], srcs);
+  // 구역마다 다른 머리말·꼬리말의 그림도
+  for (const b of blocks)
+    if (b.sectionHfBefore) for (const h of [b.sectionHfBefore.header, b.sectionHfBefore.footer]) for (const def of [h, h.first, h.even]) collectImages(richHF(def) || [], srcs);
   let n = 0;
   for (const src of srcs) {
     const img = await prepareImage(src);
@@ -780,10 +783,10 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
   collectComments(ctx, blocks, commentData);
   // 본문. 구역 나누기(구역마다 용지)는 앞 구역의 설정을 그 구역의 마지막 문단에 단다 (머리말 참조가 정해진 뒤에: 아래)
   const parts: { xml: string; para: boolean }[] = [];
-  const sectionAt: { index: number; page: PageSetup }[] = [];
+  const sectionAt: { index: number; page: PageSetup; hf: SectionHf | null }[] = [];
   for (const b of blocks) {
     if (b.sectionPageBefore) {
-      sectionAt.push({ index: parts.length, page: b.sectionPageBefore });
+      sectionAt.push({ index: parts.length, page: b.sectionPageBefore, hf: b.sectionHfBefore || null });
       // 새 구역은 새 쪽에서 시작한다 (쪽 나누기를 따로 두면 빈 쪽이 생긴다)
       b.pageBreakBefore = false;
     }
@@ -813,10 +816,9 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
   const [numV, numH] = s.pageNumber.pos === 'none' ? ['', ''] : s.pageNumber.pos.split('-');
   const files: [string, string][] = [];
   const hfOverrides: string[] = [];
-  let sectRefs = '';
   let partNo = 0;
-  /** 머리말/꼬리말 부분 하나를 쓰고 구역에서 가리킨다. 내용이 없으면 쓰지 않는다 */
-  const hfPart = (kind: 'header' | 'footer', type: 'default' | 'first' | 'even', def: HeaderFooter | null | undefined, pageNum: boolean) => {
+  /** 머리말/꼬리말 부분 하나를 쓰고 구역에서 가리킬 참조를 돌려준다. 내용이 없으면 쓰지 않는다 */
+  const hfPart = (kind: 'header' | 'footer', type: 'default' | 'first' | 'even', def: HeaderFooter | null | undefined, pageNum: boolean): string => {
     const hc = new Ctx();
     hc.relNo = 0;
     hc.bodyWidthTw = ctx.bodyWidthTw;
@@ -834,42 +836,63 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
       inner = pageFields(blocksXml(hc, rich), pfmt);
     } else if (def?.text.trim()) inner = hfParagraph(def.text, def.align, pfmt, kind);
     if (pageNum) inner += hfParagraph(pageText, numH, pfmt, kind);
-    if (!inner) return;
+    if (!inner) return '';
     const name = `${kind}${++partNo}.xml`;
     files.push([`word/${name}`, hfXml(kind === 'header' ? 'hdr' : 'ftr', inner)]);
     if (hc.rels.length) files.push([`word/_rels/${name}.rels`, relsXml(hc.rels)]);
     hfOverrides.push(`<Override PartName="/word/${name}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml"/>`);
-    sectRefs += `<w:${kind}Reference w:type="${type}" r:id="${ctx.addRel(kind, name)}"/>`;
+    return `<w:${kind}Reference w:type="${type}" r:id="${ctx.addRel(kind, name)}"/>`;
   };
-  // 첫 쪽을 다르게: 머리말·꼬리말 가운데 하나라도 첫 쪽이 다르면 둘 다 첫 쪽의 것을 따로 쓴다 (다르지 않은 쪽은 기본과 같은 내용)
-  const titlePg = !!(s.header.first || s.footer.first || s.hideFirst?.header || s.hideFirst?.footer);
-  const evenOdd = !!(s.header.even || s.footer.even || s.header.oddOnly || s.footer.oddOnly);
-  for (const kind of ['header', 'footer'] as const) {
-    const def = s[kind];
-    const num = numV === (kind === 'header' ? 'top' : 'bottom');
-    hfPart(kind, 'default', def, num);
-    if (titlePg) hfPart(kind, 'first', def.first || (s.hideFirst?.[kind] ? null : def), num && !s.hideFirst?.pageNum);
-    if (evenOdd) hfPart(kind, 'even', def.even || (def.oddOnly ? null : def), num);
-  }
-  /** 구역 설정 하나. 첫 구역에만 시작 쪽 번호와 '첫 쪽을 다르게'를 둔다 */
-  const sectXml = (p: PageSetup, first: boolean) => {
+  // 짝수 쪽을 다르게 (문서 전체 설정): 문서의 것이나 어느 구역의 것이든 짝수 쪽이 다르면
+  const sectHfs = sectionAt.map((x) => x.hf).filter((x): x is SectionHf => !!x);
+  const evenOdd = [s, ...sectHfs].some((h) => !!(h.header.even || h.footer.even || h.header.oddOnly || h.footer.oddOnly));
+  /** 머리말·꼬리말 묶음 하나(문서의 것 또는 구역의 것)의 부분들을 쓰고 참조와 '첫 쪽 다르게'를 돌려준다 */
+  const refsFor = (h: { header: HeaderFooter; footer: HeaderFooter }, hideFirst: DocSettings['hideFirst']) => {
+    // 첫 쪽을 다르게: 머리말·꼬리말 가운데 하나라도 첫 쪽이 다르면 둘 다 첫 쪽의 것을 따로 쓴다 (다르지 않은 쪽은 기본과 같은 내용)
+    const titlePg = !!(h.header.first || h.footer.first || hideFirst?.header || hideFirst?.footer);
+    let refs = '';
+    for (const kind of ['header', 'footer'] as const) {
+      const def = h[kind];
+      const num = numV === (kind === 'header' ? 'top' : 'bottom');
+      refs += hfPart(kind, 'default', def, num);
+      if (titlePg) refs += hfPart(kind, 'first', def.first || (hideFirst?.[kind] ? null : def), num && !hideFirst?.pageNum);
+      if (evenOdd) refs += hfPart(kind, 'even', def.even || (def.oddOnly ? null : def), num);
+    }
+    return { refs, titlePg };
+  };
+  const docRefs = refsFor(s, s.hideFirst);
+  const fmtOf = (f: string | null | undefined) => (f === 'roman' ? ' w:fmt="lowerRoman"' : f === 'ROMAN' ? ' w:fmt="upperRoman"' : '');
+  /**
+   * 구역 설정 하나. 첫 구역은 문서의 머리말·꼬리말과 시작 쪽 번호, 구역마다 다른 머리말이 있는 구역은 그 구역의 것
+   * (그 구역의 쪽 번호 다시 시작·모양과 '첫 쪽 다르게'까지)
+   */
+  const sectXml = (p: PageSetup, first: boolean, hf?: SectionHf | null) => {
     const pw = p.landscape ? Math.max(p.width, p.height) : p.width;
     const ph = p.landscape ? Math.min(p.width, p.height) : p.height;
+    const r = hf ? refsFor(hf, undefined) : docRefs;
+    const pgNum = hf
+      ? hf.start != null || hf.fmt
+        ? `<w:pgNumType${fmtOf(hf.fmt)}${hf.start != null ? ` w:start="${Math.round(hf.start)}"` : ''}/>`
+        : ''
+      : first && (s.pageNumber.start !== 1 || fmtOf(s.pageNumber.format))
+        ? `<w:pgNumType${fmtOf(s.pageNumber.format)}${s.pageNumber.start !== 1 ? ` w:start="${s.pageNumber.start}"` : ''}/>`
+        : '';
     return (
-      `<w:sectPr>${sectRefs}<w:pgSz w:w="${mmToTwip(pw)}" w:h="${mmToTwip(ph)}"${p.landscape ? ' w:orient="landscape"' : ''}/>` +
+      `<w:sectPr>${r.refs}<w:pgSz w:w="${mmToTwip(pw)}" w:h="${mmToTwip(ph)}"${p.landscape ? ' w:orient="landscape"' : ''}/>` +
       `<w:pgMar w:top="${mmToTwip(p.marginTop + p.marginHeader)}" w:right="${mmToTwip(p.marginRight)}" w:bottom="${mmToTwip(p.marginBottom + p.marginFooter)}" w:left="${mmToTwip(p.marginLeft)}" w:header="${mmToTwip(p.marginTop)}" w:footer="${mmToTwip(p.marginBottom)}" w:gutter="${mmToTwip(p.gutter)}"/>` +
       // sectPr 자식 차례 (스키마): … pgMar, pgBorders, lnNumType, pgNumType, cols, titlePg, docGrid
       pgBordersXml(pbd) +
       lnNumXml(s.lineNumbers) +
-      (first && s.pageNumber.start !== 1 ? `<w:pgNumType w:start="${s.pageNumber.start}"/>` : '') +
-      `${colsXml(p.columns)}${first && titlePg ? '<w:titlePg/>' : ''}<w:docGrid w:linePitch="360"/></w:sectPr>`
+      pgNum +
+      `${colsXml(p.columns)}${(first || hf) && r.titlePg ? '<w:titlePg/>' : ''}<w:docGrid w:linePitch="360"/></w:sectPr>`
     );
   };
-  // 구역마다의 용지: 첫 구역은 문서의 용지, 그 뒤는 구역 나누기에 담긴 것
+  // 구역마다의 용지와 머리말: 첫 구역은 문서의 것, 그 뒤는 구역 나누기에 담긴 것
   const pages = [pg, ...sectionAt.map((x) => x.page)];
+  const hfs: (SectionHf | null)[] = [null, ...sectionAt.map((x) => x.hf || null)];
   for (let k = sectionAt.length - 1; k >= 0; k--) {
     const at = sectionAt[k].index;
-    const sect = sectXml(pages[k], k === 0);
+    const sect = sectXml(pages[k], k === 0, hfs[k]);
     // 앞 구역의 마지막 문단에 단다 (문단 속성의 끝). 바로 앞이 표이거나 문단이 없으면 빈 문단을 넣는다
     let j = at - 1;
     while (j >= 0 && !parts[j].xml) j--;
@@ -879,7 +902,7 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
     else parts.splice(at, 0, { xml: `<w:p><w:pPr>${sect}</w:pPr></w:p>`, para: true });
   }
   const body = parts.map((x) => x.xml).join('');
-  const sectPr = sectXml(pages[pages.length - 1], pages.length === 1);
+  const sectPr = sectXml(pages[pages.length - 1], pages.length === 1, hfs[hfs.length - 1]);
 
   const documentXml = DECL + `<w:document ${W_NS}>${background}<w:body>${body}${sectPr}</w:body></w:document>`;
 
