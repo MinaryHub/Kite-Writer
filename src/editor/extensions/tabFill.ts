@@ -50,7 +50,9 @@ function measure(view: EditorView): [number, number, number?][] {
     const cur = +mark.attrs.width > 0 ? +mark.attrs.width : -1;
     if (Math.abs(cur - f.width) > 0.3 || (+mark.attrs.leader || 0) !== f.leader) out.push([pos, f.width, f.leader]);
   }
-  const spans = root.querySelectorAll('span.k-tab');
+  // 폭을 맞출 탭(isAuto: Kite 의 오른쪽 맞춤 탭, 한글의 오른쪽 채움 탭)만 DOM 표시로 먼저 고른다. 모든 탭마다
+  // posAtDOM 으로 문서 자리를 셈하면(블록 수만큼 센다) 탭이 많은 긴 문서에서 블록 수의 제곱만큼 걸린다
+  const spans = root.querySelectorAll(`span.k-tab[data-tab-right="1"], span.k-tab[data-tab-type="${TAB_TYPE_RIGHT}"][data-leader]`);
   for (const span of Array.from(spans) as HTMLElement[]) {
     if (span.closest('.pg-spacer')) continue;
     let pos: number;
