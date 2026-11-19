@@ -1,4 +1,4 @@
-// 문의 중계(contact-relay): 메일(Brevo)·GitHub 이슈로 전달, 비공개 저장소에만 이슈, 멘션·마크다운 막기, 실패 처리
+// 문의 중계(contact-relay): 메일(Brevo)·GitHub 이슈로 전달, 공개 저장소는 공개 안내를 본 앱의 문의만, 멘션·마크다운 막기, 실패 처리
 //   node tests/test-contact-relay.mjs     (실제 서버는 부르지 않는다: fetch 를 가짜로 바꾼다)
 const relay = await import('../contact-relay/api/contact.js');
 
@@ -20,7 +20,7 @@ globalThis.fetch = async (url, init = {}) => {
 };
 const reply = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
-const ENV_KEYS = ['BREVO_API_KEY', 'CONTACT_TO', 'CONTACT_SENDER', 'GITHUB_TOKEN', 'GITHUB_REPO', 'GITHUB_ALLOW_PUBLIC'];
+const ENV_KEYS = ['BREVO_API_KEY', 'CONTACT_TO', 'CONTACT_SENDER', 'GITHUB_TOKEN', 'GITHUB_REPO'];
 const MAIL = { BREVO_API_KEY: 'k', CONTACT_TO: 'dev@example.com', CONTACT_SENDER: 'noreply@example.com' };
 let ipNo = 0;
 async function send(env, payload) {
@@ -68,17 +68,21 @@ const issuePosts = () => calls.filter((c) => c.method === 'POST' && /\/issues$/.
   ok(/- 답장: user@​example\.com/.test(post?.body.body || ''), '비공개 저장소에는 답장 주소를 적는다 (멘션이 되지 않게)');
 }
 
-// ---- 이슈만: 공개 저장소는 허락 없이는 만들지 않는다 ----
+// ---- 공개 저장소: 공개 안내를 본 앱(public: true)의 문의만 이슈로, 답장 주소는 빼고 ----
 {
   rules = {
-    '/repos/team/public-repo/issues': () => reply(201, { number: 2 }),
+    '/repos/team/public-repo/issues': () => reply(201, { number: 7, html_url: 'https://github.com/team/public-repo/issues/7' }),
     '/repos/team/public-repo': () => reply(200, { private: false }),
+    'brevo.com': () => reply(201, {}),
   };
-  const r = await send({ GITHUB_TOKEN: 'ghp_x', GITHUB_REPO: 'team/public-repo' }, { category: '문의', message: '개인정보가 든 문의', email: 'user@example.com' });
-  ok(r.status === 503 && issuePosts().length === 0, '공개 저장소에는 허락(GITHUB_ALLOW_PUBLIC) 없이는 이슈를 만들지 않는다', JSON.stringify(r));
-  const r2 = await send({ GITHUB_TOKEN: 'ghp_x', GITHUB_REPO: 'team/public-repo', GITHUB_ALLOW_PUBLIC: '1' }, { category: '기능 제안', message: '이런 기능', email: 'user@example.com' });
+  const r = await send({ GITHUB_TOKEN: 'ghp_x', GITHUB_REPO: 'team/public-repo' }, { category: '문의', message: '예전 앱의 문의', email: 'user@example.com' });
+  ok(r.status === 503 && issuePosts().length === 0 && /업데이트/.test(r.body.error), '예전 앱(공개 안내 없음)의 문의는 공개 이슈로 올리지 않는다 (이슈만 설정이면 업데이트 안내)', JSON.stringify(r));
+  const r1 = await send({ ...MAIL, GITHUB_TOKEN: 'ghp_x', GITHUB_REPO: 'team/public-repo' }, { category: '문의', message: '예전 앱의 문의', email: 'user@example.com' });
+  ok(r1.status === 200 && issuePosts().length === 0 && calls.some((c) => c.url.includes('brevo.com')), '메일도 설정했으면 예전 앱의 문의는 메일로만', JSON.stringify(r1));
+  const r2 = await send({ GITHUB_TOKEN: 'ghp_x', GITHUB_REPO: 'team/public-repo' }, { category: '기능 제안', message: '이런 기능', email: 'user@example.com', public: true });
   const post = issuePosts()[0];
-  ok(r2.status === 200 && post && !/user@/.test(post.body.body) && !/답장/.test(post.body.body) && JSON.stringify(post.body.labels) === '["enhancement"]', '허락하면 만들되 답장 주소는 공개 이슈에 적지 않는다', JSON.stringify(post?.body));
+  ok(r2.status === 200 && post && !/user@/.test(post.body.body) && !/답장/.test(post.body.body) && JSON.stringify(post.body.labels) === '["enhancement"]', '공개 안내를 본 앱의 문의는 이슈로 만들되 답장 주소는 적지 않는다', JSON.stringify(post?.body));
+  ok(r2.body.issue?.number === 7 && r2.body.issue?.url === 'https://github.com/team/public-repo/issues/7', '만든 이슈의 번호·주소를 돌려준다 (앱이 이슈를 열어 보게)', JSON.stringify(r2.body));
 }
 
 // ---- 라벨을 달 수 없으면 라벨 없이 다시 ----

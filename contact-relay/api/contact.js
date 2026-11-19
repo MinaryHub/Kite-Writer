@@ -9,16 +9,17 @@
  *     CONTACT_SENDER  Brevo 에서 확인(verify)한 보내는 주소 (Senders & IP → Senders)
  *   GitHub 이슈
  *     GITHUB_TOKEN    세분화된 개인 토큰(fine-grained): 저장소는 GITHUB_REPO 하나만, 권한은 Issues: Read and write
- *     GITHUB_REPO     이슈를 만들 저장소 (owner/name). 문의에는 개인정보가 들 수 있어 비공개 저장소에만 만든다
- *     GITHUB_ALLOW_PUBLIC  1 이면 공개 저장소에도 만든다 (답장 주소는 이슈에 적지 않는다. 문의 창의 안내 글도 바꿀 것)
+ *     GITHUB_REPO     이슈를 만들 저장소 (owner/name)
+ *   공개 저장소에는 '공개된다'는 안내를 본 앱(문의 창이 public: true 를 함께 보낸다)에서 온 문의만 이슈로 올리고,
+ *   답장 주소는 적지 않는다. 그 안내가 없던 예전 앱의 문의는 메일로만 전달한다. 비공개 저장소는 가리지 않는다
  *
- * 받을 때: POST JSON { category, message, email?, subject? }  →  { ok: true } | { ok: false, error }
+ * 받을 때: POST JSON { category, message, email?, public? }  →  { ok: true, issue?: { number, url } } | { ok: false, error }
  */
 const BREVO_URL = process.env.BREVO_API_URL || 'https://api.brevo.com/v3/smtp/email';
 const GITHUB_API = process.env.GITHUB_API_URL || 'https://api.github.com';
 const CATEGORIES = new Set(['문의', '오류 신고', '기능 제안', '부적절한 AI 응답']);
-/** 분류 → 이슈 라벨 (없는 라벨이면 라벨 없이 만든다) */
-const LABELS = { 문의: ['문의'], '오류 신고': ['bug'], '기능 제안': ['enhancement'], '부적절한 AI 응답': ['ai-report'] };
+/** 분류 → 이슈 라벨 (GitHub 기본 라벨. 달 수 없으면 라벨 없이 만든다) */
+const LABELS = { 문의: ['question'], '오류 신고': ['bug'], '기능 제안': ['enhancement'], '부적절한 AI 응답': ['ai-report'] };
 const LIMIT = { windowMs: 10 * 60 * 1000, max: 5 }; // 주소(IP)마다 10분에 5건
 const hits = new Map();
 /** 저장소가 비공개인가 (함수가 살아 있는 동안 기억한다) */
@@ -84,10 +85,12 @@ async function isPrivate(cfg) {
   return v;
 }
 
-/** GitHub 이슈를 만든다. 공개 저장소이고 허락하지 않았으면 만들지 않는다 ('skipped') */
-async function createIssue(cfg, { category, message, email }) {
+/**
+ * GitHub 이슈를 만들고 { number, url } 을 돌려준다. 공개 저장소인데 사용자가 공개 안내를 보지 못했으면(예전 앱) 만들지 않는다 ('skipped')
+ */
+async function createIssue(cfg, { category, message, email, consent }) {
   const priv = await isPrivate(cfg);
-  if (!priv && !cfg.allowPublic) return 'skipped';
+  if (!priv && !consent) return 'skipped';
   const lines = [fenced(message), '', `- 분류: ${category}`];
   // 답장 주소는 비공개 저장소에만 적는다 (공개 저장소면 메일로만 전달된다)
   if (priv) lines.push(`- 답장: ${email ? email.replace(/@/g, '@​') : '(없음)'}`);
@@ -103,12 +106,13 @@ async function createIssue(cfg, { category, message, email }) {
   // 라벨을 달 수 없으면(권한·라벨 문제) 라벨 없이 다시
   if (res.status === 422 || res.status === 403) res = await post(null);
   if (!res.ok) throw new Error(`github issue ${res.status} ${(await res.text()).slice(0, 300)}`);
-  return 'created';
+  const j = await res.json().catch(() => ({}));
+  return { number: j?.number ?? null, url: typeof j?.html_url === 'string' ? j.html_url : null };
 }
 
 export async function POST(request) {
   const mail = { key: clean(process.env.BREVO_API_KEY), to: clean(process.env.CONTACT_TO), sender: clean(process.env.CONTACT_SENDER) };
-  const gh = { token: clean(process.env.GITHUB_TOKEN), repo: clean(process.env.GITHUB_REPO), allowPublic: clean(process.env.GITHUB_ALLOW_PUBLIC) === '1' };
+  const gh = { token: clean(process.env.GITHUB_TOKEN), repo: clean(process.env.GITHUB_REPO) };
   const useMail = !!(mail.key && mail.to && mail.sender);
   const useIssue = !!(gh.token && /^[\w.-]+\/[\w.-]+$/.test(gh.repo));
   if (!useMail && !useIssue) return json({ ok: false, error: '문의 서버 설정이 끝나지 않았습니다.' }, 503);
@@ -131,7 +135,8 @@ export async function POST(request) {
   if (message.length > 9000) return json({ ok: false, error: '내용이 너무 깁니다.' }, 413);
   const validEmail = email && email.length <= 200 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
   if (email && !validEmail) return json({ ok: false, error: '답장 받을 메일 주소 형식이 올바르지 않습니다.' }, 400);
-  const msg = { category, message, email: validEmail ? email : '' };
+  // public: 문의 창이 '공개 이슈로 올라간다'는 안내를 보여 준 앱에서 왔다
+  const msg = { category, message, email: validEmail ? email : '', consent: p?.public === true };
 
   // 설정된 곳마다 보내고, 하나라도 닿으면 보낸 것으로 본다
   const jobs = [];
@@ -139,11 +144,12 @@ export async function POST(request) {
   if (useIssue) jobs.push(createIssue(gh, msg));
   const results = await Promise.allSettled(jobs);
   for (const r of results) if (r.status === 'rejected') console.error('contact', String(r.reason?.message || r.reason).slice(0, 400));
-  if (results.some((r) => r.status === 'fulfilled' && r.value !== 'skipped')) return json({ ok: true });
+  const issue = results.map((r) => (r.status === 'fulfilled' && typeof r.value === 'object' ? r.value : null)).find(Boolean);
+  if (results.some((r) => r.status === 'fulfilled' && r.value !== 'skipped')) return json(issue?.url ? { ok: true, issue } : { ok: true });
   if (results.every((r) => r.status === 'fulfilled')) {
-    // 이슈만 설정했는데 공개 저장소라 만들지 않은 경우
-    console.error('contact: GITHUB_REPO 가 공개 저장소라 이슈를 만들지 않았습니다 (GITHUB_ALLOW_PUBLIC=1 로 허락)');
-    return json({ ok: false, error: '문의 서버 설정이 끝나지 않았습니다.' }, 503);
+    // 이슈만 설정했는데 공개 저장소에 예전 앱의 문의가 온 경우: 메일 설정이 없어 전달할 곳이 없다
+    console.error('contact: 공개 안내가 없는 예전 앱의 문의라 공개 이슈로 올리지 않았습니다 (메일도 설정하면 메일로 전달합니다)');
+    return json({ ok: false, error: '이 버전에서는 문의를 보낼 수 없습니다. Kite 를 최신 버전으로 업데이트해 주세요.' }, 503);
   }
   return json({ ok: false, error: '보내지 못했습니다. 잠시 후 다시 시도해 주세요.' }, 502);
 }
