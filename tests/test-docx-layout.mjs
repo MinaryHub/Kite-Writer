@@ -350,5 +350,24 @@ const text = (n) => (n.type === 'text' ? n.text : (n.content || []).map(text).jo
   ok(r2[0][0].attrs.backgroundColor === '#D9E2F3' && !r2[1][0].attrs.backgroundColor && !bold(r2[0][0]), '머리 행·첫 열을 끈 표: 첫 줄부터 줄무늬, 굵은 글자 없음', JSON.stringify(r2.map((r) => r.map((c) => c.attrs.backgroundColor || ''))));
 }
 
+// ---- 11. 떠 있는 표 (w:tblpPr)와 작은 대문자 (w:smallCaps) ----
+{
+  const cell = (txt) => `<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${p(t(txt))}</w:tc>`;
+  const ftbl = (tblpPr, w) => `<w:tbl><w:tblPr>${tblpPr}<w:tblW w:w="${w}" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="2880"/></w:tblGrid><w:tr>${cell('떠 있는 표')}</w:tr></w:tbl>`;
+  const body =
+    ftbl('<w:tblpPr w:leftFromText="180" w:rightFromText="180" w:vertAnchor="page" w:horzAnchor="margin" w:tblpXSpec="right" w:tblpY="2880"/>', 2000) +
+    p(t('곁 글')) +
+    ftbl('<w:tblpPr w:leftFromText="180" w:rightFromText="180" w:horzAnchor="text" w:tblpX="144" w:vertAnchor="text" w:tblpY="72"/>', 1500) +
+    p(t('Small Caps 글', ''), '') +
+    `<w:p><w:r><w:rPr><w:smallCaps/><w:sz w:val="20"/></w:rPr><w:t>Kite Writer</w:t></w:r></w:p>`;
+  const doc = await m.readDocx(await makeDocx({ body }));
+  const [b1, , b2, , sc] = doc.content.content;
+  // 본문 폭 6.5 인치 = 624px: 40% = 249.6px, 오른쪽 맞춤 → x = 374.4, 종이 위 2 인치 → 본문 맨 위 기준 96px
+  ok(b1.type === 'textBox' && b1.attrs.width === 249.6 && b1.attrs.float.x === 374.4 && b1.attrs.float.py === 96 && b1.content[0].type === 'table', '쪽 기준 떠 있는 표: 폭(백분율)·오른쪽 맞춤·종이 기준 세로 자리', JSON.stringify(b1.attrs));
+  ok(b2.type === 'textBox' && b2.attrs.float.x === 9.6 && b2.attrs.float.y === 4.8 && b2.attrs.float.py == null && b2.attrs.float.wrap?.d[1] === 12, '문단 기준 떠 있는 표: 단 왼쪽에서 tblpX, 뒤 문단 위에서 tblpY, 둘레 글 간격', JSON.stringify(b2.attrs));
+  const parts = (sc.content || []).map((c) => [c.text, c.marks?.find((k) => k.type === 'textStyle')?.attrs?.fontSize ?? null]);
+  ok(JSON.stringify(parts) === JSON.stringify([['K', 10], ['ITE', 8], [' W', 10], ['RITER', 8]]), '작은 대문자: 소문자는 80% 크기의 대문자로', JSON.stringify(parts));
+}
+
 console.log(failed ? `실패 ${failed}건` : '모두 통과');
 process.exit(failed ? 1 : 0);

@@ -56,6 +56,8 @@ interface RProps {
   hidden?: boolean;
   /** 모두 대문자로 보인다 (w:caps) */
   caps?: boolean;
+  /** 작은 대문자 (w:smallCaps): 소문자를 작은 대문자로 */
+  smallCaps?: boolean;
 }
 
 interface PProps {
@@ -616,6 +618,9 @@ class DocxReader {
           break;
         case 'caps':
           p.caps = onOff(c);
+          break;
+        case 'smallCaps':
+          p.smallCaps = onOff(c);
           break;
       }
     }
@@ -1362,8 +1367,8 @@ class DocxReader {
     if (rStyle) for (const s of this.styleChain(rStyle)) this.applyR(r, s.rPr);
     this.applyR(r, rPr);
     if (r.hidden) return;
-    const marks = () => {
-      const m = this.marksFrom(r, this.fieldLink || link);
+    const marks = (rr: RProps = r) => {
+      const m = this.marksFrom(rr, this.fieldLink || link);
       if (this.review.length) m.push(this.review[this.review.length - 1]);
       for (const id of this.activeComments) m.push({ type: 'comment', attrs: { id } });
       return m;
@@ -1383,7 +1388,18 @@ class DocxReader {
             break;
           }
           // '모두 대문자': 보이는 대로 대문자로 옮긴다
-          const n = textNode(r.caps ? (c.textContent || '').toUpperCase() : c.textContent || '', marks());
+          const raw = c.textContent || '';
+          if (r.smallCaps && !r.caps) {
+            // 작은 대문자: 소문자는 대문자로 바꿔 글자 크기의 80% 로 (Word 와 같이), 나머지는 그대로
+            const small: RProps = { ...r, size: Math.round((r.size || 10) * 0.8 * 2) / 2 };
+            for (const part of raw.match(/\p{Ll}+|[^\p{Ll}]+/gu) || []) {
+              const lower = /^\p{Ll}/u.test(part);
+              const n = textNode(lower ? part.toUpperCase() : part, marks(lower ? small : r));
+              if (n) out.push(n);
+            }
+            break;
+          }
+          const n = textNode(r.caps ? raw.toUpperCase() : raw, marks());
           if (n) out.push(n);
           break;
         }
@@ -2180,6 +2196,17 @@ class DocxReader {
     const csp = kid(tblPr, 'tblCellSpacing');
     const cspTw = csp && attr(csp, 'type') !== 'nil' ? parseFloat(attr(csp, 'w') || '0') : 0;
     if (cspTw > 0) t.attrs = { ...t.attrs, cellSpacing: Math.min(50, Math.round(((cspTw * 2) / 15) * 100) / 100) };
+    // 떠 있는 표 (본문·머리말의 맨 바깥 표만)
+    const tp = kid(tblPr, 'tblpPr');
+    if (tp && !this.tableStyles.length) {
+      const tw = kid(tblPr, 'tblW');
+      const twv = parseFloat(attr(tw, 'w') || '0') || 0;
+      const bodyW = Math.max(1, this.geo.W - this.geo.ml - this.geo.mr);
+      const gridW = grid.reduce((a, b) => a + b, 0);
+      const ty = attr(tw, 'type');
+      const w = ty === 'pct' ? (bodyW * (/%$/.test(attr(tw, 'w') || '') ? twv * 50 : twv)) / 5000 : ty === 'dxa' && twv > 0 ? twv / 15 : gridW || bodyW;
+      return this.floatingTable(t, tp, Math.max(8, Math.min(5000, w)), rowH);
+    }
     if (tblAlign === 'center' || tblAlign === 'right') t.attrs = { ...t.attrs, align: tblAlign };
     else {
       // 예전 호환 모드의 Word 는 칸 안의 글이 본문 왼쪽 끝(+ 들여쓰기)에 맞도록 표를 왼쪽 안 여백만큼 본문 밖으로 내어 놓는다.
@@ -2188,6 +2215,74 @@ class DocxReader {
       if (Math.abs(ind) > 0.05) t.attrs = { ...t.attrs, indent: ind };
     }
     return t;
+  }
+
+  /** 블록들의 어림 높이 (px): 문단마다 한 줄(줄 높이 × 글자 크기)과 문단 간격, 표는 줄마다 가장 높은 칸 */
+  private estHeight(nodes: JNode[], rowH: number[] = []): number {
+    const PX = 96 / 72;
+    let h = 0;
+    for (const n of nodes) {
+      if (n.type === 'paragraph') {
+        const lh = String(n.attrs?.lineHeight || '');
+        let size = +n.attrs?.fontSize || 10;
+        for (const c of n.content || []) size = Math.max(size, +(c.marks?.find((k) => k.type === 'textStyle')?.attrs?.fontSize || 0));
+        h += (/pt$/.test(lh) ? parseFloat(lh) : (parseFloat(lh) || 1.15) * size) * PX + ((+n.attrs?.spaceBefore || 0) + (+n.attrs?.spaceAfter || 0)) * PX;
+      } else if (n.type === 'table')
+        (n.content || []).forEach((row, i) => {
+          let rh = rowH[i] || 0;
+          for (const cell of row.content || []) {
+            const m = cell.attrs?.margins || [0, 0, 0, 0];
+            rh = Math.max(rh, this.estHeight(cell.content || []) + (+m[2] || 0) + (+m[3] || 0) + 1);
+          }
+          h += rh;
+        });
+      else h += +n.attrs?.height || 0;
+    }
+    return h;
+  }
+
+  /**
+   * 떠 있는 표 (w:tblpPr) → 표를 담은 떠 있는 글상자. 자리: 가로는 단(text, 기본)·여백(margin)·종이(page) 기준의 tblpX 또는 맞춤(tblpXSpec),
+   * 세로는 여백(margin, 기본)·종이(page) 기준(쪽 나누기 뒤 그 쪽에 놓인다) 또는 뒤 문단(text) 기준의 tblpY 또는 맞춤(tblpYSpec).
+   * 둘레 글은 표 둘레 간격(…FromText)만큼 떨어져 비켜 간다
+   */
+  private floatingTable(t: JNode, tp: Element, w: number, rowH: number[]): JNode {
+    const g = this.geo;
+    const tw = (k: string): number | null => {
+      const v = parseFloat(attr(tp, k) || '');
+      return Number.isFinite(v) ? Math.max(-31680, Math.min(31680, v)) / 15 : null;
+    };
+    const bodyW = Math.max(1, g.W - g.ml - g.mr);
+    const bodyH = Math.max(1, g.H - g.mt - g.mb);
+    const h = Math.max(4, Math.round(this.estHeight([t], rowH)));
+    const hA = attr(tp, 'horzAnchor') || 'text';
+    const vA = attr(tp, 'vertAnchor') || 'margin';
+    const [ox, ow] = hA === 'page' ? [-g.ml, g.W] : [0, bodyW];
+    const xs = attr(tp, 'tblpXSpec');
+    const x = xs === 'center' ? ox + (ow - w) / 2 : xs === 'right' || xs === 'outside' ? ox + ow - w : xs === 'left' || xs === 'inside' ? ox : ox + (tw('tblpX') ?? 0);
+    let y = 0;
+    let py: number | null = null;
+    if (vA === 'text') y = tw('tblpY') ?? 0;
+    else {
+      const [oy, oh] = vA === 'page' ? [-g.mt, g.H] : [0, bodyH];
+      const ys = attr(tp, 'tblpYSpec');
+      py = ys === 'top' || ys === 'inside' ? oy : ys === 'bottom' || ys === 'outside' ? oy + oh - h : ys === 'center' ? oy + (oh - h) / 2 : oy + (tw('tblpY') ?? 0);
+      if (this.headerMode) {
+        const zoneTop = this.hfKind === 'footer' ? g.H - g.mb : this.hdrTop;
+        y = py + g.mt - zoneTop;
+        py = null;
+      }
+    }
+    const d = [tw('topFromText') ?? 0, tw('rightFromText') ?? 0, tw('bottomFromText') ?? 0, tw('leftFromText') ?? 0].map((v) => Math.max(0, v)) as [number, number, number, number];
+    const wrap = this.wrapOf({ x, y, w, h, py, behind: false, wrap: 'square', side: 'bothSides', dist: d });
+    const float: Record<string, any> = { x: round(x, 2), y: round(y, 2), zh: h };
+    if (py != null) float.py = round(py, 2);
+    if (wrap) float.wrap = wrap;
+    // 상자 안의 표는 상자 왼쪽에 붙인다 (표의 맞춤·들여쓰기는 상자 자리로 옮겼다)
+    const attrs = { ...t.attrs };
+    delete attrs.align;
+    delete attrs.indent;
+    return { type: 'textBox', attrs: { width: round(w, 2), padding: [0, 0, 0, 0], float }, content: [{ ...t, attrs }] };
   }
 
   /**
