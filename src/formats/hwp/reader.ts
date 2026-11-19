@@ -1,6 +1,7 @@
 import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, floatOverhang, gapInBox, isBreakBlock, jsonContentSize, cellContentNeed, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
 import { cleanLook, type PicLook } from '../picLook';
 import { olePreview } from '../olePreview';
+import { isMetafileExt, metafileToSvg } from '../metafile';
 import { hwpToLatex } from '../../math/hwpEq';
 import * as CFB from 'cfb';
 import { Inflate } from 'pako';
@@ -1726,7 +1727,9 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
     const mime = mimeFromExt(b.ext);
     // OLE 개체: 개체가 그려 둔 모양(비트맵)을 꺼낸다. 못 꺼내면 자리 표시
     if (/^ole$/i.test(b.ext)) images.set(id, olePreview(bytes) || placeholderImage('OLE 개체'));
-    else images.set(id, isBrowserImage(mime) ? bytesToDataUrl(bytes, mime) : placeholderImage(`그림(${b.ext.toUpperCase()})`));
+    else if (isBrowserImage(mime)) images.set(id, bytesToDataUrl(bytes, mime));
+    // 윈도 메타파일(WMF·EMF): 그려서 SVG 로
+    else images.set(id, (isMetafileExt(b.ext) && metafileToSvg(bytes)) || placeholderImage(`그림(${b.ext.toUpperCase()})`));
   }
 
   const conv = new HwpConverter(info, images, defaultSettings(), warnings);

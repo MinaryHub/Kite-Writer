@@ -4,13 +4,14 @@
  * 한글은 OLE 개체를 저장할 때 그 개체가 그려 둔 표시 데이터(OlePres000: 클립보드 형식의 그림)를 함께 넣는다.
  * 여기서는 그 가운데 비트맵을 꺼내 BMP 그림으로 돌려준다:
  *  - 그림판 그림 같은 개체의 원본(\x01Ole10Native 의 BMP 파일)
- *  - 표시 데이터가 DIB(CF_DIB) 이거나, 메타파일(CF_METAFILEPICT 의 WMF, CF_ENHMETAFILE 의 EMF) 안에 든 DIB
- * 선·글자로 그린 메타파일(벡터)은 아직 그리지 못한다 (null → 부르는 쪽이 자리 표시를 그린다).
+ *  - 표시 데이터가 DIB(CF_DIB) 이거나, 메타파일(CF_METAFILEPICT 의 WMF, CF_ENHMETAFILE 의 EMF: 선·글자까지 SVG 로 그린다 — metafile.ts)
+ * 꺼내지 못하면 null (부르는 쪽이 자리 표시를 그린다).
  *
  * 문서에서 온 바이트이므로 모든 길이·자리를 범위 안에서만 읽는다.
  */
 import * as CFB from 'cfb';
 import { bytesToDataUrl } from './common';
+import { metafileToSvg } from './metafile';
 
 /** 꺼낼 그림의 크기 상한 (바이트) */
 const MAX_BMP = 64 * 1024 * 1024;
@@ -55,7 +56,7 @@ function dibInfo(d: Uint8Array, o: number, len: number): { hdr: number; pal: num
 }
 
 /** DIB 를 BMP 파일로 (BITMAPFILEHEADER 14 바이트를 앞에) */
-function dibToBmp(d: Uint8Array, o: number, len: number): Uint8Array | null {
+export function dibToBmp(d: Uint8Array, o: number, len: number): Uint8Array | null {
   const info = dibInfo(d, o, len);
   if (!info) return null;
   const body = info.hdr + info.pal + info.bits;
@@ -139,7 +140,7 @@ function dibFromEmf(d: Uint8Array): Uint8Array | null {
 }
 
 /** 표시 데이터 스트림(OlePres000): 클립보드 형식, 대상 장치, 모양, … 크기, 데이터 */
-function fromPresentation(d: Uint8Array): Uint8Array | null {
+function fromPresentation(d: Uint8Array): Uint8Array | string | null {
   let o = 0;
   const marker = u32(d, 0);
   let format = 0;
@@ -160,6 +161,11 @@ function fromPresentation(d: Uint8Array): Uint8Array | null {
   o += 4;
   if (!(size > 0) || o + size > d.length) return null;
   const data = d.subarray(o, o + size);
+  // 메타파일(CF_METAFILEPICT 의 WMF, CF_ENHMETAFILE 의 EMF)은 선·글자까지 그린다 (못 그리면 안에 든 비트맵)
+  if (format === 3 || format === 14) {
+    const svg = metafileToSvg(data);
+    if (svg) return svg;
+  }
   if (format === 8) return dibToBmp(data, 0, data.length); // CF_DIB
   if (format === 3) return dibFromWmf(data); // CF_METAFILEPICT
   if (format === 14) return dibFromEmf(data); // CF_ENHMETAFILE
@@ -200,6 +206,7 @@ export function olePreview(bytes: Uint8Array): string | null {
       const pres = stream(new RegExp(`/\\u0002OlePres00${k}$`));
       if (!pres) continue;
       const bmp = fromPresentation(pres);
+      if (typeof bmp === 'string') return bmp;
       if (bmp) return bytesToDataUrl(bmp, 'image/bmp');
     }
   } catch {

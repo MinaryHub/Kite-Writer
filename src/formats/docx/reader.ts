@@ -30,6 +30,7 @@ import {
 import { assembleTable } from '../hwp/reader';
 import { anchorPlace, adjustValues, arrowOfEnd, colorOf, dashOf, emuPx, presetGeometry, themeColors, type AnchorPlace, type PageGeo } from './drawing';
 import type { Mat, ShapeItem } from '../shape';
+import { isMetafileExt, metafileToSvg } from '../metafile';
 import { naturalLineRatio } from '../fontMetrics';
 
 /** DOCX(Office Open XML) 읽기 */
@@ -402,7 +403,10 @@ class DocxReader {
       if (!f) continue;
       const ext = path.split('.').pop() || '';
       const mime = mimeFromExt(ext);
-      into.set(id, isBrowserImage(mime) ? bytesToDataUrl(await readZipEntry(f, 'uint8array'), mime) : placeholderImage(`그림(${ext.toUpperCase()})`));
+      if (isBrowserImage(mime)) into.set(id, bytesToDataUrl(await readZipEntry(f, 'uint8array'), mime));
+      // 윈도 메타파일(WMF·EMF): 그려서 SVG 로
+      else if (isMetafileExt(ext)) into.set(id, metafileToSvg(await readZipEntry(f, 'uint8array')) || placeholderImage(`그림(${ext.toUpperCase()})`));
+      else into.set(id, placeholderImage(`그림(${ext.toUpperCase()})`));
     }
   }
 

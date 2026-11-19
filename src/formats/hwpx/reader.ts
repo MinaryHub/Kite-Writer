@@ -1,6 +1,7 @@
 import { LineSegStats, cellContentNeed, dropHwpLayout, floatOverhang, indentByBlanks, sideBySide, type FloatHw } from '../hwpLayout';
 import { cleanLook, type PicLook } from '../picLook';
 import { olePreview } from '../olePreview';
+import { isMetafileExt, metafileToSvg } from '../metafile';
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
 import { CELL_VMARGIN_HWP, FLOATING, HwpPageMarks, assembleTable, fitTableLines, placeCaptions, takeFloating, type Caption, type Captions } from '../hwp/reader';
@@ -2282,6 +2283,9 @@ export async function readHwpx(data: Uint8Array): Promise<LoadedDoc> {
     else if (/^ole$/i.test(ext) || /ole/i.test(it.type || '')) {
       // OLE 개체: 개체가 그려 둔 모양(비트맵)을 꺼낸다. 못 꺼내면 자리 표시
       images.set(id, olePreview(await readZipEntry(f, 'uint8array')) || placeholderImage('OLE 개체'));
+    } else if (isMetafileExt(ext)) {
+      // 윈도 메타파일(WMF·EMF): 그려서 SVG 로
+      images.set(id, metafileToSvg(await readZipEntry(f, 'uint8array')) || placeholderImage(`그림(${ext.toUpperCase()})`));
     } else images.set(id, placeholderImage(`그림(${ext.toUpperCase()})`));
   }
 
