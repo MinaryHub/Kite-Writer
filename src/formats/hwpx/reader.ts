@@ -1930,6 +1930,8 @@ export class HwpxConverter {
     const rowH: number[] = [];
     /** 여러 줄을 합친 칸: 첫 줄, 줄 수, 칸 높이(HWPUNIT). 낱칸이 없는 줄의 높이를 여기서 거꾸로 셈한다 */
     const spans: { row: number; rs: number; h: number; need: number }[] = [];
+    /** 줄마다 낱칸 내용이 요구하는 높이(px, 위아래 안 여백 포함): 적힌 칸 높이보다 클 때만 */
+    const rowNeed: number[] = [];
     /** 표의 기본 안 여백 [왼, 오른, 위, 아래] (HWPUNIT) */
     const inM0 = kid(tbl, 'inMargin');
     const tblMargin = inM0 ? ['left', 'right', 'top', 'bottom'].map((k) => numAttr(inM0, k, k === 'top' || k === 'bottom' ? 141 : 510)) : [510, 510, 141, 141];
@@ -1961,9 +1963,11 @@ export class HwpxConverter {
         const objNeed = this.cellObjectsBottom(sub);
         const objPx = objNeed > 0 ? hwpToPx(objNeed + cmv[2] + cmv[3]) : 0;
         if (rs === 1 && objPx > 0) rowH[row] = Math.max(rowH[row] || 0, objPx - hwpToPx(CELL_VMARGIN_HWP));
-        if (rs > 1) {
+        {
           const need = Math.max(cellContentNeed(content, hwpToPx(numAttr(sz, 'height', 0)), hwpToPx(cmv[2] + cmv[3])), objPx > hwpToPx(numAttr(sz, 'height', 0)) + 1 ? objPx : 0);
-          if (need > 0) spans[spans.length - 1].need = need;
+          if (rs > 1 && need > 0) spans[spans.length - 1].need = need;
+          // 낱칸의 내용 높이: 합친 칸이 덮은 줄의 실제 높이를 셈할 때 쓴다
+          else if (rs === 1 && need > 0) rowNeed[row] = Math.max(rowNeed[row] || 0, need);
         }
         const va = attr(sub, 'vertAlign');
         const attrs: Record<string, any> = { colspan: cs, rowspan: rs, colwidth: null };
@@ -1977,7 +1981,7 @@ export class HwpxConverter {
         if (va === 'TOP') attrs.verticalAlign = 'top';
         else if (va === 'BOTTOM') attrs.verticalAlign = 'bottom';
         // 칸 자체 여백, 또는 표의 기본 안 여백이 위·아래 0.5mm 가 아닐 때 (화면의 기본 위·아래 여백은 0.5mm)
-        if (ownMargin || Math.abs(tblMargin[2] - 141) > 2 || Math.abs(tblMargin[3] - 141) > 2) attrs.margins = cmv.map((v) => Math.round(hwpToPx(v) * 10) / 10);
+        if (ownMargin || Math.abs(tblMargin[2] - 141) > 2 || Math.abs(tblMargin[3] - 141) > 2) attrs.margins = cmv.map((v) => Math.round(hwpToPx(v) * 100) / 100);
         // 제목 칸이고 표가 제목 줄을 되풀이하면 제목 칸으로 (쪽이 바뀌면 되풀이된다)
         const head = attr(tbl, 'repeatHeader') === '1' && attr(tc, 'header') === '1';
         cells.push({ row, col, cs, rs, w, node: { type: head ? 'tableHeader' : 'tableCell', attrs, content } });
@@ -2036,17 +2040,21 @@ export class HwpxConverter {
       }
       if (!found) break;
     }
-    // 합친 칸의 내용이 덮은 줄들의 높이보다 크면 한글은 합친 마지막 줄을 늘린다 (브라우저는 줄마다 나눠 늘려 다른 칸이 커진다)
+    // 합친 칸의 내용이 덮은 줄들의 높이보다 크면 한글은 합친 마지막 줄을 늘린다 (브라우저는 줄마다 나눠 늘려 다른 칸이 커진다).
+    // 덮은 줄의 높이는 실제로 그려질 높이: 적힌 칸 높이와 그 줄 낱칸들의 내용 높이 가운데 큰 값
+    // (적힌 높이만 더하면 모자람을 크게 셈해 줄이 너무 늘었다: 31줄 표가 한글보다 40px 넘게 길어 쪽을 넘었다)
+    const vm = hwpToPx(CELL_VMARGIN_HWP);
+    const eff = (r: number) => Math.max(rowH[r] + vm, rowNeed[r] || 0);
     for (const sp of spans) {
       if (!(sp.need > 0)) continue;
       let sum = 0;
       let all = true;
       for (let r = sp.row; r < sp.row + sp.rs; r++) {
         if (rowH[r] == null) all = false;
-        else sum += rowH[r] + hwpToPx(CELL_VMARGIN_HWP);
+        else sum += eff(r);
       }
       const lastRow = sp.row + sp.rs - 1;
-      if (all && sp.need > sum + 1) rowH[lastRow] += sp.need - sum;
+      if (all && sp.need > sum + 1) rowH[lastRow] = eff(lastRow) - vm + (sp.need - sum);
     }
     const t = assembleTable(cells, rowCnt, numAttr(tbl, 'colCnt', 0), hwpToPx(numAttr(kid(tbl, 'sz'), 'width', 0)), rowH);
     const rows = t.content!;

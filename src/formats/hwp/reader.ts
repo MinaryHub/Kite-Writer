@@ -974,6 +974,8 @@ class HwpConverter {
     const rowH: number[] = [];
     /** 여러 줄을 합친 칸: 첫 줄, 줄 수, 칸 높이(px), 내용이 요구하는 높이(px) */
     const spans: { row: number; rs: number; h: number; need: number }[] = [];
+    /** 줄마다 낱칸 내용이 요구하는 높이(px, 위아래 안 여백 포함): 적힌 칸 높이보다 클 때만 */
+    const rowNeed: number[] = [];
     const VM = hwpToPx(CELL_VMARGIN_HWP);
     let cur: { lh: Rec; paras: Rec[] } | null = null;
     const finish = () => {
@@ -1002,6 +1004,8 @@ class HwpConverter {
       if (rs === 1 && objPx > 0) rowH[row] = Math.max(rowH[row] || 0, objPx - VM);
       const need = Math.max(cellContentNeed(content, hwpToPx(u32(lh, 20)), cellVm), objPx > hwpToPx(u32(lh, 20)) + 1 ? objPx : 0);
       if (rs > 1) spans.push({ row, rs, h: hwpToPx(u32(lh, 20)), need });
+      // 낱칸의 내용 높이: 합친 칸이 덮은 줄의 실제 높이를 셈할 때 쓴다
+      else if (need > 0) rowNeed[row] = Math.max(rowNeed[row] || 0, need);
       const va = (attrVal >>> 21) & 3;
       const attrs: Record<string, any> = { colspan: cs, rowspan: rs, colwidth: null };
       if (bf?.bg) attrs.backgroundColor = bf.bg;
@@ -1012,7 +1016,7 @@ class HwpConverter {
       if (fillSrc && bf?.img) attrs.bgImages = [{ src: fillSrc, fit: imgFillFit(bf.img.mode) }];
       // 칸 자체 안 여백 (속성 뒤 2바이트의 bit 0 이 켜진 칸만; 아니면 표의 기본 여백)
       // (표의 기본 안 여백이 위·아래 0.5mm 가 아닐 때도 넣는다: 화면의 기본 위·아래 여백은 0.5mm)
-      if (ownMargin || Math.abs(cmv[2] - 141) > 2 || Math.abs(cmv[3] - 141) > 2) attrs.margins = cmv.map((v) => Math.round(hwpToPx(v) * 10) / 10);
+      if (ownMargin || Math.abs(cmv[2] - 141) > 2 || Math.abs(cmv[3] - 141) > 2) attrs.margins = cmv.map((v) => Math.round(hwpToPx(v) * 100) / 100);
       if (va === 0) attrs.verticalAlign = 'top';
       else if (va === 2) attrs.verticalAlign = 'bottom';
       // 제목 칸(속성 뒤 2바이트의 bit 2)이고 표가 '제목 줄 자동 반복'(표 속성 bit 2)이면 제목 칸으로: 쪽이 바뀌면 되풀이된다
@@ -1044,7 +1048,7 @@ class HwpConverter {
     finish();
     const nColsDecl = tbl ? u16(tbl, 6) : 0;
     // 합친 칸으로만 덮인 줄의 높이, 내용이 넘치는 합친 칸의 마지막 줄
-    solveSpanRows(rowH, spans, VM);
+    solveSpanRows(rowH, spans, VM, rowNeed);
     const t = assembleTable(cells, nRowsDecl, nColsDecl, hwpToPx(u32(ctrl, 16)), rowH);
     if (tbl) t.attrs = { cellPadding: Math.round(hwpToPx((u16(tbl, 10) + u16(tbl, 12)) / 2) * 10) / 10 };
     // 한글이 적어 둔 표 높이 (px, 쪽에 걸친 표는 첫 쪽 몫). 문서 노드에는 없는 값: 견주기 도구가 읽는다
@@ -1626,7 +1630,7 @@ export function assembleTable(
     .map((r) => {
       const h = rowHeights[keptRows[r]];
       const row: JNode = { type: 'tableRow', content: byRow.get(r)!.sort((a, b) => a.col - b.col).map((c) => c.node) };
-      if (h && h > 0 && h < 3000) row.attrs = { height: Math.round(h * 10) / 10 };
+      if (h && h > 0 && h < 3000) row.attrs = { height: Math.round(h * 100) / 100 };
       return row;
     });
   const nCols = Math.max(1, ...cells.map((c) => c.col + c.cs));

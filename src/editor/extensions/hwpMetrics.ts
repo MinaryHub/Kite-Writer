@@ -313,7 +313,7 @@ function decosIn(doc: PMNode, from: number, to: number, out: Decoration[]) {
     // (범위에 통째로 든 줄만: 일부만 다시 할 때 같은 줄에 겹쳐 달지 않게)
     if (node.type.name === 'tableRow') {
       const h = +node.attrs?.height;
-      if (h > 0 && pos >= from && pos + node.nodeSize <= to) out.push(Decoration.node(pos, pos + node.nodeSize, { style: `height: ${(h + CELL_VMARGIN_PX).toFixed(1)}px; --row-h: ${(h + CELL_VMARGIN_PX).toFixed(1)}px` }));
+      if (h > 0 && pos >= from && pos + node.nodeSize <= to) out.push(Decoration.node(pos, pos + node.nodeSize, { style: `height: ${(h + CELL_VMARGIN_PX).toFixed(2)}px; --row-h: ${(h + CELL_VMARGIN_PX).toFixed(2)}px` }));
       return true;
     }
     if (!node.isTextblock) return true;

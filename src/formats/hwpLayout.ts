@@ -431,7 +431,7 @@ export function cellContentNeed(content: JNode[], cellHeightPx: number, vMarginP
  * 표 줄 높이 마무리 (rowH: 줄마다 '칸 높이 - 위아래 안 여백' px, 낱칸에서 읽은 것).
  * 합친 칸으로만 덮인 줄의 높이를 거꾸로 셈하고, 합친 칸의 내용이 덮은 줄들보다 크면 마지막 줄을 늘린다
  */
-export function solveSpanRows(rowH: number[], spans: { row: number; rs: number; h: number; need: number }[], vMarginPx: number) {
+export function solveSpanRows(rowH: number[], spans: { row: number; rs: number; h: number; need: number }[], vMarginPx: number, rowNeed: number[] = []) {
   for (let pass = 0; pass < spans.length + 1; pass++) {
     let found = false;
     for (const sp of spans) {
@@ -450,15 +450,19 @@ export function solveSpanRows(rowH: number[], spans: { row: number; rs: number; 
     }
     if (!found) break;
   }
+  // 합친 칸의 내용이 덮은 줄들보다 크면 합친 마지막 줄을 늘린다. 덮은 줄의 높이는 실제로 그려질 높이:
+  // 적힌 칸 높이와 그 줄 낱칸들의 내용 높이(rowNeed) 가운데 큰 값 (적힌 높이만 더하면 모자람을 크게 셈해 줄이 너무 늘었다)
+  const eff = (r: number) => Math.max(rowH[r] + vMarginPx, rowNeed[r] || 0);
   for (const sp of spans) {
     if (!(sp.need > 0)) continue;
     let sum = 0;
     let all = true;
     for (let r = sp.row; r < sp.row + sp.rs; r++) {
       if (rowH[r] == null) all = false;
-      else sum += rowH[r] + vMarginPx;
+      else sum += eff(r);
     }
-    if (all && sp.need > sum + 1) rowH[sp.row + sp.rs - 1] += sp.need - sum;
+    const last = sp.row + sp.rs - 1;
+    if (all && sp.need > sum + 1) rowH[last] = eff(last) - vMarginPx + (sp.need - sum);
   }
 }
 
