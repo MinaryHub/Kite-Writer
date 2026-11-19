@@ -307,7 +307,8 @@ export function repeatHeadsHtml(tab: DocTab, g: PageGeom, k: number): string {
     const clone = table.cloneNode(true) as HTMLElement;
     let head = true;
     clone.querySelectorAll(':scope > tbody > tr').forEach((tr) => {
-      if (head && tr.children.length && Array.from(tr.children).every((c) => c.tagName === 'TH')) return;
+      // 제목 줄: 제목 칸으로만 된 줄, 또는 되풀이로 표시한 줄 (Word 의 tblHeader)
+      if (head && tr.children.length && (tr.getAttribute('data-repeat') === '1' || Array.from(tr.children).every((c) => c.tagName === 'TH'))) return;
       head = false;
       tr.remove();
     });
@@ -473,7 +474,8 @@ export function printPlans(tab: DocTab): PagePlan[] {
 export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: PageBox[], pageCount: number): HTMLElement {
   const g = plan.g;
   const page = document.createElement('div');
-  page.className = 'print-page';
+  // 한글 문서의 쪽 (투명 선이 자리를 차지하는 그리기 규칙을 머리말·꼬리말까지 지킨다: editor.css)
+  page.className = 'print-page' + (tab.settings.hwpMetrics ? ' hwp-page' : '');
   page.style.width = `${g.wMm}mm`;
   page.style.height = `${g.hMm}mm`;
   // 인쇄 용지 크기: 쪽마다 이름 붙은 @page (withPrintRoot)

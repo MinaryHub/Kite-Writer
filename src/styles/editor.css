@@ -229,6 +229,25 @@
   border: 1px dotted var(--k-transparent-line, #c9c9f4);
 }
 .hide-transparent .kdoc-content { --k-transparent-line: transparent; }
+/*
+ * 한글 문서가 아닌 것(Word 등): 선 없는 칸의 '투명 선'은 Word 의 눈금선처럼 자리를 차지하지 않는다.
+ * 테두리 폭은 0 으로 두고 점선은 칸 위에 얹어 그린다 (한글 문서는 한글이 적어 둔 칸 크기에 맞춰 그대로 1px)
+ */
+:is(.workspace:not(.hwp-metrics), .print-page:not(.hwp-page)) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='l'] { border-left-width: 0; }
+:is(.workspace:not(.hwp-metrics), .print-page:not(.hwp-page)) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='r'] { border-right-width: 0; }
+:is(.workspace:not(.hwp-metrics), .print-page:not(.hwp-page)) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='t'] { border-top-width: 0; }
+:is(.workspace:not(.hwp-metrics), .print-page:not(.hwp-page)) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='b'] { border-bottom-width: 0; }
+.workspace:not(.hwp-metrics) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border]:not([data-diag])::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 0 dotted var(--k-transparent-line, #c9c9f4);
+}
+.workspace:not(.hwp-metrics) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='l']:not([data-diag])::before { border-left-width: 1px; }
+.workspace:not(.hwp-metrics) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='r']:not([data-diag])::before { border-right-width: 1px; }
+.workspace:not(.hwp-metrics) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='t']:not([data-diag])::before { border-top-width: 1px; }
+.workspace:not(.hwp-metrics) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='b']:not([data-diag])::before { border-bottom-width: 1px; }
 
 .kdoc-content .selectedCell::after {
   content: '';
@@ -764,6 +783,15 @@
 /* 떠 있는 그림·도형이 든 문단은 그 개체의 자리 기준이 된다 (Word 문서 등 한글 문서가 아닌 것: 한글 문서는 모든 문단이 기준) */
 .kdoc-content :is(p, h1, h2, h3, h4, h5, h6):has(.k-float) {
   position: relative;
+}
+/* Word 문서: 표 칸 안 안쪽 표 뒤의 마지막 빈 문단은 그리지 않는다 (Word 와 같이. 커서가 들어가면 나타난다) */
+p[data-cell-tail]:is(:empty, :has(> br:only-child)):not(.k-caret-here) {
+  height: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  overflow: hidden;
 }
 /* 떠 있는 개체 둘레로 글이 비켜 가는 자리 (floatWrap): 보이지 않고 누르거나 고를 수 없다 */
 .kdoc-content .k-wrap-x {

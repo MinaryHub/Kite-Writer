@@ -187,6 +187,8 @@ export interface FlatTable extends FlatColumnBreak {
   rowHeightsPx: (number | null)[];
   /** 쪽 경계에서 나누는 방식: 없으면 나눔, row 셀 단위로 나눔, none 나누지 않음 */
   pageSplit?: 'row' | 'none' | null;
+  /** 칸 사이 간격 (px) */
+  cellSpacingPx?: number | null;
 }
 
 /** 글상자 (도형 안의 문단들) */
@@ -647,6 +649,12 @@ export function flattenContent(nodes: JNode[]): FlatBlock[] {
   return flattenBlocks(nodes, { indent: 0, baseChar: defaultChar(), quote: false, mono: false });
 }
 
+/** 칸 사이 간격 값 검사 (px, 없으면 null) */
+const cellSpacingOf = (v: unknown): number | null => {
+  const n = Number(v);
+  return n > 0 && n <= 50 ? n : null;
+};
+
 function flattenTable(n: JNode, ctx: Ctx): FlatTable {
   const rowsJ = n.content || [];
   const occupied: boolean[][] = [];
@@ -678,7 +686,7 @@ function flattenTable(n: JNode, ctx: Ctx): FlatTable {
         noBorders: cell.attrs?.borderStyle ? String(cell.attrs.borderStyle).split(/\s+/).filter(Boolean) : [],
         borderCss: cell.attrs?.borderCss || null,
         blocks: flattenBlocks(cell.content || [], { ...ctx, indent: 0 }),
-        header: cell.type === 'tableHeader',
+        header: cell.type === 'tableHeader' || row.attrs?.repeat === true,
         marginsPx: cleanMargins(cell.attrs?.margins),
       };
       cellWidths.set(fc, cw);
@@ -706,5 +714,5 @@ function flattenTable(n: JNode, ctx: Ctx): FlatTable {
   for (const row of cells) for (const cell of row) if (!cell.widthPx) cell.widthPx = colWidthsPx.slice(cell.col, cell.col + cell.colspan).reduce((a, b) => a + b, 0);
   const cellPadPx = n.attrs?.cellPadding != null ? +n.attrs.cellPadding : 6.8;
   const rowHeightsPx = rowsJ.map((r) => ((r.attrs?.height ?? 0) > 0 ? +r.attrs!.height : null));
-  return { kind: 'table', rows: rowsJ.length, cols: maxCols, colWidthsPx, cells, pageBreakBefore: false, align: n.attrs?.align || 'left', cellPadPx, rowHeightsPx, outMarginPx: cleanMargins(n.attrs?.outMargin), inline: n.attrs?.inline === true, pageSplit: n.attrs?.pageSplit === 'row' || n.attrs?.pageSplit === 'none' ? n.attrs.pageSplit : null };
+  return { kind: 'table', rows: rowsJ.length, cols: maxCols, colWidthsPx, cells, pageBreakBefore: false, align: n.attrs?.align || 'left', cellPadPx, rowHeightsPx, outMarginPx: cleanMargins(n.attrs?.outMargin), inline: n.attrs?.inline === true, pageSplit: n.attrs?.pageSplit === 'row' || n.attrs?.pageSplit === 'none' ? n.attrs.pageSplit : null, cellSpacingPx: cellSpacingOf(n.attrs?.cellSpacing) };
 }

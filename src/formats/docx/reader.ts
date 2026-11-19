@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import type { DocMeta, HeaderFooter, LoadedDoc, PageBorder, PageBorderSide } from '../../types';
+import type { DocMeta, HeaderFooter, LoadedDoc, PageBorder, PageBorderSide, PageSetup } from '../../types';
 import {
   type FloatWrap,
   type JMark,
@@ -174,6 +174,12 @@ class DocxReader {
   hdrTop = 48;
   /** 쪽 배경을 보인다 (settings 의 displayBackgroundShape) */
   showBackground = false;
+  /** 본문의 구역 설정들 (문서 순서: 문단 안의 것들과 본문 끝의 것). 구역이 둘 이상이면 구역 사이에 쪽 나누기를 넣는다 */
+  sections: Element[] = [];
+  /** 본문 요소 (구역 나누기는 본문의 문단에만 있다) */
+  bodyEl: Element | null = null;
+  /** 지금 구역의 용지 (다음 구역 용지의 바탕) */
+  private secPage: PageSetup | null = null;
   /** 지금 읽는 머리말·꼬리말 */
   private hfKind: 'header' | 'footer' | null = null;
   /** 줄 격자 간격 (pt). 구역의 docGrid 가 type=lines·linesAndChars 일 때만 */
@@ -761,6 +767,22 @@ class DocxReader {
           out.push(...res.after);
           const last = [...res.blocks].reverse().find((b) => b.node.type === 'paragraph')?.node;
           prev = last && !res.after.length ? { node: last, style: res.style, contextual: res.contextual } : null;
+          // 구역 나누기: 이 문단으로 구역이 끝난다. 다음 구역이 새 쪽에서 시작하면(이어지는 구역이 아니면) 그 구역의 용지를 담은 쪽 나누기
+          const sp = container === this.bodyEl && this.sections.length > 1 ? kid(kid(el, 'pPr'), 'sectPr') : null;
+          if (sp) {
+            const k = this.sections.indexOf(sp);
+            const next = k >= 0 ? this.sections[k + 1] : undefined;
+            if (next) {
+              const base = this.secPage || this.settings.page;
+              const page = this.pageSetupOf(next, base);
+              this.secPage = page;
+              this.setGeo(next);
+              if ((attr(kid(next, 'type'), 'val') || 'nextPage') !== 'continuous') {
+                out.push({ type: 'pageBreak', attrs: { sectionPage: page } });
+                prev = null;
+              }
+            }
+          }
         } else if (name === 'tbl') {
           prev = null;
           out.push(this.convertTable(el));
@@ -1364,9 +1386,12 @@ class DocxReader {
     this.tableStyles.push(styleChain);
     let rowIdx = 0;
     const rowH: number[] = [];
+    /** 맨 앞에서부터 이어진 제목 줄(tblHeader) 수: 쪽마다 되풀이한다 */
+    let headRows = 0;
     for (const tr of kids(tbl, 'tr')) {
       let col = 0;
       const trPr = kid(tr, 'trPr');
+      if (headRows === rowIdx && onOff(kid(trPr, 'tblHeader')) === true) headRows++;
       const trH = kid(trPr, 'trHeight');
       // 정확한 높이(exact)와 최소 높이(atLeast) 모두 최소 높이로 쓴다
       if (trH && attr(trH, 'hRule') !== 'auto') rowH[rowIdx] = parseFloat(attr(trH, 'val') || '0') / 15 || 0;
@@ -1391,6 +1416,11 @@ class DocxReader {
         }
         let content = this.convertBody(tcEl).filter((n) => n.type !== 'pageBreak');
         if (!content.length) content = [paragraph()];
+        // 안쪽 표 바로 뒤의 마지막 빈 문단: 칸이 문단으로 끝나야 해서 있는 것으로, Word 는 그리지 않는다 (커서가 들어가면 나타난다 — editor.css)
+        const tail = content[content.length - 1];
+        if (content.length > 1 && content[content.length - 2].type === 'table' && tail.type === 'paragraph' && (tail.content || []).every((c) => c.type === 'text' && !c.text)) {
+          tail.attrs = { ...tail.attrs, cellTail: true };
+        }
         const attrs: Record<string, any> = { colspan: span, rowspan: 1, colwidth: null };
         const shd = normColor(attr(kid(tcPr, 'shd'), 'fill'));
         if (shd && shd !== '#FFFFFF') attrs.backgroundColor = shd;
@@ -1430,9 +1460,17 @@ class DocxReader {
     this.tableStyles.pop();
     // 그리드 기반 열 너비를 우선 사용
     const t = assembleTable(cells, rowIdx, 0, 0, rowH);
-    if (grid.length && grid.every((g) => g > 0)) {
+    // 제목 줄: 표가 다음 쪽으로 이어지면 그 쪽 맨 위에 되풀이한다 (칸 모양은 그대로)
+    if (headRows && headRows < (t.content || []).length) for (const r of (t.content || []).slice(0, headRows)) r.attrs = { ...r.attrs, repeat: true };
+    // 격자 폭을 그대로 쓴다. 단 아주 좁은 격자 열을 이웃에 합쳤으면(열 번호가 바뀐다) 합친 폭(assembleTable 이 정한 것)을 둔다
+    const nColsOut = cells.reduce((m, c) => Math.max(m, c.col + c.cs), 0);
+    if (grid.length && grid.every((g) => g > 0) && nColsOut === grid.length) {
       for (const c of cells) c.node.attrs!.colwidth = grid.slice(c.col, c.col + c.cs);
     }
+    // 셀 간격: Word 는 적힌 값의 두 배를 칸 사이에 둔다 (HTML 표의 cellspacing="2" 가 15 twip 으로 적힌다)
+    const csp = kid(tblPr, 'tblCellSpacing');
+    const cspTw = csp && attr(csp, 'type') !== 'nil' ? parseFloat(attr(csp, 'w') || '0') : 0;
+    if (cspTw > 0) t.attrs = { ...t.attrs, cellSpacing: Math.min(50, Math.round(((cspTw * 2) / 15) * 100) / 100) };
     if (tblAlign === 'center' || tblAlign === 'right') t.attrs = { ...t.attrs, align: tblAlign };
     else {
       // 예전 호환 모드의 Word 는 칸 안의 글이 본문 왼쪽 끝(+ 들여쓰기)에 맞도록 표를 왼쪽 안 여백만큼 본문 밖으로 내어 놓는다.
@@ -1527,9 +1565,13 @@ class DocxReader {
     this.hdrTop = Math.min(tw(mar, 'header', 720), this.geo.mt);
   }
 
-  async applySection(sectPr: Element | null) {
-    if (!sectPr) return;
-    const pg = this.settings.page;
+  /**
+   * 구역 설정(w:sectPr)의 용지: 크기·방향·여백(Word 의 위·아래 여백과 머리말·꼬리말 거리를 Kite 의 여백으로)·다단.
+   * 적히지 않은 값은 base 의 것
+   */
+  pageSetupOf(sectPr: Element, base: PageSetup): PageSetup {
+    const pg: PageSetup = { ...base };
+    delete pg.columns;
     const sz = kid(sectPr, 'pgSz');
     if (sz) {
       const w = twipToMm(parseFloat(attr(sz, 'w') || '11906'));
@@ -1557,7 +1599,7 @@ class DocxReader {
     const cols = kid(sectPr, 'cols');
     const n = cols ? Math.round(parseFloat(attr(cols, 'num') || '1')) : 1;
     if (cols && n > 1) {
-      const c: NonNullable<typeof pg.columns> = { count: Math.min(20, n), gap: round(twipToMm(parseFloat(attr(cols, 'space') || '720')), 2) };
+      const c: NonNullable<PageSetup['columns']> = { count: Math.min(20, n), gap: round(twipToMm(parseFloat(attr(cols, 'space') || '720')), 2) };
       const each = kids(cols, 'col');
       if (attr(cols, 'equalWidth') === '0' && each.length === c.count) {
         c.widths = each.map((e) => round(twipToMm(parseFloat(attr(e, 'w') || '0')), 2));
@@ -1570,6 +1612,17 @@ class DocxReader {
       }
       if (attr(cols, 'sep') === '1' || attr(cols, 'sep') === 'true') c.line = { w: 0.12, c: '#000000', s: 'solid' };
       pg.columns = c;
+    }
+    return pg;
+  }
+
+  async applySection(sectPr: Element | null) {
+    if (!sectPr) return;
+    const keepCols = this.settings.page.columns;
+    Object.assign(this.settings.page, this.pageSetupOf(sectPr, this.settings.page));
+    if (!this.settings.page.columns) {
+      if (keepCols) this.settings.page.columns = keepCols;
+      else delete this.settings.page.columns;
     }
     // 쪽 테두리 (w:pgBorders): 선으로 된 것만 (그림 테두리 — mapleMuffins 같은 — 는 그릴 수 없어 뺀다)
     const pgb = kid(sectPr, 'pgBorders');
@@ -1766,9 +1819,20 @@ export async function readDocx(data: Uint8Array): Promise<LoadedDoc> {
   // 줄 격자: 문단의 줄 높이를 셈할 때 쓰므로 본문보다 먼저 읽는다
   const grid = kid(sectPr, 'docGrid');
   if (grid && /^(lines|linesAndChars|snapToChars)$/.test(attr(grid, 'type') || '')) reader.gridPt = Math.max(0, Math.min(200, parseFloat(attr(grid, 'linePitch') || '0') / 20)) || 0;
-  reader.setGeo(sectPr);
+  // 구역들: 문단 안의 구역 설정(본문의 문단에만 있다)과 본문 끝의 것
+  const sections = body
+    ? [...kids(body, 'p').map((p) => kid(kid(p, 'pPr'), 'sectPr')).filter((x): x is Element => !!x), ...(sectPr && kid(body, 'sectPr') === sectPr ? [sectPr] : [])]
+    : [];
+  reader.sections = sections;
+  reader.bodyEl = body;
+  reader.setGeo(sections[0] || sectPr);
   const blocks = body ? reader.convertBody(body) : [];
   await reader.applySection(sectPr);
+  // 구역이 여럿이면 문서의 용지는 첫 구역의 것 (뒤 구역들의 용지는 구역 나누기에 담았다). 머리말·꼬리말은 끝 구역의 것
+  if (sections.length > 1) {
+    const first = reader.pageSetupOf(sections[0], reader.settings.page);
+    reader.settings.page = first;
+  }
   reader.applyBackground(doc);
   const meta: DocMeta = {};
   const core = await readZipEntry(zip.file('docProps/core.xml'), 'string');

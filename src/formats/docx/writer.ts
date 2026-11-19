@@ -233,6 +233,8 @@ function tableXml(ctx: Ctx, t: FlatTable): string {
   const colTw = t.colWidthsPx.map((w) => Math.max(100, Math.round(w * 15 * scale)));
   const totalTw = colTw.reduce((a, b) => a + b, 0);
   let x = `<w:tbl><w:tblPr><w:tblW w:w="${totalTw}" w:type="dxa"/>${t.align !== 'left' ? `<w:jc w:val="${t.align}"/>` : ''}`;
+  // 셀 간격: 칸 사이 간격의 절반을 적는다 (Word 와 같이)
+  if (t.cellSpacingPx) x += `<w:tblCellSpacing w:w="${Math.max(1, Math.round((t.cellSpacingPx * 15) / 2))}" w:type="dxa"/>`;
   x += '<w:tblBorders>' + ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map((s) => `<w:${s} w:val="single" w:sz="4" w:space="0" w:color="000000"/>`).join('') + '</w:tblBorders>';
   x += `<w:tblLayout w:type="fixed"/><w:tblCellMar><w:top w:w="28" w:type="dxa"/><w:left w:w="${Math.round(t.cellPadPx * 15)}" w:type="dxa"/><w:bottom w:w="28" w:type="dxa"/><w:right w:w="${Math.round(t.cellPadPx * 15)}" w:type="dxa"/></w:tblCellMar>`;
   x += '<w:tblLook w:val="0000" w:firstRow="0" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="0" w:noVBand="0"/></w:tblPr>';
@@ -240,6 +242,7 @@ function tableXml(ctx: Ctx, t: FlatTable): string {
   // 세로 병합: 각 줄에 이어지는 셀 자리 표시
   const cont: { row: number; col: number; cell: (typeof t.cells)[0][0] }[] = [];
   for (const row of t.cells) for (const c of row) for (let r = 1; r < c.rowspan; r++) cont.push({ row: c.row + r, col: c.col, cell: c });
+  let headRun = 0;
   t.cells.forEach((row, ri) => {
     const entries: { col: number; xml: string }[] = [];
     const tcPr = (c: (typeof t.cells)[0][0], merge: string) => {
@@ -274,7 +277,9 @@ function tableXml(ctx: Ctx, t: FlatTable): string {
     for (const k of cont.filter((x) => x.row === ri)) entries.push({ col: k.col, xml: `<w:tc>${tcPr(k.cell, '<w:vMerge/>')}<w:p/></w:tc>` });
     entries.sort((a, b) => a.col - b.col);
     const rh = t.rowHeightsPx?.[ri];
-    const trPr = (ri === 0 && row.some((c) => c.header) ? '<w:tblHeader/>' : '') + (rh ? `<w:trHeight w:val="${Math.round(rh * 15)}" w:hRule="atLeast"/>` : '');
+    // 제목 줄: 맨 앞에서부터 이어진, 제목 칸으로만 된 줄들 (Word 는 쪽마다 되풀이한다)
+    if (ri === headRun && row.length && row.every((c) => c.header)) headRun++;
+    const trPr = (ri < headRun ? '<w:tblHeader/>' : '') + (rh ? `<w:trHeight w:val="${Math.round(rh * 15)}" w:hRule="atLeast"/>` : '');
     x += '<w:tr>' + (trPr ? `<w:trPr>${trPr}</w:trPr>` : '') + entries.map((e) => e.xml).join('') + '</w:tr>';
   });
   x += '</w:tbl>';

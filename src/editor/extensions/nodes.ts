@@ -898,6 +898,12 @@ export const KTableRow = TableRow.extend({
         },
         renderHTML: (a: Record<string, any>) => (a.height ? { style: `height: ${a.height}px; --row-h: ${a.height}px` } : {}),
       },
+      // 제목 줄 되풀이 (Word 의 tblHeader): 표가 다음 쪽으로 이어지면 쪽 맨 위에 다시 그린다. 칸 모양은 보통 칸 그대로
+      repeat: {
+        default: null,
+        parseHTML: (el: HTMLElement) => (el.getAttribute('data-repeat') === '1' ? true : null),
+        renderHTML: (a: Record<string, any>) => (a.repeat === true ? { 'data-repeat': '1' } : {}),
+      },
     };
   },
 });
@@ -944,6 +950,10 @@ class KTableView extends TableView {
     else t.removeAttribute('data-tight');
     if (node.attrs.cellPadding != null) t.style.setProperty('--cell-px', node.attrs.cellPadding + 'px');
     else t.style.removeProperty('--cell-px');
+    // 칸 사이 간격 (Word 의 셀 간격): 칸마다 제 테두리를 따로 그린다
+    const sp = +node.attrs.cellSpacing;
+    t.style.borderCollapse = sp > 0 && sp <= 50 ? 'separate' : '';
+    t.style.borderSpacing = sp > 0 && sp <= 50 ? sp + 'px' : '';
     const align = node.attrs.align;
     const indent = typeof node.attrs.indent === 'number' && isFinite(node.attrs.indent) ? Math.max(-200, Math.min(400, node.attrs.indent)) : 0;
     // 한글 표의 바깥 여백 [왼, 오른, 위, 아래]: 위·아래는 그대로 띄우고, 왼쪽은 정렬이 없을 때만 (가운데·오른쪽은 auto 가 자리를 정한다)
@@ -1030,6 +1040,18 @@ export const KTable = Table.extend({
         default: false,
         parseHTML: (el: HTMLElement) => el.getAttribute('data-borderless') === 'true',
         renderHTML: (a: Record<string, any>) => (a.borderless ? { 'data-borderless': 'true' } : {}),
+      },
+      /** 칸 사이 간격 (px): 칸마다 제 테두리를 따로 그리고 이웃한 칸·표 가장자리와 이만큼 띄운다 (Word 의 '셀 간격', HTML 의 cellspacing) */
+      cellSpacing: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          const v = parseFloat(el.getAttribute('data-cell-spacing') || '');
+          return v > 0 && v <= 50 ? v : null;
+        },
+        renderHTML: (a: Record<string, any>) => {
+          const v = +a.cellSpacing;
+          return v > 0 && v <= 50 ? { 'data-cell-spacing': String(v), style: `border-collapse: separate; border-spacing: ${v}px` } : {};
+        },
       },
       /** 칸 위아래 안 여백 없음 (PDF 에서 나란한 상자들을 담는 배치용 표) */
       tight: {

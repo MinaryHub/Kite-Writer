@@ -1,5 +1,6 @@
 import { Extension } from '@tiptap/core';
-import type { EditorState } from '@tiptap/pm/state';
+import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state';
+import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { cssToPt, normLineHeight, r2 } from '../cssUnits';
 import { cleanPageHide, cleanParaBorder, normColor } from '../../formats/common';
@@ -263,6 +264,34 @@ export const ParagraphFormat = Extension.create({
           },
         },
       },
+      {
+        // Word 문서: 표 칸 안에서 안쪽 표 바로 뒤에 오는 마지막 빈 문단. Word 처럼 비어 있는 동안은 그리지 않는다 (editor.css, 커서가 들어가면 나타난다: CellTail)
+        types: ['paragraph'],
+        attributes: {
+          cellTail: {
+            default: null,
+            parseHTML: (el: HTMLElement) => (el.getAttribute('data-cell-tail') === '1' ? true : null),
+            renderHTML: (attrs: Record<string, any>) => (attrs.cellTail === true ? { 'data-cell-tail': '1' } : {}),
+          },
+        },
+      },
+    ];
+  },
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey('cellTailCaret'),
+        props: {
+          // 숨겨 둔 칸 끝 빈 문단(cellTail)에 커서가 들어가면 보이게 한다 (Word 와 같이)
+          decorations(state) {
+            const { $from, empty } = state.selection;
+            if (!empty || $from.depth < 1 || $from.parent.attrs.cellTail !== true) return null;
+            const pos = $from.before();
+            return DecorationSet.create(state.doc, [Decoration.node(pos, pos + $from.parent.nodeSize, { class: 'k-caret-here' })]);
+          },
+        },
+      }),
     ];
   },
 

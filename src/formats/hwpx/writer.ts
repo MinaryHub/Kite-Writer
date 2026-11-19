@@ -428,7 +428,7 @@ class SectionWriter {
     const rowHs = Array.from({ length: t.rows }, (_, i) => (t.rowHeightsPx?.[i] ? Math.max(283, pxToHwp(t.rowHeightsPx[i]!) + 282) : 1000));
     const spanH = (r: number, n: number) => rowHs.slice(r, r + n).reduce((a, b) => a + b, 0);
     const id = nextId();
-    let xml = `<hp:tbl id="${id}" zOrder="${this.zOrder++}" numberingType="TABLE" textWrap="${pl ? pl.wrap : 'TOP_AND_BOTTOM'}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="${t.pageSplit === 'row' ? 'TABLE' : t.pageSplit === 'none' ? 'NONE' : 'CELL'}" repeatHeader="1" rowCnt="${t.rows}" colCnt="${t.cols}" cellSpacing="0" borderFillIDRef="3" noAdjust="0">`;
+    let xml = `<hp:tbl id="${id}" zOrder="${this.zOrder++}" numberingType="TABLE" textWrap="${pl ? pl.wrap : 'TOP_AND_BOTTOM'}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="${t.pageSplit === 'row' ? 'TABLE' : t.pageSplit === 'none' ? 'NONE' : 'CELL'}" repeatHeader="1" rowCnt="${t.rows}" colCnt="${t.cols}" cellSpacing="${t.cellSpacingPx ? pxToHwp(t.cellSpacingPx) : 0}" borderFillIDRef="3" noAdjust="0">`;
     xml += `<hp:sz width="${tableW}" widthRelTo="ABSOLUTE" height="${spanH(0, t.rows)}" heightRelTo="ABSOLUTE" protect="0"/>`;
     const pad = pxToHwp(t.cellPadPx);
     if (pl) xml += pl.tail;

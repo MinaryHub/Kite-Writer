@@ -150,5 +150,56 @@ const text = (n) => (n.type === 'text' ? n.text : (n.content || []).map(text).jo
   ok(ba.attrs.spaceAfter === 10 && bb.attrs.spaceBefore === 14 && bb.attrs.pageKeep === 'wnl' && ba.attrs.pageKeep === 'w' && !bc.attrs.pageKeep, '다시 읽어도 간격과 쪽 나눔 규칙이 같다', JSON.stringify([ba.attrs, bb.attrs, bc.attrs]));
 }
 
+// ---- 5. 표 칸 안 안쪽 표 뒤의 마지막 빈 문단: Word 는 그리지 않는다 ----
+{
+  const inner = '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>' + p(t('안쪽')) + '</w:tc></w:tr></w:tbl>';
+  const cell = (c) => `<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${c}</w:tc>`;
+  const body = '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid><w:tr>' + cell(inner + p('')) + cell(inner + p(t('글'))) + cell(p('') + p('')) + '</w:tr></w:tbl>' + p('');
+  const doc = await m.readDocx(await makeDocx({ body }));
+  const cells = doc.content.content[0].content[0].content;
+  const tails = cells.map((c) => c.content.map((n) => n.type + (n.attrs?.cellTail ? '*' : '')).join(','));
+  ok(JSON.stringify(tails) === JSON.stringify(['table,paragraph*', 'table,paragraph', 'paragraph,paragraph']), '안쪽 표 바로 뒤의 마지막 빈 문단만 표시 (글이 있거나 표 뒤가 아니면 그대로)', JSON.stringify(tails));
+}
+
+// ---- 6. 표: 제목 줄 되풀이, 셀 간격, 아주 좁은 격자 열 ----
+{
+  const tc = (w, s, extra = '') => `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/>${extra}</w:tcPr>${p(t(s))}</w:tc>`;
+  const head = '<w:trPr><w:tblHeader/></w:trPr>';
+  const body =
+    '<w:tbl><w:tblPr><w:tblCellSpacing w:w="15" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>' +
+    `<w:tr>${head}${tc(3000, '머리 1')}${tc(3000, '머리 2')}</w:tr><w:tr>${head}${tc(3000, '머리 3')}${tc(3000, '머리 4')}</w:tr>` +
+    `<w:tr>${tc(3000, '몸 1')}${tc(3000, '몸 2')}</w:tr><w:tr>${head}${tc(3000, '중간의 제목 줄 표시는 무시')}${tc(3000, '')}</w:tr></w:tbl>` +
+    // 엑셀에서 옮긴 표처럼 아주 좁은 격자 열(29 twip)이 낀 표: 합친 뒤에도 칸 폭의 합이 표 폭과 같아야 한다
+    '<w:tbl><w:tblPr><w:tblW w:w="6029" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="29"/><w:gridCol w:w="3000"/></w:tblGrid>' +
+    `<w:tr>${tc(6029, '한 칸', '<w:gridSpan w:val="3"/>')}</w:tr><w:tr>${tc(3029, '왼쪽', '<w:gridSpan w:val="2"/>')}${tc(3000, '오른쪽')}</w:tr><w:tr>${tc(3000, '왼쪽')}${tc(3029, '오른쪽', '<w:gridSpan w:val="2"/>')}</w:tr></w:tbl>` +
+    p('');
+  const doc = await m.readDocx(await makeDocx({ body }));
+  const [a, b] = doc.content.content.filter((n) => n.type === 'table');
+  ok(JSON.stringify(a.content.map((r) => r.attrs?.repeat === true)) === '[true,true,false,false]', '제목 줄: 맨 앞에서부터 이어진 tblHeader 줄만', JSON.stringify(a.content.map((r) => r.attrs)));
+  ok(a.attrs.cellSpacing === 2, '셀 간격: 적힌 값의 두 배 (15 twip → 2px)', JSON.stringify(a.attrs));
+  const sums = b.content.map((r) => r.content.reduce((s, c) => s + (c.attrs.colwidth || []).reduce((x, y) => x + y, 0), 0));
+  ok(sums.every((v) => Math.abs(v - 6029 / 15) < 1), '좁은 격자 열을 합쳐도 줄마다 칸 폭의 합이 표 폭', JSON.stringify(sums));
+  const out = await m.writeDocx({ content: doc.content, settings: doc.settings, meta: {} });
+  const dx = await (await JSZip.loadAsync(out)).file('word/document.xml').async('string');
+  ok((dx.match(/<w:tblHeader\/>/g) || []).length === 2 && /<w:tblCellSpacing w:w="15" w:type="dxa"\/>/.test(dx), 'DOCX 로 쓰기: 제목 줄 두 줄과 셀 간격', String((dx.match(/<w:tblHeader\/>/g) || []).length));
+}
+
+// ---- 7. 구역 나누기: 새 쪽에서 시작하는 구역은 그 구역의 용지를 담은 쪽 나누기 ----
+{
+  const sect = (w, h, extra = '') => `<w:sectPr>${extra}<w:pgSz w:w="${w}" w:h="${h}"${w > h ? ' w:orient="landscape"' : ''}/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>`;
+  const body =
+    p(t('첫 구역')) +
+    `<w:p><w:pPr>${sect(11906, 16838)}</w:pPr>${t('첫 구역 끝')}</w:p>` +
+    p(t('가로 구역')) +
+    `<w:p><w:pPr>${sect(16838, 11906)}</w:pPr>${t('가로 구역 끝')}</w:p>` +
+    p(t('이어지는 구역'));
+  // 본문 끝의 구역 설정(makeDocx 가 붙이는 편지지 세로)은 이어지는 구역으로
+  const doc = await m.readDocx(await makeDocx({ body, sect: '<w:type w:val="continuous"/>' }));
+  const kinds = doc.content.content.map((n) => (n.type === 'pageBreak' ? 'PB' + (n.attrs?.sectionPage?.landscape ? '(가로)' : '') : text(n)));
+  ok(JSON.stringify(kinds) === JSON.stringify(['첫 구역', '첫 구역 끝', 'PB(가로)', '가로 구역', '가로 구역 끝', '이어지는 구역']), '구역 끝 문단 뒤에 다음 구역의 쪽 나누기 (이어지는 구역은 쪽을 나누지 않는다)', JSON.stringify(kinds));
+  const pg = doc.settings.page;
+  ok(!pg.landscape && Math.abs(pg.width - 210) < 0.5 && Math.abs(pg.height - 297) < 0.5, '문서의 용지는 첫 구역의 것 (A4 세로)', JSON.stringify(pg));
+}
+
 console.log(failed ? `실패 ${failed}건` : '모두 통과');
 process.exit(failed ? 1 : 0);

@@ -200,6 +200,7 @@ function buildDecos(doc: PMNode, breaks: PageBreakInfo[]): DecorationSet {
 
 /** 제목 칸으로만 된 줄인가 */
 export function isHeaderRow(row: PMNode): boolean {
+  if (row.attrs?.repeat === true) return true;
   let all = true;
   row.forEach((c) => {
     if (c.type.name !== 'tableHeader') all = false;
@@ -815,7 +816,9 @@ function computeLayout(
 
   /**
    * '다음 문단과 함께'인 문단(제목 등): 이어지는 그런 문단들과 그 뒤 문단의 첫 줄(외톨이줄 방지면 두 줄, 세 줄 이하면 모두)까지
-   * 이 쪽에 들어가야 한다. 들어가지 않으면 이 문단부터 다음 쪽으로 넘긴다
+   * 이 쪽에 들어가야 한다. 들어가지 않으면 이 문단부터 다음 쪽으로 넘긴다.
+   * Word 는 그런 문단이 이어진 사슬 전체(사슬의 첫 문단부터)가 한 쪽에 들어갈 때만 이 규칙을 지킨다:
+   * 한 쪽보다 긴 사슬은 보통 문단처럼 흐르고(문단 보호는 문단마다 따로 지킨다), 사슬 중간의 남은 꼬리만 따로 넘기지 않는다
    */
   const keepWithNext = (pos: number, top: number) => {
     const sTop = top + shift;
@@ -823,16 +826,34 @@ function computeLayout(
     // 쪽 맨 위에 있으면 넘길 곳이 없다
     if (sTop <= T(p) + 0.5) return;
     let need = NaN;
+    /** 사슬의 첫 문단의 위 (자연 배치) */
+    let chainTop = top;
     try {
       const $p = doc.resolve(pos);
       const parent = $p.parent;
       const idx = $p.index();
+      let first = idx;
+      let firstPos = pos;
+      while (first > 0 && idx - first < 400) {
+        const pv = parent.child(first - 1);
+        if (!pv.isTextblock || !String(pv.attrs?.pageKeep || '').includes('n')) break;
+        first--;
+        firstPos -= pv.nodeSize;
+      }
+      if (first < idx) {
+        const fel = nodeDom(firstPos) as HTMLElement | null;
+        if (fel instanceof HTMLElement) chainTop = rel(fel.getBoundingClientRect().top);
+      }
+      const room = CHof(p + 1);
       let npos = pos + parent.child(idx).nodeSize;
-      for (let i = idx + 1; i < parent.childCount && i <= idx + 8; i++) {
+      for (let i = idx + 1; i < parent.childCount && i <= idx + 400; i++) {
         const nx = parent.child(i);
         if (nx.type.name === 'pageBreak' || nx.type.name === 'columnBreak') return;
         const flags = String(nx.attrs?.pageKeep || '');
         if (nx.isTextblock && flags.includes('n')) {
+          // 사슬이 한 쪽보다 길어지면 지킬 수 없다
+          const cel = nodeDom(npos) as HTMLElement | null;
+          if (cel instanceof HTMLElement && rel(cel.getBoundingClientRect().bottom) - chainTop > room + 0.5) return;
           npos += nx.nodeSize;
           continue;
         }
@@ -854,8 +875,8 @@ function computeLayout(
     }
     if (!isFinite(need)) return;
     const limit = T(p) + CHof(p) - (p === page ? fnUsed : 0);
-    // 다음 쪽에서도 다 들어가지 않을 만큼 길면 넘겨도 소용없다
-    if (need + shift > limit + 0.5 && need - top <= CHof(p + 1)) forceNext = true;
+    // 사슬 전체가 다음 쪽에서도 다 들어가지 않을 만큼 길면 넘겨도 소용없다
+    if (need + shift > limit + 0.5 && need - chainTop <= CHof(p + 1)) forceNext = true;
   };
 
   const handleTextblock = (node: PMNode, pos: number) => {
@@ -1018,10 +1039,14 @@ function computeLayout(
     /** 내용이 가장 꽉 찬 칸에서 내용 아래로 남는 자리 (자연 배치의 줄 높이 - 칸 내용 높이의 최솟값): 나뉜 뒤에도 지킨다 */
     let minSlack = Infinity;
     let grew = false;
-    rowNode.forEach((cell, off) => {
-      const cellPos = rowPos + 1 + off;
-      let cs = 0;
-      let pc = startPage;
+    /**
+     * 칸 하나의 내용을 쪽 경계에서 나눈다: 문단은 줄 사이에서, 그 밖의 블록은 통째로 다음 쪽으로.
+     * 쪽 경계에 걸친 안쪽 표는 줄마다, 그 줄의 칸마다 따로 나눈다 (Word 처럼 안쪽 표의 줄도 쪽에 걸쳐 나뉜다).
+     * cs0: 이 칸 앞에서 이미 끼운 공간, pc0: 칸이 시작하는 쪽. 끝난 뒤의 끼운 공간·쪽·내용 아래 끝을 돌려준다
+     */
+    const walkCell = (cell: PMNode, cellPos: number, cs0: number, pc0: number, depth: number): { cs: number; pc: number; last: number } => {
+      let cs = cs0;
+      let pc = pc0;
       let last = -Infinity;
       for (const lf of collectLeaves(cell, cellPos + 1)) {
         const el = nodeDom(lf.pos) as HTMLElement | null;
@@ -1031,6 +1056,28 @@ function computeLayout(
         const bottom = rel(r.bottom);
         const sT = top + shift + cs;
         pc = pageAtY(sT + 0.5, pc);
+        if (lf.node.type.name === 'table' && depth < 6 && bottom + shift + cs > T(pc) + CHof(pc) + 0.5) {
+          // 안쪽 표: 줄마다 그 줄의 칸들을 같은 출발점에서 따로 나누고, 가장 많이 밀린 칸만큼 다음 줄을 민다
+          let rowCs = cs;
+          let rowPc = pc;
+          lf.node.forEach((nrow, roff) => {
+            const nrowPos = lf.pos + 1 + roff;
+            let maxCs = rowCs;
+            let maxPc = rowPc;
+            nrow.forEach((ncell, coff) => {
+              const w = walkCell(ncell, nrowPos + 1 + coff, rowCs, rowPc, depth + 1);
+              maxCs = Math.max(maxCs, w.cs);
+              maxPc = Math.max(maxPc, w.pc);
+              last = Math.max(last, w.last);
+            });
+            rowCs = maxCs;
+            rowPc = maxPc;
+          });
+          cs = rowCs;
+          pc = rowPc;
+          last = Math.max(last, bottom + cs);
+          continue;
+        }
         if (bottom + shift + cs > T(pc) + CHof(pc) + 0.5) {
           const lines = lf.node.isTextblock ? getLines(el) : [];
           if (lines.length >= 2) {
@@ -1059,6 +1106,11 @@ function computeLayout(
         }
         last = Math.max(last, bottom + cs);
       }
+      return { cs, pc, last };
+    };
+    rowNode.forEach((cell, off) => {
+      const cellPos = rowPos + 1 + off;
+      const { cs, last } = walkCell(cell, cellPos, 0, startPage, 0);
       // 여러 줄을 합친 칸은 끼운 공간이 합친 줄들에 나뉘어 들어가므로 이 줄의 높이로 치지 않는다
       if ((cell.attrs.rowspan || 1) > 1) return;
       const h = cellContentHeight(nodeDom(cellPos) as HTMLElement | null);
