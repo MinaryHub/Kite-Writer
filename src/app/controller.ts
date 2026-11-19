@@ -213,11 +213,30 @@ export class AppController {
       });
     });
     platform.onOpenFiles((files) => files.forEach((f) => this.openPath(f)));
-    platform.onRequestClose(() => this.requestQuit());
+    platform.onRequestClose(() => this.requestQuit(), {
+      // 안드로이드 뒤로 가기: 열린 옆 창부터 닫는다
+      closePanel: () => {
+        for (const k of ['findOpen', 'aiOpen', 'checkOpen', 'reviewOpen', 'versionsOpen'] as const) {
+          if (this[k]) {
+            this.set({ [k]: k === 'findOpen' ? null : false } as any);
+            return true;
+          }
+        }
+        if (this.multiPage) {
+          this.leaveMultiPage();
+          return true;
+        }
+        return false;
+      },
+      hasUnsaved: () => this.docs.some((d) => d.dirty),
+      toast: (t) => this.toast(t),
+    });
     // AI 앱 연결(MCP) 도구 처리기 (준비됨 신호는 첫 문서가 열린 뒤에 보낸다)
     (await import('./mcpHandlers')).installMcpHandlers();
     platform.onAutosaveNow(async () => {
       try {
+        // 앱이 뒤로 가거나 로그오프할 때: 모아 둔 설정도 바로 쓴다
+        if (this.prefsTimer) this.savePrefs(true);
         await this.autosaveNow(true);
       } finally {
         platform.autosaveFlushed();
@@ -226,14 +245,26 @@ export class AppController {
     const initial = await platform.initialFiles();
     for (const f of initial) await this.openPath(f);
     await this.checkRecovery();
-    if (!this.docs.length) this.newDoc();
+    // 안드로이드는 최근 문서가 있으면 빈 문서 대신 시작 화면(최근 문서 목록)을 보여 준다
+    if (!this.docs.length && !(platform.isAndroid && this.recent.length)) this.newDoc();
     platform.mcp.ready();
     this.restartAutosave();
     this.emit();
   }
 
-  savePrefs() {
-    platform.setPrefs({ ...this.prefs, view: this.view, zoom: this.zoom });
+  private prefsTimer: any = null;
+  /**
+   * 설정 저장. 배율 끌기·Ctrl+휠처럼 잇달아 부르는 경우가 많아 잠시 모았다가 한 번 쓴다 (데스크톱 앱은 디스크에 쓴다).
+   * immediate: 끝낼 때처럼 바로 써야 할 때
+   */
+  savePrefs(immediate = false) {
+    clearTimeout(this.prefsTimer);
+    const write = () => {
+      this.prefsTimer = null;
+      platform.setPrefs({ ...this.prefs, view: this.view, zoom: this.zoom });
+    };
+    if (immediate) write();
+    else this.prefsTimer = setTimeout(write, 400);
   }
 
   // ---------------- 테마 ----------------
@@ -315,7 +346,13 @@ export class AppController {
     void ensurePrivateFonts(names, (n) => platform.readPrivateFont(n));
   }
 
+  /** 영문 맞춤법 밑줄 설정을 열린 모든 문서에 (새 탭·다시 시작해도 설정대로) */
+  applySpellcheck() {
+    for (const d of this.docs) (d.editor.view.dom as HTMLElement).setAttribute('spellcheck', String(!!this.prefs.spellcheck));
+  }
+
   private addDoc(tab: DocTab) {
+    (tab.editor.view.dom as HTMLElement).setAttribute('spellcheck', String(!!this.prefs.spellcheck));
     this.docs = [...this.docs, tab];
     this.loadDocFonts(tab);
     this.activeId = tab.id;
@@ -362,14 +399,27 @@ export class AppController {
     setTimeout(() => this.active?.editor.commands.focus(), 30);
   }
 
+  private lastTitle = '';
   updateTitle() {
     const d = this.active;
-    platform.setTitle(d ? `${d.dirty ? '* ' : ''}${d.title} - Kite` : 'Kite');
+    const t = d ? `${d.dirty ? '* ' : ''}${d.title} - Kite` : 'Kite';
+    // 문서가 알릴 때마다 부르므로 바뀐 때만 창 제목을 바꾼다 (데스크톱 앱은 주 프로세스를 거친다)
+    if (t === this.lastTitle) return;
+    this.lastTitle = t;
+    platform.setTitle(t);
   }
 
   async openFiles() {
     const files = await platform.openFiles(OPEN_FILTERS);
-    for (const f of files) await this.openData(f.name, f.data, f.path);
+    for (const f of files) {
+      // 이미 열린 파일은 새 탭을 만들지 않는다 (두 탭이 서로의 저장을 덮어쓰게 된다)
+      const existing = f.path ? this.docs.find((d) => d.path && d.path.toLowerCase() === f.path!.toLowerCase()) : null;
+      if (existing) {
+        this.activate(existing.id);
+        continue;
+      }
+      await this.openData(f.name, f.data, f.path);
+    }
   }
 
   async openPath(p: string) {
@@ -382,7 +432,12 @@ export class AppController {
       const f = await platform.readPath(p);
       await this.openData(f.name, f.data, f.path);
     } catch (e: any) {
-      this.toast(`파일을 열 수 없습니다: ${e?.message || e}`, 'error', 6000);
+      const msg = String(e?.message || e);
+      if (/ENOENT|찾을 수 없|not found|\(404\)/i.test(msg)) {
+        // 옮겨졌거나 지워진 파일: 최근 문서 목록에서도 뺀다
+        this.toast(`'${baseName(p)}' 파일을 찾을 수 없습니다. 옮겨졌거나 지워졌습니다.`, 'error', 6000);
+        this.set({ recent: await platform.removeRecent(p) });
+      } else this.toast(`파일을 열 수 없습니다: ${msg.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')}`, 'error', 6000);
     }
   }
 
@@ -466,11 +521,25 @@ export class AppController {
       await this.exportPdf(tab, target);
       return false;
     }
-    const finalPath = ext ? target : `${target}.${def.ext}`;
+    // 확장자가 없거나 모르는 것(보고서.v2)이면 고른 형식의 확장자를 붙인다
+    const finalPath = SAVE_FORMATS.some((f) => f.ext === ext) ? target : `${target}.${def.ext}`;
     return this.writeTo(tab, finalPath, chosen);
   }
 
+  /** 저장 중인 탭 (Ctrl+S 를 누르고 있거나 저장 중에 다시 눌러도 두 번 쓰지 않는다) */
+  private saving = new Set<string>();
+
   private async writeTo(tab: DocTab, path: string, format: SaveFormatId): Promise<boolean> {
+    if (this.saving.has(tab.id)) return false;
+    this.saving.add(tab.id);
+    try {
+      return await this.writeToInner(tab, path, format);
+    } finally {
+      this.saving.delete(tab.id);
+    }
+  }
+
+  private async writeToInner(tab: DocTab, path: string, format: SaveFormatId): Promise<boolean> {
     // 변경 내용은 DOCX·HWPX, 메모는 DOCX 만 저장한다: 저장하지 못하는 것이 있으면 알리고 고르게 한다
     if (format !== 'docx') {
       const { hasReviewMarks, keepsChanges, keepsComments } = await import('../formats/review');
@@ -495,6 +564,8 @@ export class AppController {
     }
     this.set({ busy: '저장하는 중…' });
     try {
+      // 저장하는 동안 더 고친 것은 저장되지 않았으므로 '수정됨' 으로 남겨야 한다
+      const snap = tab.editor.state.doc;
       const data = await exportDocument(format, tab.toKDocument(), { pageCount: tab.layout.pageCount });
       await platform.writeFile(path, data);
       if (platform.hasFilePaths) {
@@ -506,10 +577,10 @@ export class AppController {
         tab.title = baseName(path);
         tab.saveFormat = format;
       }
-      tab.markSaved();
+      tab.markSaved(snap);
       void versions.snapshot(tab, 'save');
       this.overwriteConfirm.delete(tab.id);
-      platform.autosaveRemove(tab.id);
+      if (!tab.dirty) platform.autosaveRemove(tab.id);
       this.toast(`저장했습니다: ${baseName(path)}`);
       if (format === 'md' || format === 'txt' || format === 'html') this.toast('이 형식은 일부 서식(쪽 설정, 글꼴 등)이 저장되지 않습니다.', 'warn', 5000);
       return true;
@@ -526,6 +597,8 @@ export class AppController {
   async exportPdf(tab = this.active, path?: string) {
     if (!tab) return;
     const [stem] = splitExt(tab.path ? baseName(tab.path) : tab.title);
+    // 안드로이드는 인쇄 화면에서 PDF 로 저장한다
+    if (platform.isAndroid) this.toast("인쇄 화면 위쪽의 프린터 목록에서 'PDF로 저장'을 고르세요.", 'info', 6000);
     this.set({ busy: 'PDF 만드는 중…' });
     try {
       const out = await withPrintRoot(tab, (g) => platform.printToPdf({ widthMm: g.wMm, heightMm: g.hMm, defaultPath: stem + '.pdf', path }));
@@ -579,7 +652,7 @@ export class AppController {
     for (const d of [...this.docs]) {
       if (d.dirty && !(await this.closeTab(d.id))) return;
     }
-    this.savePrefs();
+    this.savePrefs(true);
     platform.closeConfirmed();
   }
 
@@ -592,6 +665,7 @@ export class AppController {
   }
 
   private autosavedDoc = new WeakMap<DocTab, unknown>();
+  private autosaveWarned = false;
   /**
    * 자동 저장. 큰 문서는 직렬화에 수백 ms 가 걸리므로 평소에는 입력이 멈춘 유휴 시간에 문서 하나씩 처리한다.
    * (immediate: 로그오프·종료 때처럼 바로 해야 할 때)
@@ -603,10 +677,26 @@ export class AppController {
       if (!d.dirty) continue;
       // 지난 자동 저장 뒤로 바뀐 것이 없으면 건너뛴다
       if (this.autosavedDoc.get(d) === d.editor.state.doc) continue;
-      if (!immediate) await idle();
-      this.autosavedDoc.set(d, d.editor.state.doc);
+      if (!immediate) {
+        await idle();
+        // 기다리는 동안 저장했거나 '저장 안 함' 으로 닫은 문서는 쓰지 않는다 (다음 실행에 낡은 복구본이 뜬다)
+        if (!this.docs.includes(d) || !d.dirty) continue;
+      }
+      const doc = d.editor.state.doc;
       const json = JSON.stringify({ title: d.title, path: d.path, saveFormat: d.saveFormat, doc: d.toKDocument(), time: Date.now() });
-      jobs.push(Promise.resolve(platform.autosaveWrite(d.id, json)).catch(() => {}));
+      jobs.push(
+        Promise.resolve(platform.autosaveWrite(d.id, json)).then(
+          // 쓰기에 성공했을 때만 '자동 저장함' 으로 친다 (실패하면 다음 차례에 다시 쓴다)
+          () => this.autosavedDoc.set(d, doc),
+          (e) => {
+            console.error(e);
+            if (!this.autosaveWarned) {
+              this.autosaveWarned = true;
+              this.toast('자동 저장에 실패했습니다. 문서를 직접 저장해 두세요.', 'warn', 7000);
+            }
+          },
+        ),
+      );
     }
     await Promise.all(jobs);
   }
@@ -620,9 +710,13 @@ export class AppController {
       [
         { id: 'yes', label: '복구', primary: true },
         { id: 'no', label: '삭제', danger: true },
+        // Esc·닫기 단추·안드로이드 뒤로 가기도 이것: 지우지 않고 다음에 다시 묻는다
+        { id: 'cancel', label: '나중에' },
       ],
     );
+    if (r === 'cancel') return;
     let failed = 0;
+    const done: string[] = [];
     for (const item of list) {
       if (r === 'yes') {
         try {
@@ -645,8 +739,11 @@ export class AppController {
           continue;
         }
       }
-      platform.autosaveRemove(item.id);
+      done.push(item.id);
     }
+    // 복구한 문서를 새 탭 이름으로 먼저 자동 저장한 뒤에 원래 복구 파일을 지운다 (그 사이에 또 꺼져도 남도록)
+    if (r === 'yes') await this.autosaveNow(true);
+    for (const id of done) platform.autosaveRemove(id);
     if (failed) this.toast(`복구 파일 ${failed}개를 읽지 못했습니다. 파일은 자동 저장 폴더에 그대로 두었습니다.`, 'warn', 8000);
   }
 
@@ -654,6 +751,8 @@ export class AppController {
   setZoom(z: number, mode: AppController['zoomMode'] = 'custom') {
     const prev = this.zoom;
     const zoom = Math.max(0.25, Math.min(4, Math.round(z * 100) / 100));
+    // 창 크기를 바꾸는 동안 맞춤 배율이 그대로면 다시 그리지 않는다
+    if (zoom === prev && mode === this.zoomMode) return;
     viewState.zoom = zoom;
     this.zoom = zoom;
     this.zoomMode = mode;
@@ -709,7 +808,17 @@ export class AppController {
     setTimeout(() => window.dispatchEvent(new Event('kite:relayout')), 0);
   }
 
+  /** 글꼴 목록 (서식 도구 상자가 매번 그릴 때 부르므로, 시스템 글꼴·최근 글꼴이 그대로면 앞서 만든 것을 돌려준다) */
+  private fontListCache: { sys: string[]; recent: string[]; value: { korean: string[]; others: string[]; recent: string[] } } | null = null;
   fontList(): { korean: string[]; others: string[]; recent: string[] } {
+    const c = this.fontListCache;
+    if (c && c.sys === this.systemFonts && c.recent === this.prefs.recentFonts) return c.value;
+    const value = this.buildFontList();
+    this.fontListCache = { sys: this.systemFonts, recent: this.prefs.recentFonts, value };
+    return value;
+  }
+
+  private buildFontList(): { korean: string[]; others: string[]; recent: string[] } {
     const sys = this.systemFonts;
     const isKo = (s: string) => /[가-힯]/.test(s);
     const set = new Set<string>();
@@ -722,10 +831,12 @@ export class AppController {
       LATIN_FONTS.forEach((f) => set.add(f));
     }
     const all = [...set];
+    const ko = new Intl.Collator('ko');
+    const en = new Intl.Collator('en');
     return {
       recent: this.prefs.recentFonts.slice(0, 6),
-      korean: all.filter(isKo).sort((a, b) => a.localeCompare(b, 'ko')),
-      others: all.filter((f) => !isKo(f)).sort((a, b) => a.localeCompare(b, 'en')),
+      korean: all.filter(isKo).sort(ko.compare),
+      others: all.filter((f) => !isKo(f)).sort(en.compare),
     };
   }
 

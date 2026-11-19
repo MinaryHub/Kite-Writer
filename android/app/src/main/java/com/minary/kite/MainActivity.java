@@ -120,7 +120,11 @@ public class MainActivity extends ComponentActivity {
             }
         });
 
-        collectIntentFiles(getIntent());
+        // 시스템이 프로세스를 되살리거나 최근 앱 목록에서 다시 열 때는 처음의 '다음으로 열기' 인텐트가 다시 온다:
+        // 그 파일은 이미 열었고(자동 저장본에서 복구된다) 다시 열면 같은 파일의 탭이 둘 생긴다
+        if (savedInstanceState == null && (getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0) {
+            collectIntentFiles(getIntent());
+        }
         // 화면 회전 등은 configChanges 로 직접 받으니 다시 만들어질 때는 시스템이 프로세스를 되살린 경우뿐이다.
         // 그때는 새로 띄우고 자동 저장본에서 복구한다.
         webView.loadUrl(START_URL);
@@ -335,6 +339,90 @@ public class MainActivity extends ComponentActivity {
         public void exitApp() {
             runOnUiThread(MainActivity.this::finishAndRemoveTask);
         }
+
+        /** 클립보드 내용 {text, html} (웹뷰에서는 document.execCommand('paste') 가 되지 않는다) */
+        @JavascriptInterface
+        public void readClipboard(int cb) {
+            runOnUiThread(() -> {
+                JSONObject o = new JSONObject();
+                try {
+                    android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                    ClipData clip = cm == null ? null : cm.getPrimaryClip();
+                    if (clip != null && clip.getItemCount() > 0) {
+                        ClipData.Item item = clip.getItemAt(0);
+                        CharSequence text = item.coerceToText(MainActivity.this);
+                        o.put("text", text == null ? "" : text.toString());
+                        if (item.getHtmlText() != null) o.put("html", item.getHtmlText());
+                    }
+                } catch (Exception ignored) {
+                    // 읽을 수 없으면 빈 내용
+                }
+                resolve(cb, o);
+            });
+        }
+
+        // ---- 자동 저장: 앱 전용 폴더에 (localStorage 는 5MB 남짓이라 그림이 든 문서는 넘친다)
+
+        @JavascriptInterface
+        public void autosaveWrite(int cb, String id, String json) {
+            io.execute(() -> {
+                try {
+                    java.io.File f = autosaveFile(id);
+                    java.io.File tmp = new java.io.File(f.getPath() + ".tmp");
+                    try (java.io.FileOutputStream o = new java.io.FileOutputStream(tmp)) {
+                        o.write(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        o.getFD().sync();
+                    }
+                    if (!tmp.renameTo(f)) throw new IOException("자동 저장 파일을 바꾸지 못했습니다.");
+                    resolve(cb, true);
+                } catch (Exception e) {
+                    reject(cb, e.getMessage());
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void autosaveRemove(String id) {
+            io.execute(() -> {
+                //noinspection ResultOfMethodCallIgnored
+                autosaveFile(id).delete();
+            });
+        }
+
+        @JavascriptInterface
+        public void autosaveList(int cb) {
+            io.execute(() -> {
+                JSONArray out = new JSONArray();
+                java.io.File[] files = autosaveDir().listFiles((d, n) -> n.endsWith(".json"));
+                if (files != null) {
+                    for (java.io.File f : files) {
+                        try {
+                            byte[] b = java.nio.file.Files.readAllBytes(f.toPath());
+                            JSONObject o = new JSONObject();
+                            o.put("id", f.getName().substring(0, f.getName().length() - 5));
+                            o.put("json", new String(b, java.nio.charset.StandardCharsets.UTF_8));
+                            o.put("mtime", f.lastModified());
+                            out.put(o);
+                        } catch (Exception ignored) {
+                            // 읽을 수 없는 파일은 건너뛴다 (지우지 않는다)
+                        }
+                    }
+                }
+                resolve(cb, out);
+            });
+        }
+    }
+
+    private java.io.File autosaveDir() {
+        java.io.File d = new java.io.File(getFilesDir(), "autosave");
+        //noinspection ResultOfMethodCallIgnored
+        d.mkdirs();
+        return d;
+    }
+
+    private java.io.File autosaveFile(String id) {
+        // 탭 번호만 파일 이름에 쓴다 (경로 문자 차단)
+        return new java.io.File(autosaveDir(), id.replaceAll("[^A-Za-z0-9_-]", "_") + ".json");
     }
 
     // ------------------------------------------------------------------ 파일
@@ -476,14 +564,29 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void writeUri(Uri u, byte[] data) throws IOException {
-        OutputStream os = null;
+        // 먼저 "rw" 로 열어 다 쓴 뒤에 길이를 맞춘다: 미리 잘라 내지 않으므로 쓰다가 실패해도 빈 파일이 남지 않고,
+        // 잘라 내기("t")를 무시하는 제공자에서도 원래보다 짧은 문서 뒤에 옛 내용이 남지 않는다
+        ParcelFileDescriptor pfd = null;
         try {
-            // "wt": 원래 파일보다 짧게 쓸 때 뒤에 남는 바이트가 없도록 잘라 낸다
-            os = getContentResolver().openOutputStream(u, "wt");
+            pfd = getContentResolver().openFileDescriptor(u, "rw");
         } catch (Exception e) {
-            os = null;
+            pfd = null;
         }
-        if (os == null) os = getContentResolver().openOutputStream(u, "w");
+        if (pfd != null) {
+            try (ParcelFileDescriptor p = pfd; java.io.FileOutputStream o = new java.io.FileOutputStream(p.getFileDescriptor())) {
+                java.nio.channels.FileChannel ch = o.getChannel();
+                ch.position(0);
+                java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(data);
+                while (buf.hasRemaining()) ch.write(buf);
+                ch.truncate(data.length);
+                ch.force(true);
+                return;
+            } catch (IOException e) {
+                // 자리 옮기기·잘라 내기를 못 하는 기술자(파이프 등): 아래 방법으로 처음부터 다시 쓴다
+            }
+        }
+        // 파일 기술자를 주지 않는 제공자(일부 클라우드): 잘라 내며 쓰기. 잘라 내기를 못 하면 문서가 깨질 수 있으니 "w" 로 물러서지 않는다
+        OutputStream os = getContentResolver().openOutputStream(u, "wt");
         if (os == null) throw new IOException("파일에 쓸 수 없습니다.");
         try (OutputStream o = os) {
             o.write(data);

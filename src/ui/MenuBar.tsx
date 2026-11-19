@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { commands, runCommand } from '../app/commands';
 import { useApp } from '../app/hooks';
 import { useOutsideClose } from './widgets';
@@ -57,6 +57,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
       '-',
       'edit.find',
       'edit.replace',
+      'edit.findNext',
       'edit.goto',
     ],
   },
@@ -196,6 +197,15 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
 
 let appRef: ReturnType<typeof useApp> | null = null;
 
+/** 안드로이드에서는 쓸 수 없는 데스크톱 전용 메뉴를 감춘다 (눌러도 안내만 뜨거나 아무 일도 없었다) */
+const DESKTOP_ONLY = new Set(['tools.ai', 'tools.mcp', 'tools.collab', 'tools.contact', 'view.fullscreen']);
+function visibleItems(items: MenuEntry[]): MenuEntry[] {
+  if (!platform.isAndroid) return items;
+  const out = items.filter((it) => !(typeof it === 'string' && DESKTOP_ONLY.has(it)));
+  // 감춘 뒤 이어지거나 끝에 남은 구분선 정리
+  return out.filter((it, i) => !(it === '-' && (i === 0 || out[i - 1] === '-' || i === out.length - 1)));
+}
+
 function recentItems(): MenuEntry[] {
   const list = appRef?.recent || [];
   if (!list.length) return [{ label: '(최근 문서 없음)', run: () => {}, disabled: true }];
@@ -286,6 +296,17 @@ export function MenuBar() {
   const [open, setOpen] = useState<number | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   useOutsideClose(open !== null, () => setOpen(null), ref);
+  // Alt+글자 로 메뉴 열기 (commands.ts 의 단축키 처리가 알린다)
+  useEffect(() => {
+    const h = (e: Event) => {
+      const i = MENUS.findIndex((m) => m.key === (e as CustomEvent).detail);
+      if (i < 0) return;
+      e.preventDefault();
+      setOpen((o) => (o === i ? null : i));
+    };
+    window.addEventListener('kite:open-menu', h);
+    return () => window.removeEventListener('kite:open-menu', h);
+  }, []);
   return (
     <div className="menubar" ref={ref}>
       <div className="brand">
@@ -299,7 +320,7 @@ export function MenuBar() {
           </button>
           {open === i && (
             <div className="menu-pop">
-              <MenuList items={m.items()} close={() => setOpen(null)} />
+              <MenuList items={visibleItems(m.items())} close={() => setOpen(null)} />
             </div>
           )}
         </div>

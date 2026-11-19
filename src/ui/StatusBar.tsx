@@ -7,7 +7,6 @@ export function StatusBar() {
   const app = useApp();
   const tab = app.active;
   useEditorTick(tab?.editor);
-  if (!app.view.statusbar) return null;
   // 글자·단어 수는 문서 전체를 세므로(큰 문서에서 20ms) 입력마다 세지 않고 잠시 뒤에 한 번만 센다
   const [counts, setCounts] = useState<{ chars: number; words: number; doc: unknown }>({ chars: 0, words: 0, doc: null });
   useEffect(() => {
@@ -22,6 +21,8 @@ export function StatusBar() {
     }, counts.doc == null ? 0 : big ? 700 : 150);
     return () => clearTimeout(t);
   });
+  // 훅(useState·useEffect)을 모두 부른 뒤에 감춘다 (상태 표시줄을 껐다 켤 때 훅 순서가 어긋나지 않게)
+  if (!app.view.statusbar) return null;
   let page = 1;
   let pages = 1;
   let line = 1;

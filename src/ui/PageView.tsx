@@ -3,7 +3,7 @@ import { EditorContent } from '@tiptap/react';
 import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
 import type { PageSetup } from '../types';
-import { useApp } from '../app/hooks';
+import { useApp, usePinchZoom } from '../app/hooks';
 import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, pageHidesOf, pagePaintHtml, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
 import { sectionsKey } from '../editor/extensions/sections';
 import { formatPageNumber, splitExt } from '../formats/common';
@@ -20,6 +20,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
   const app = useApp();
   const [, force] = useReducer((x: number) => x + 1, 0);
   const wsRef = useRef<HTMLDivElement>(null);
+  usePinchZoom(wsRef);
   const stageRef = useRef<HTMLDivElement>(null);
   useEffect(() => tab.subscribe(force), [tab]);
 

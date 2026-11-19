@@ -365,8 +365,12 @@ ipcMain.handle('file:read', async (_e, p: string) => {
 ipcMain.handle('file:save-dialog', async (_e, defaultPath: string, filters) => {
   const res = await dialog.showSaveDialog(mainWindow!, { title: '다른 이름으로 저장', defaultPath: typeof defaultPath === 'string' ? defaultPath : undefined, filters });
   if (res.canceled || !res.filePath) return null;
-  allowPath(res.filePath);
-  return res.filePath;
+  // 확장자 없이 적은 이름(리눅스 대화 상자는 붙여 주지 않는다)이나 모르는 확장자에는 첫 형식의 확장자를 붙인다
+  let p = res.filePath;
+  const ext = Array.isArray(filters) && typeof filters[0]?.extensions?.[0] === 'string' ? filters[0].extensions[0] : '';
+  if (!SAVE_EXT.test(p) && /^[a-z0-9]+$/i.test(ext)) p += '.' + ext;
+  allowPath(p);
+  return p;
 });
 
 const MAX_WRITE = 512 * 1024 * 1024;
@@ -375,7 +379,8 @@ ipcMain.handle('file:write', async (_e, p: string, data: Uint8Array) => {
   if (!SAVE_EXT.test(target)) throw new Error('저장: 지원하지 않는 파일 형식입니다.');
   if (!(data instanceof Uint8Array) || data.byteLength > MAX_WRITE) throw new Error('저장할 내용이 올바르지 않습니다.');
   // 안전한 저장: 임시 파일에 쓴 뒤 교체. 실패하면 임시 파일을 남기지 않는다
-  const tmp = target + '.kite-tmp';
+  // 저장이 겹쳐도 서로의 임시 파일을 건드리지 않게 이름을 따로
+  const tmp = `${target}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.kite-tmp`;
   try {
     await fs.promises.writeFile(tmp, Buffer.from(data));
     await fs.promises.rename(tmp, target);

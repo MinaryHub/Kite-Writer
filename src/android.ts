@@ -20,6 +20,10 @@ interface KiteAndroidNative {
   share(path: string, mime: string): void;
   setTitle(title: string): void;
   exitApp(): void;
+  readClipboard?(cb: number): void;
+  autosaveWrite?(cb: number, id: string, json: string): void;
+  autosaveRemove?(id: string): void;
+  autosaveList?(cb: number): void;
 }
 
 declare global {
@@ -152,6 +156,16 @@ export const android = {
   share: (p: string) => native!.share(p, mimeOf(extOf(p))),
   setTitle: (t: string) => native!.setTitle(t),
   exitApp: () => native!.exitApp(),
+  /** 클립보드 {text, html} (셸이 이 기능을 모르면 null) */
+  readClipboard(): Promise<{ text?: string; html?: string } | null> {
+    if (!native!.readClipboard) return Promise.resolve(null);
+    return call((cb) => native!.readClipboard!(cb));
+  },
+  /** 앱 전용 폴더의 자동 저장 (셸이 이 기능을 모르면 false: localStorage 를 쓴다) */
+  hasFileAutosave: () => !!native?.autosaveWrite,
+  autosaveWrite: (id: string, json: string) => call<boolean>((cb) => native!.autosaveWrite!(cb, id, json)),
+  autosaveRemove: (id: string) => native!.autosaveRemove!(id),
+  autosaveList: () => call<{ id: string; json: string; mtime: number }[]>((cb) => native!.autosaveList!(cb)).then((a) => a || []),
 };
 
 function bytesToBase64(b: Uint8Array): string {
@@ -178,12 +192,32 @@ export function displayPath(p: string): string {
 }
 
 /** 안드로이드에서 뒤로 가기: 열린 창·메뉴가 있으면 닫고, 없으면 끝내기를 요청한다 */
-export function handleBack(requestClose: () => void) {
-  const open = document.querySelector('.modal, .modal-back, .menu-pop, .ctx-menu, .dropdown-pop, .preview-modal, .palette-back, .find-panel');
+export interface BackOptions {
+  /** 열린 옆 창(찾기·AI·검사 등)을 하나 닫았으면 true */
+  closePanel?: () => boolean;
+  /** 저장하지 않은 문서가 있는가 (있으면 끝내기 확인이 뜨므로 두 번 누르기를 묻지 않는다) */
+  hasUnsaved?: () => boolean;
+  toast?: (text: string) => void;
+}
+
+export function handleBack(requestClose: () => void, opts: BackOptions = {}) {
+  // 저장·불러오기 중에는 아무것도 하지 않는다 (끝내기 확인이 저장을 한 번 더 부르거나 쓰는 도중에 끝나지 않게)
+  if (document.querySelector('.busy')) return;
+  const open = document.querySelector('.modal, .modal-back, .menu-pop, .ctx-menu, .dropdown-pop, .preview-modal, .palette-back');
   if (open) {
     const target = (document.activeElement as HTMLElement | null) || document.body;
     target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true }));
     return;
   }
+  // 찾기·AI·검사·검토·버전 창 (초점이 문서에 있으면 Esc 를 받지 못하므로 직접 닫는다)
+  if (opts.closePanel?.()) return;
+  // 바꾼 것이 없으면 끝내기 전에 한 번 더 누르게 한다 (실수로 눌러 열린 문서가 사라지지 않게)
+  const now = Date.now();
+  if (!opts.hasUnsaved?.() && now - lastBack > 2000) {
+    lastBack = now;
+    opts.toast?.('한 번 더 누르면 끝냅니다.');
+    return;
+  }
   requestClose();
 }
+let lastBack = 0;

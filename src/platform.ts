@@ -1,5 +1,5 @@
 import type { KiteApi } from '../electron/preload';
-import { android, isAndroid, onAndroid, handleBack } from './android';
+import { android, isAndroid, onAndroid, handleBack, type BackOptions } from './android';
 
 declare global {
   interface Window {
@@ -165,6 +165,16 @@ export const platform = {
     }
     return api ? api.addRecent(p) : [];
   },
+  /** 열 수 없는 파일을 최근 목록에서 뺀다 (데스크톱 앱은 없는 파일을 목록을 읽을 때 저절로 뺀다) */
+  async removeRecent(p: string): Promise<string[]> {
+    if (isAndroid) {
+      const list = androidRecent().filter((x) => x !== p);
+      saveAndroidRecent(list);
+      android.releasePath(p);
+      return list;
+    }
+    return api ? api.getRecent() : [];
+  },
   async clearRecent(): Promise<string[]> {
     if (isAndroid) {
       androidRecent().forEach((p) => android.releasePath(p));
@@ -193,14 +203,22 @@ export const platform = {
 
   async autosaveWrite(id: string, json: string) {
     if (api) return api.autosaveWrite(id, json);
-    try {
-      localStorage.setItem(LS_PREFIX + 'autosave:' + id, json);
-    } catch {
-      /* 용량 초과 등 무시 */
+    if (isAndroid && android.hasFileAutosave()) {
+      await android.autosaveWrite(id, json);
+      // 예전(localStorage) 자동 저장본은 치운다
+      try {
+        localStorage.removeItem(LS_PREFIX + 'autosave:' + id);
+      } catch {
+        /* 무시 */
+      }
+      return;
     }
+    // 용량 초과 등은 알린다 (자동 저장이 된 줄 알고 있다가 잃지 않게)
+    localStorage.setItem(LS_PREFIX + 'autosave:' + id, json);
   },
   async autosaveRemove(id: string) {
     if (api) return api.autosaveRemove(id);
+    if (isAndroid && android.hasFileAutosave()) android.autosaveRemove(id);
     try {
       localStorage.removeItem(LS_PREFIX + 'autosave:' + id);
     } catch {
@@ -210,6 +228,8 @@ export const platform = {
   async autosaveList(): Promise<{ id: string; json: string; mtime: number }[]> {
     if (api) return api.autosaveList();
     const out: { id: string; json: string; mtime: number }[] = [];
+    // 안드로이드: 앱 폴더의 자동 저장본 + 예전 판이 localStorage 에 남긴 것
+    if (isAndroid && android.hasFileAutosave()) out.push(...(await android.autosaveList().catch(() => [])));
     try {
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i)!;
@@ -252,9 +272,26 @@ export const platform = {
     return api.convertDoc(data);
   },
 
-  async paste(plain = false) {
-    if (api) return plain ? api.pastePlain() : api.paste();
-    document.execCommand('paste');
+  /**
+   * 붙이기 (메뉴·도구 상자·오른쪽 단추). view: 붙일 편집기.
+   * 데스크톱 앱은 주 프로세스가, 안드로이드는 셸이 클립보드를 읽어 준다. 브라우저는 권한이 있으면 읽고, 없으면 false (Ctrl+V 안내)
+   */
+  async paste(plain = false, view?: { pasteText(t: string): boolean; pasteHTML(h: string): boolean } | null): Promise<boolean> {
+    if (api) {
+      await (plain ? api.pastePlain() : api.paste());
+      return true;
+    }
+    let clip: { text?: string; html?: string } | null = null;
+    try {
+      if (isAndroid) clip = await android.readClipboard();
+      else if (navigator.clipboard?.readText) clip = { text: await navigator.clipboard.readText() };
+    } catch {
+      clip = null;
+    }
+    if (!clip || !view) return false;
+    if (!plain && clip.html) return view.pasteHTML(clip.html);
+    if (clip.text) return view.pasteText(clip.text);
+    return true;
   },
 
   setTitle(t: string) {
@@ -267,8 +304,8 @@ export const platform = {
     if (isAndroid) return onAndroid('open-files', (files) => cb(Array.isArray(files) ? files : []));
     return api ? api.onOpenFiles(cb) : () => {};
   },
-  onRequestClose(cb: () => void) {
-    if (isAndroid) return onAndroid('back', () => handleBack(cb));
+  onRequestClose(cb: () => void, back?: BackOptions) {
+    if (isAndroid) return onAndroid('back', () => handleBack(cb, back));
     return api ? api.onRequestClose(cb) : () => {};
   },
   onAutosaveNow(cb: () => void) {
