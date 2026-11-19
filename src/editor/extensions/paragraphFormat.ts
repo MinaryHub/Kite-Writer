@@ -1,8 +1,9 @@
 import { Extension } from '@tiptap/core';
-import type { EditorState } from '@tiptap/pm/state';
+import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state';
+import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { cssToPt, normLineHeight, r2 } from '../cssUnits';
-import { cleanParaBorder, normColor } from '../../formats/common';
+import { cleanPageHide, cleanParaBorder, normColor } from '../../formats/common';
 import { cleanTabs } from '../tabLayout';
 
 declare module '@tiptap/core' {
@@ -229,8 +230,20 @@ export const ParagraphFormat = Extension.create({
               const o = pb.o || [0, 0, 0, 0];
               const st = ['position: relative'];
               for (const k of ['l', 'r', 't', 'b'] as const) st.push(`--pb-${k}: ${pb[k] ? pb[k]!.replace(/^([\d.]+)mm (double)/, (_m, w) => `max(3px, ${Math.round(parseFloat(w) * 240) / 100}mm) double`).replace(/^([\d.]+)mm (solid|dashed|dotted)/, 'max(1px, $1mm) $2') : 'none'}`);
-              st.push(`--pb-ol: ${o[0]}px`, `--pb-or: ${o[1]}px`, `--pb-ot: ${o[2]}px`, `--pb-ob: ${o[3]}px`);
-              return { 'data-pb': JSON.stringify(pb), ...(pb.c ? { 'data-pb-join': '1' } : {}), style: st.join('; ') };
+              let ot = `${o[2]}px`;
+              let ob = `${o[3]}px`;
+              // Word 의 테두리: 위·아래 선은 문단 간격 안쪽(간격 - 선이 차지하는 자리)에 (간격은 상자 바깥이다). 음수면 상자가 간격까지 덮는다
+              if (pb.a) {
+                const sb = Math.max(0, +attrs.spaceBefore || 0);
+                const sa = Math.max(0, +attrs.spaceAfter || 0);
+                ot = pb.a[0] < 0 ? '0px' : `calc(${pb.a[0]}px - ${sb}pt)`;
+                ob = pb.a[1] < 0 ? '0px' : `calc(${pb.a[1]}px - ${sa}pt)`;
+              }
+              st.push(`--pb-ol: ${o[0]}px`, `--pb-or: ${o[1]}px`, `--pb-ot: ${ot}`, `--pb-ob: ${ob}`);
+              // Word 의 테두리 안 바탕: 테두리 상자를 글 뒤에 칠한다 (문단이 제 쌓임 맥락을 가져 글 아래·문단 위에 놓인다)
+              const bg = pb.a ? normColor(attrs.paraBg) : null;
+              if (bg) st.push(`--pb-bg: ${bg}`, '--pb-z: -1', 'isolation: isolate');
+              return { 'data-pb': JSON.stringify(pb), ...(pb.c ? { 'data-pb-join': pb.c === 2 ? '2' : '1' } : {}), style: st.join('; ') };
             },
           },
           paraBg: {
@@ -238,6 +251,8 @@ export const ParagraphFormat = Extension.create({
             parseHTML: (el: HTMLElement) => normColor(el.getAttribute('data-bg')),
             renderHTML: (attrs: Record<string, any>) => {
               const c = normColor(attrs.paraBg);
+              // Word 의 테두리 안 바탕: 문단 간격을 빼고 선 안쪽만 칠한다 (테두리 상자가 칠한다: paraBorder)
+              if (c && cleanParaBorder(attrs.paraBorder)?.a) return { 'data-bg': c };
               return c ? { 'data-bg': c, style: `background-color: ${c}` } : {};
             },
           },
@@ -252,6 +267,45 @@ export const ParagraphFormat = Extension.create({
           },
         },
       },
+      {
+        // 한글의 '감추기': 이 블록이 놓인 쪽에서 감출 것 (h 머리말, f 꼬리말, m 바탕쪽, b 쪽 테두리, x 쪽 배경, n 쪽 번호)
+        types: [...PARA_TYPES, 'table', 'textBox'],
+        attributes: {
+          pageHide: {
+            default: null,
+            parseHTML: (el: HTMLElement) => cleanPageHide(el.getAttribute('data-page-hide')),
+            renderHTML: (attrs: Record<string, any>) => (cleanPageHide(attrs.pageHide) ? { 'data-page-hide': cleanPageHide(attrs.pageHide) } : {}),
+          },
+        },
+      },
+      {
+        // Word 문서: 표 칸 안에서 안쪽 표 바로 뒤에 오는 마지막 빈 문단. Word 처럼 비어 있는 동안은 그리지 않는다 (editor.css, 커서가 들어가면 나타난다: CellTail)
+        types: ['paragraph'],
+        attributes: {
+          cellTail: {
+            default: null,
+            parseHTML: (el: HTMLElement) => (el.getAttribute('data-cell-tail') === '1' ? true : null),
+            renderHTML: (attrs: Record<string, any>) => (attrs.cellTail === true ? { 'data-cell-tail': '1' } : {}),
+          },
+        },
+      },
+    ];
+  },
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey('cellTailCaret'),
+        props: {
+          // 숨겨 둔 칸 끝 빈 문단(cellTail)에 커서가 들어가면 보이게 한다 (Word 와 같이)
+          decorations(state) {
+            const { $from, empty } = state.selection;
+            if (!empty || $from.depth < 1 || $from.parent.attrs.cellTail !== true) return null;
+            const pos = $from.before();
+            return DecorationSet.create(state.doc, [Decoration.node(pos, pos + $from.parent.nodeSize, { class: 'k-caret-here' })]);
+          },
+        },
+      }),
     ];
   },
 

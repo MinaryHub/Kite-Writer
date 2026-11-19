@@ -118,6 +118,34 @@ export function extFromMime(mime: string): string {
 }
 
 /** 브라우저가 표시할 수 없는 그림(WMF/EMF 등)을 대신할 자리표시 SVG */
+/** 한글의 '감추기' 표시 검사: 이 블록이 놓인 쪽에서 감출 것 — h 머리말, f 꼬리말, m 바탕쪽, b 쪽 테두리, x 쪽 배경, n 쪽 번호 (없으면 null) */
+export function cleanPageHide(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const out = ['h', 'f', 'm', 'b', 'x', 'n'].filter((c) => v.includes(c)).join('');
+  return out || null;
+}
+
+/**
+ * 떠 있는 개체 둘레의 글 흐름 (Word 의 정사각형·빽빽하게·통과·위아래 배치).
+ * s: 글이 흐르는 쪽 — r 개체 오른쪽, l 개체 왼쪽, tb 개체 위아래만(옆은 비움). d: 개체와 글 사이 간격 px (위·오른쪽·아래·왼쪽)
+ */
+export interface FloatWrap {
+  s: 'l' | 'r' | 'tb';
+  d: [number, number, number, number];
+  /** Word 에 적혀 있던 글 흐름 쪽 (화면은 한쪽으로만 흐르게 하지만 Word 로 저장할 때 되돌린다) */
+  o?: 'bothSides' | 'left' | 'right' | 'largest';
+}
+
+/** float.wrap 값 검사 (이상하면 null) */
+export function cleanFloatWrap(v: unknown): FloatWrap | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as { s?: unknown; d?: unknown };
+  if (o.s !== 'l' && o.s !== 'r' && o.s !== 'tb') return null;
+  const d = Array.isArray(o.d) && o.d.length === 4 ? o.d.map((n) => Math.max(0, Math.min(500, Number(n) || 0))) : [0, 0, 0, 0];
+  const side = (o as { o?: unknown }).o;
+  return { s: o.s, d: d as FloatWrap['d'], ...(side === 'bothSides' || side === 'left' || side === 'right' || side === 'largest' ? { o: side } : {}) };
+}
+
 export function placeholderImage(label: string, w = 160, h = 90): string {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect x="0.5" y="0.5" width="${w - 1}" height="${h - 1}" fill="#f4f4f4" stroke="#999" stroke-dasharray="4 3"/><text x="50%" y="50%" font-size="12" fill="#666" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif">${xmlEscape(label)}</text></svg>`;
   return 'data:image/svg+xml;base64,' + bytesToBase64(new TextEncoder().encode(svg));
@@ -652,7 +680,15 @@ export interface ParaBorder {
   t?: string;
   b?: string;
   o?: number[];
-  c?: boolean;
+  /** 이어진 문단과 한 상자로 (2: 바로 앞 묶음과 다른 묶음 — 이웃한 두 묶음이 서로 이어지지 않게 번갈아 단다) */
+  c?: boolean | 2;
+  /**
+   * Word 의 테두리: 위·아래 선이 문단 간격 안쪽에서 차지하는 자리 [위, 아래] (px, 글에서 선 바깥까지).
+   * 있으면 위·아래 선을 문단 간격 안(간격 - 이 값)에 그린다. 음수: 상자가 문단 간격까지 덮는다
+   */
+  a?: number[];
+  /** Word 의 테두리 선과 글 사이 간격 [왼, 오른, 위, 아래] (pt). DOCX 로 다시 쓸 때 쓴다 */
+  sp?: number[];
 }
 
 const PB_SIDE = /^([\d.]+)mm (solid|dashed|dotted|double) (#[0-9A-Fa-f]{6})$/;
@@ -665,12 +701,16 @@ export function cleanParaBorder(v: any): ParaBorder | null {
     const m = typeof v[k] === 'string' ? PB_SIDE.exec(v[k].trim()) : null;
     if (m) out[k] = `${Math.max(0.1, Math.min(10, parseFloat(m[1])))}mm ${m[2]} ${m[3].toUpperCase()}`;
   }
-  if (!out.l && !out.r && !out.t && !out.b) return null;
+  // 변이 없어도 Word 의 바탕 덩어리(a: 문단 간격을 뺀 칠할 자리)는 둔다
+  const wordBg = Array.isArray(v.a) && v.a.length === 2;
+  if (!out.l && !out.r && !out.t && !out.b && !wordBg) return null;
   if (Array.isArray(v.o) && v.o.length === 4 && v.o.every((x: any) => Number.isFinite(+x))) {
     const o = v.o.map((x: any) => Math.max(-50, Math.min(200, Math.round(+x * 100) / 100)));
     if (o.some((x: number) => x)) out.o = o;
   }
-  if (v.c) out.c = true;
+  if (v.c) out.c = v.c === 2 ? 2 : true;
+  if (Array.isArray(v.a) && v.a.length === 2 && v.a.every((x: any) => Number.isFinite(+x))) out.a = v.a.map((x: any) => (+x < 0 ? -1 : Math.min(200, Math.round(+x * 100) / 100)));
+  if (Array.isArray(v.sp) && v.sp.length === 4 && v.sp.every((x: any) => Number.isFinite(+x))) out.sp = v.sp.map((x: any) => Math.max(0, Math.min(31, Math.round(+x * 100) / 100)));
   return out;
 }
 
@@ -755,4 +795,13 @@ export function columnGeom(cols: any, contentWidthPx: number): ColGeom | null {
     }
   }
   return { n, x, w, line: c.line || null };
+}
+
+/**
+ * 배열 뒤에 다른 배열을 모두 잇는다. push(...items) 는 항목이 수만 개를 넘으면 함수 인자 한도를 넘어
+ * 'Maximum call stack size exceeded' 로 멈추므로(문단이 아주 많은 큰 문서), 큰 목록은 이것으로 잇는다
+ */
+export function pushAll<T>(to: T[], items: readonly T[]): T[] {
+  for (let i = 0; i < items.length; i++) to.push(items[i]);
+  return to;
 }

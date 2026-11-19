@@ -1,10 +1,11 @@
 import type { Node as PMNode } from '@tiptap/pm/model';
-import type { DocSettings, HeaderFooter, PageSetup } from './types';
+import type { DocSettings, HeaderFooter, PageNumFormat, PageNumbering, PageSetup, SectionHf } from './types';
 import { blocksHtml, hfRichHtml } from './hfRich';
 import { layoutTabsHtml } from './editor/tabLayout';
 import type { DocTab } from './doc/docTab';
 import { PX_PER_MM, formatPageNumber, xmlEscape } from './formats/common';
 import { FN_FONT_PX, FN_LINE, FN_SEP } from './editor/extensions/pagination';
+import { changeBarsHtml, lineNumbersHtml } from './lineNumbers';
 
 export const PAGE_GAP = 18;
 
@@ -95,18 +96,36 @@ export interface PagePlan {
 }
 
 /** 쪽마다의 자리. 쪽 나누기 엔진(pagination)의 쪽 위치 계산과 같은 식이다 */
-export function planPages(s: DocSettings, pageCount: number, pageSetups: (PageSetup | null)[] | undefined, W: number, gap = PAGE_GAP): PagePlan[] {
+export function planPages(
+  s: DocSettings,
+  pageCount: number,
+  pageSetups: (PageSetup | null)[] | undefined,
+  W: number,
+  gap = PAGE_GAP,
+  pageHfs?: ({ hf: SectionHf; start: number } | null)[],
+): PagePlan[] {
   const base = computeGeom(s, gap);
   // 용지가 따로 없는 쪽(첫 구역)의 설정: 첫 쪽만의 본문 영역을 넣은 것
   const s0 = s.firstPage ? { ...s, page: firstPageSetup(s) } : s;
   const hostLeft = (W - base.W) / 2 + base.ml;
   const out: PagePlan[] = [];
   let top = 0;
+  /** 지금까지의 쪽 번호 매김 (구역에서 다시 시작하면 그 구역부터 바뀐다) */
+  let numbering: PageNumbering = s.pageNumber;
   for (let k = 0; k < Math.max(1, pageCount); k++) {
     const setup = pageSetups?.[k] ?? null;
     const g = setup ? geomFor(s, setup, gap) : base;
     const left = (W - g.W) / 2;
-    out.push({ g, settings: setup ? { ...s, page: setup } : s0, left, top, contentTop: top + g.mt - base.mt, dx: left + g.ml - hostLeft });
+    let settings: DocSettings = setup ? { ...s, page: setup } : s0;
+    // 구역마다 다른 머리말·꼬리말: 그 구역의 것과 그 구역의 첫 쪽, 쪽 번호 다시 시작·모양
+    const sh = pageHfs?.[k];
+    if (sh) {
+      if (sh.start === k && (sh.hf.start != null || sh.hf.fmt)) {
+        numbering = { ...numbering, ...(sh.hf.start != null ? { start: sh.hf.start, base: k } : {}), ...(sh.hf.fmt ? { format: sh.hf.fmt as PageNumFormat } : {}) };
+      }
+      settings = { ...settings, header: sh.hf.header, footer: sh.hf.footer, hideFirst: undefined, sectionStart: sh.start, pageNumber: numbering };
+    } else if (numbering !== s.pageNumber) settings = { ...settings, pageNumber: numbering };
+    out.push({ g, settings, left, top, contentTop: top + g.mt - base.mt, dx: left + g.ml - hostLeft });
     top += g.H + gap;
   }
   return out;
@@ -125,7 +144,8 @@ export function hfText(text: string, page: number, pages: number, fmt: string): 
 
 /** k 번째 쪽(0부터)의 쪽 번호 */
 export function pageNumAt(s: DocSettings, k: number): number {
-  return Math.max(1, s.pageNumber.start + k - (s.pageNumber.base || 0));
+  // Word 는 0 부터 매길 수 있다 (표지를 0 쪽으로)
+  return Math.max(0, s.pageNumber.start + k - (s.pageNumber.base || 0));
 }
 
 /** k 번째 쪽에 쪽 번호를 찍는가 */
@@ -137,7 +157,8 @@ export function pageNumShown(s: DocSettings, k: number): boolean {
 export function hfAt(s: DocSettings, which: 'header' | 'footer', k: number): HeaderFooter | null {
   const def = s[which];
   if (k === 0 && s.hideFirst?.[which]) return null;
-  if (k === 0 && def.first) return def.first;
+  // 첫 쪽: 문서의 첫 쪽, 구역마다 다른 머리말이면 그 구역의 첫 쪽
+  if (k === (s.sectionStart ?? 0) && def.first) return def.first;
   if (def.from != null && k < def.from) return null;
   if (pageNumAt(s, k) % 2 === 0) return def.even ?? (def.oddOnly ? null : def);
   return def;
@@ -186,7 +207,37 @@ const SAFE_GRADIENT = /^(linear|radial|conic)-gradient\([\w\s%.,#()-]{1,400}\)$/
  * k 번째 쪽의 바탕 그림 HTML: 쪽 테두리/배경과 바탕쪽. 종이의 왼쪽 위를 (0,0) 으로 하는 종이 크기의 층이며 본문 뒤에 깔린다.
  * 화면(PageView)의 용지와 쪽 경계 가리개, 인쇄용 쪽이 같은 것을 쓴다. 그릴 것이 없으면 빈 문자열
  */
-export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number): string {
+const hideCache = new WeakMap<object, Map<number, string>>();
+
+/**
+ * 쪽마다 감출 것 (한글의 '감추기'): 블록의 pageHide 표시를 그 블록이 시작하는 쪽에 모은다.
+ * 값은 h 머리말, f 꼬리말, m 바탕쪽, b 쪽 테두리, x 쪽 배경, n 쪽 번호 글자들. 쪽 나누기 결과가 바뀔 때마다 다시 셈한다
+ */
+export function pageHidesOf(tab: DocTab): Map<number, string> {
+  let m = hideCache.get(tab.layout);
+  if (m) return m;
+  const out = new Map<number, string>();
+  const starts = tab.layout.pageStarts?.length ? tab.layout.pageStarts : [0];
+  tab.editor.state.doc.forEach((node, offset) => {
+    const h = node.attrs?.pageHide;
+    if (typeof h !== 'string' || !h) return;
+    // 블록이 시작하는 쪽: 시작 자리가 블록 자리 이하인 마지막 쪽
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    out.set(lo, (out.get(lo) || '') + h);
+  });
+  m = out;
+  hideCache.set(tab.layout, m);
+  return m;
+}
+
+/** 쪽 테두리/배경·바탕쪽. hide: 이 쪽에서 감출 것 (pageHidesOf 의 b·x·m) */
+export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number, hide = ''): string {
   const pb = s.pageBorder;
   const first = k === 0;
   let html = '';
@@ -202,7 +253,7 @@ export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number): string {
     const bg = color(pb.bg);
     const grad = typeof pb.gradient === 'string' && SAFE_GRADIENT.test(pb.gradient) && !/url|var|expression/i.test(pb.gradient) ? pb.gradient : null;
     const img = typeof pb.image === 'string' && SAFE_IMG.test(pb.image) ? pb.image : null;
-    if ((bg || grad || img) && on(pb.fillOn)) {
+    if ((bg || grad || img) && on(pb.fillOn) && !hide.includes('x')) {
       const area = pb.fillArea === 'border' ? bx : pb.fillArea === 'page' ? { x0: g.ml, x1: g.W - g.mr, y0: g.mt, y1: g.H - g.mb } : { x0: 0, x1: g.W, y0: 0, y1: g.H };
       const st = [`position:absolute`, `left:${area.x0}px`, `top:${area.y0}px`, `width:${Math.max(0, area.x1 - area.x0)}px`, `height:${Math.max(0, area.y1 - area.y0)}px`];
       if (bg) st.push(`background-color:${bg}`);
@@ -217,7 +268,7 @@ export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number): string {
       html += `<div class="pg-fill" style="${st.join(';')}"></div>`;
     }
     const sides = pb.sides || {};
-    if (on(pb.borderOn) && (sides.l || sides.r || sides.t || sides.b)) {
+    if (on(pb.borderOn) && (sides.l || sides.r || sides.t || sides.b) && !hide.includes('b')) {
       const names = { l: 'left', r: 'right', t: 'top', b: 'bottom' } as const;
       const st = [`position:absolute`, `box-sizing:border-box`, `left:${bx.x0}px`, `top:${bx.y0}px`, `width:${Math.max(0, bx.x1 - bx.x0)}px`, `height:${Math.max(0, bx.y1 - bx.y0)}px`];
       for (const k2 of ['l', 'r', 't', 'b'] as const) {
@@ -234,7 +285,7 @@ export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number): string {
   }
   // 바탕쪽: 본문 영역의 왼쪽 위를 기준으로 그린다 (개체는 종이·쪽 기준 자리에 놓여 있다)
   const mps = Array.isArray(s.masterPages) ? s.masterPages : [];
-  if (mps.length && !(first && s.hideFirst?.masterPage)) {
+  if (mps.length && !(first && s.hideFirst?.masterPage) && !hide.includes('m')) {
     const even = pageNumAt(s, k) % 2 === 0;
     for (const mp of mps) {
       if (!mp || (mp.type === 'even' && !even) || (mp.type === 'odd' && even)) continue;
@@ -276,7 +327,8 @@ export function repeatHeadsHtml(tab: DocTab, g: PageGeom, k: number): string {
     const clone = table.cloneNode(true) as HTMLElement;
     let head = true;
     clone.querySelectorAll(':scope > tbody > tr').forEach((tr) => {
-      if (head && tr.children.length && Array.from(tr.children).every((c) => c.tagName === 'TH')) return;
+      // 제목 줄: 제목 칸으로만 된 줄, 또는 되풀이로 표시한 줄 (Word 의 tblHeader)
+      if (head && tr.children.length && (tr.getAttribute('data-repeat') === '1' || Array.from(tr.children).every((c) => c.tagName === 'TH'))) return;
       head = false;
       tr.remove();
     });
@@ -296,8 +348,11 @@ export function repeatHeadsHtml(tab: DocTab, g: PageGeom, k: number): string {
     if (!table || table.getAttribute('data-borderless') === 'true') continue;
     const wrap = table.parentElement as HTMLElement | null;
     const left = (wrap && wrap !== tab.editor.view.dom ? wrap.offsetLeft : 0) + table.offsetLeft;
-    const y = Math.min(g.contentH, Math.max(0, c.y));
-    html += `<div class="pg-table-cut" style="position:absolute;left:${g.ml + left}px;top:${g.mt + y}px;width:${table.offsetWidth}px;height:${Math.max(0, g.contentH - y)}px;border-top:1px solid #000;background:#fff;box-sizing:border-box;pointer-events:none"></div>`;
+    // Word 등: 표 자신의 선으로 닫는다 (pagination 이 적어 둔 그 자리의 선). 한글 문서: 1px 검은 선
+    const word = !tab.settings.hwpMetrics && c.line != null;
+    const y = Math.min(g.contentH, Math.max(0, c.y + (word ? c.off || 0 : 0)));
+    const line = word ? (/^[\w\s.#(),%-]+$/.test(c.line!) ? c.line! : 'none') : '1px solid #000';
+    html += `<div class="pg-table-cut" style="position:absolute;left:${g.ml + left}px;top:${g.mt + y}px;width:${table.offsetWidth}px;height:${Math.max(0, g.contentH - y)}px;border-top:${line};background:#fff;box-sizing:border-box;pointer-events:none"></div>`;
   }
   return html;
 }
@@ -319,16 +374,20 @@ export function pageChromeHtml(tab: DocTab, g: PageGeom, k: number, pageCount: n
     return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;align-items:${valign};justify-content:${def.align === 'left' ? 'flex-start' : def.align === 'right' ? 'flex-end' : 'center'};font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:9pt;white-space:pre;overflow:hidden">${xmlEscape(hfText(def.text, num, total, s.pageNumber.format))}</div>`;
   };
   html += repeatHeadsHtml(tab, g, k);
-  // 이 쪽의 머리말·꼬리말 (짝수 쪽, 시작 쪽, 첫 쪽 감추기)
-  const hd = hfAt(s, 'header', k);
-  const ft = hfAt(s, 'footer', k);
+  // 이 쪽의 머리말·꼬리말 (짝수 쪽, 시작 쪽, 첫 쪽 감추기, 이 쪽의 감추기)
+  const hide = pageHidesOf(tab).get(k) || '';
+  const hd = hide.includes('h') ? null : hfAt(s, 'header', k);
+  const ft = hide.includes('f') ? null : hfAt(s, 'footer', k);
   if (hd) html += zone(hd, z.header.top, z.header.height, 'flex-start');
   if (ft) html += zone(ft, z.footer.top, z.footer.height, 'flex-end');
-  if (pageNumShown(s, k)) {
+  if (pageNumShown(s, k) && !hide.includes('n')) {
     const [v, h] = s.pageNumber.pos.split('-');
     const zz = v === 'top' ? z.header : z.footer;
     html += `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${zz.top}px;height:${zz.height}px;display:flex;align-items:${v === 'top' ? 'flex-start' : 'flex-end'};justify-content:${h === 'left' ? 'flex-start' : h === 'right' ? 'flex-end' : 'center'};font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:9pt">${xmlEscape(formatPageNumber(num, s.pageNumber.format))}</div>`;
   }
+  // 줄 번호와 변경 막대 (본문 왼쪽 여백)
+  html += lineNumbersHtml(tab, g, k);
+  html += changeBarsHtml(tab, g, k);
   const fns = tab.layout.footnotes.filter((f) => f.page === k);
   if (fns.length) {
     html += `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;bottom:${g.mb}px;font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:${FN_FONT_PX}px;line-height:${FN_LINE}">`;
@@ -378,17 +437,69 @@ export function collectPageBoxes(root: HTMLElement): PageBox[] {
     });
 }
 
+/** 둘레 글이 비켜 가는 자리(floatWrap)가 제 블록 아래로 이어지는 것 (편집기 본문 기준 px) */
+interface WrapCarry {
+  f: string;
+  left: number;
+  right: number;
+  /** 글이 비켜 가기 시작하는 곳 (float 위쪽 + 꼴의 위 안쪽) */
+  top: number;
+  bottom: number;
+  owner: HTMLElement;
+}
+
+/** 블록 사본은 따로 놓여 앞 블록의 float 가 미치지 않는다: 이어지는 비킴 자리를 모아 뒤 블록의 사본에도 둔다 */
+function wrapCarries(root: HTMLElement): WrapCarry[] {
+  // 비킴 자리와, 스스로 float 인 틀(k-cfloat: 높이 없는 자리 표시 안에 있어 뒤 블록으로 이어진다)
+  const els = root.querySelectorAll<HTMLElement>('.k-wrap-x, .k-cfloat');
+  if (!els.length) return [];
+  const rr = root.getBoundingClientRect();
+  const z = root.offsetHeight > 0 ? rr.height / root.offsetHeight || 1 : 1;
+  const out: WrapCarry[] = [];
+  for (const el of Array.from(els)) {
+    let owner: HTMLElement | null = el;
+    while (owner && owner.parentElement !== root) owner = owner.parentElement;
+    if (!owner) continue;
+    const r = el.getBoundingClientRect();
+    const bottom = (r.bottom - rr.top) / z;
+    if (bottom <= owner.offsetTop + owner.offsetHeight) continue;
+    out.push({ f: el.dataset.f || 'left', left: (r.left - rr.left) / z, right: (r.right - rr.left) / z, top: (r.top - rr.top) / z + (parseFloat(el.dataset.t || '0') || 0), bottom, owner });
+  }
+  return out;
+}
+
+/** 앞 블록에서 이어지는 비킴 자리를 이 문단 사본 맨 앞에 둔다 */
+function addWrapCarries(clone: HTMLElement, b: PageBox, carries: WrapCarry[]) {
+  if (!/^(P|H[1-6])$/.test(b.el.tagName)) return;
+  let cs: CSSStyleDeclaration | null = null;
+  for (const c of carries) {
+    if (c.owner === b.el || c.owner.offsetTop >= b.top || c.bottom <= b.top) continue;
+    cs = cs || getComputedStyle(b.el);
+    const px = (v: string) => parseFloat(v) || 0;
+    const ct = b.top + px(cs.borderTopWidth) + px(cs.paddingTop);
+    const cl = b.left + px(cs.borderLeftWidth) + px(cs.paddingLeft);
+    const cr = b.left + b.width - px(cs.borderRightWidth) - px(cs.paddingRight);
+    if (c.bottom <= ct) continue;
+    const width = c.f === 'full' ? '100%' : c.f === 'right' ? `${Math.max(0, cr - c.left).toFixed(2)}px` : `${Math.max(0, c.right - cl).toFixed(2)}px`;
+    const span = document.createElement('span');
+    span.className = 'k-wrap-x';
+    span.style.cssText = `float:${c.f === 'right' ? 'right' : 'left'};width:${width};height:${(c.bottom - ct).toFixed(2)}px;shape-outside:inset(${Math.max(0, c.top - ct).toFixed(2)}px 0 0 0)`;
+    clone.insertBefore(span, clone.firstChild);
+  }
+}
+
 /** 편집 화면의 쪽 배치 (구역마다 용지가 다르면 쪽마다 다르다) */
 export function printPlans(tab: DocTab): PagePlan[] {
   const pageCount = Math.max(1, tab.layout.pageCount);
-  return planPages(tab.settings, pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP);
+  return planPages(tab.settings, pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP, tab.layout.pageHfs);
 }
 
 /** k 번째 쪽: 편집 화면의 블록 사본을 쪽 안 자리에 놓고 머리말·꼬리말·쪽 번호·각주를 붙인다 */
 export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: PageBox[], pageCount: number): HTMLElement {
   const g = plan.g;
   const page = document.createElement('div');
-  page.className = 'print-page';
+  // 한글 문서의 쪽 (투명 선이 자리를 차지하는 그리기 규칙을 머리말·꼬리말까지 지킨다: editor.css)
+  page.className = 'print-page' + (tab.settings.hwpMetrics ? ' hwp-page' : '');
   page.style.width = `${g.wMm}mm`;
   page.style.height = `${g.hMm}mm`;
   // 인쇄 용지 크기: 쪽마다 이름 붙은 @page (withPrintRoot)
@@ -396,7 +507,7 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
   const bg = pageBackgroundStyle(tab.settings, k);
   if (bg) Object.assign(page.style, bg);
   // 쪽 테두리/배경·바탕쪽 (본문 뒤에)
-  const paint = pagePaintHtml(plan.settings, g, k);
+  const paint = pagePaintHtml(plan.settings, g, k, pageHidesOf(tab).get(k) || '');
   if (paint) {
     const holder = document.createElement('div');
     holder.innerHTML = paint;
@@ -406,7 +517,9 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
   body.className = 'print-body';
   Object.assign(body.style, { left: `${g.ml}px`, top: `${g.mt}px`, width: `${g.contentW}px`, height: `${g.contentH}px` });
   const content = document.createElement('div');
-  content.className = 'kdoc-content' + (tab.settings.hwpMetrics ? ' hwp-metrics' : '') + (tab.settings.fixedLines ? ' fixed-lines' : '');
+  const root = boxes[0]?.el.parentElement || null;
+  const carries = root ? wrapCarries(root) : [];
+  content.className = 'kdoc-content' + (tab.settings.hwpMetrics ? ' hwp-metrics' : '') + (tab.settings.fixedLines ? ' fixed-lines' : '') + (root?.classList.contains('k-has-wrap') ? ' k-has-wrap' : '');
   Object.assign(content.style, { position: 'relative', width: `${g.contentW}px`, height: `${g.contentH}px` });
   const y0 = plan.contentTop;
   const y1 = y0 + g.contentH;
@@ -426,6 +539,7 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
     clone.classList.remove('pg-measuring');
     clone.querySelectorAll('.selectedCell').forEach((e) => e.classList.remove('selectedCell'));
     clone.querySelectorAll('.search-match').forEach((e) => e.classList.remove('search-match', 'current'));
+    if (carries.length) addWrapCarries(clone, b, carries);
     content.appendChild(clone);
   }
   body.appendChild(content);

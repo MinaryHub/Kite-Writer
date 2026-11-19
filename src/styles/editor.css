@@ -45,6 +45,12 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* ProseMirror 가 줄 끝 개체 뒤에 넣는 빈 그림(줄 바꿈 자리 표시): 기준선에 앉으면 줄 상자를 기준선까지 늘린다.
+   한글 줄 상자(버팀대)는 줄 간격이 음수일 때 기준선이 줄 아래로 나가므로, 이 빈 그림이 줄을 늘리지 않게 위에 붙인다 */
+.kdoc-content img.ProseMirror-separator {
+  vertical-align: top;
+}
+
 .kdoc-content p,
 .kdoc-content h1,
 .kdoc-content h2,
@@ -223,6 +229,25 @@
   border: 1px dotted var(--k-transparent-line, #c9c9f4);
 }
 .hide-transparent .kdoc-content { --k-transparent-line: transparent; }
+/*
+ * 한글 문서가 아닌 것(Word 등): 선 없는 칸의 '투명 선'은 Word 의 눈금선처럼 자리를 차지하지 않는다.
+ * 테두리 폭은 0 으로 두고 점선은 칸 위에 얹어 그린다 (한글 문서는 한글이 적어 둔 칸 크기에 맞춰 그대로 1px)
+ */
+:is(.workspace:not(.hwp-metrics), .print-page:not(.hwp-page)) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='l'] { border-left-width: 0; }
+:is(.workspace:not(.hwp-metrics), .print-page:not(.hwp-page)) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='r'] { border-right-width: 0; }
+:is(.workspace:not(.hwp-metrics), .print-page:not(.hwp-page)) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='t'] { border-top-width: 0; }
+:is(.workspace:not(.hwp-metrics), .print-page:not(.hwp-page)) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='b'] { border-bottom-width: 0; }
+.workspace:not(.hwp-metrics) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border]:not([data-diag])::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 0 dotted var(--k-transparent-line, #c9c9f4);
+}
+.workspace:not(.hwp-metrics) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='l']:not([data-diag])::before { border-left-width: 1px; }
+.workspace:not(.hwp-metrics) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='r']:not([data-diag])::before { border-right-width: 1px; }
+.workspace:not(.hwp-metrics) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='t']:not([data-diag])::before { border-top-width: 1px; }
+.workspace:not(.hwp-metrics) .kdoc-content:not(.hwp-metrics) :is(td, th)[data-border~='b']:not([data-diag])::before { border-bottom-width: 1px; }
 
 .kdoc-content .selectedCell::after {
   content: '';
@@ -279,6 +304,18 @@
   line-height: 0;
   vertical-align: bottom;
   max-width: 100%;
+}
+/* 동영상의 첫 화면: 가운데 재생 단추 (한글처럼 흰 원과 세모) */
+.kdoc-content .k-image.k-play::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 56px;
+  height: 56px;
+  margin: -28px 0 0 -28px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 56 56'%3E%3Ccircle cx='28' cy='28' r='25' fill='rgba(0,0,0,0.25)' stroke='%23fff' stroke-width='3'/%3E%3Cpath d='M22 16 L40 28 L22 40 Z' fill='%23fff'/%3E%3C/svg%3E") center / contain no-repeat;
+  pointer-events: none;
 }
 .kdoc-content .k-image img {
   max-width: 100%;
@@ -617,10 +654,25 @@
   padding-left: max(0px, calc(var(--cm-l, var(--cell-px, 1.8mm)) - 0.75px));
   padding-right: max(0px, calc(var(--cm-r, var(--cell-px, 1.8mm)) - 0.75px));
 }
-/* 세로도 같다: 한글의 줄 높이(칸 높이)에는 테두리 두께가 들지 않는다. 위아래 테두리의 절반씩만큼 안 여백을 줄인다 */
+/* 세로도 같다: 한글의 줄 높이(칸 높이)에는 테두리 두께가 들지 않는다. 위아래 테두리의 절반씩만큼 안 여백을 줄인다
+   (굵은 선은 칸 속성이 그 절반을 --bh-t / --bh-b 로 준다. 없으면 1px 선) */
+@property --bh-t { syntax: '*'; inherits: false; }
+@property --bh-b { syntax: '*'; inherits: false; }
 :is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th):not(tr.pg-push-row > *) {
-  padding-top: max(0px, calc(var(--cm-t, 0.5mm) - 0.5px));
-  padding-bottom: max(0px, calc(var(--cm-b, 0.5mm) - 0.5px));
+  padding-top: max(0px, calc(var(--cm-t, 0.5mm) - var(--bh-t, 0.5px)));
+  padding-bottom: max(0px, calc(var(--cm-b, 0.5mm) - var(--bh-b, 0.5px)));
+}
+/* 안 여백이 테두리 절반보다 작아 위에서 다 줄이지 못한 칸(--cneg-*: 칸 속성이 준다): 첫·끝 블록을 그만큼 테두리 쪽으로 당긴다.
+   값은 칸마다 다시 0 으로 두어 안에 든 표의 칸으로 이어지지 않게 한다 */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th) {
+  --cneg-t: 0px;
+  --cneg-b: 0px;
+}
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th):not(tr.pg-push-row > *) > :first-child {
+  margin-top: var(--cneg-t);
+}
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th):not(tr.pg-push-row > *) > :last-child {
+  margin-bottom: var(--cneg-b);
 }
 /* 줄 높이 고정 문서(PDF)의 그림은 PDF 크기 그대로: 내어쓰기(음수 text-indent)가 있는 줄에서
    max-width: 100% 가 그림을 아주 좁게 줄이는 일이 있다 */
@@ -651,19 +703,22 @@
 .kdoc-content .chk-current { background: rgba(255, 213, 79, 0.45); }
 .print-page .chk-mark { text-decoration: none; background: none; }
 
-/* 변경 내용 (넣음/지움): 사람마다 색 */
+/* 변경 내용 (넣음/지움): 사람마다 색. 문서가 사람 색을 정했으면(--tc-c: 한글의 변경 추적) 그 색 그대로 */
 .kdoc-content ins.tc-ins {
   text-decoration: underline;
   text-decoration-thickness: 1.5px;
-  text-decoration-color: hsl(var(--tc-hue, 210), 75%, 40%);
-  color: hsl(var(--tc-hue, 210), 75%, 32%);
+  text-decoration-color: var(--tc-c, hsl(var(--tc-hue, 210), 75%, 40%));
+  color: var(--tc-c, hsl(var(--tc-hue, 210), 75%, 32%));
   background: hsla(var(--tc-hue, 210), 80%, 50%, 0.08);
+}
+.kdoc-content ins.tc-ins[data-color] {
+  background: none;
 }
 .kdoc-content del.tc-del {
   text-decoration: line-through;
   text-decoration-thickness: 1.5px;
-  text-decoration-color: hsl(var(--tc-hue, 0), 70%, 45%);
-  color: hsl(var(--tc-hue, 0), 55%, 45%);
+  text-decoration-color: var(--tc-c, hsl(var(--tc-hue, 0), 70%, 45%));
+  color: var(--tc-c, hsl(var(--tc-hue, 0), 55%, 45%));
 }
 /* 메모가 달린 글자 */
 .kdoc-content .k-comment {
@@ -725,6 +780,45 @@
 .master-page {
   isolation: isolate;
 }
+/* 떠 있는 그림·도형이 든 문단은 그 개체의 자리 기준이 된다 (Word 문서 등 한글 문서가 아닌 것: 한글 문서는 모든 문단이 기준) */
+.kdoc-content :is(p, h1, h2, h3, h4, h5, h6):has(.k-float) {
+  position: relative;
+}
+/* Word 문서: 표 칸 안 안쪽 표 뒤의 마지막 빈 문단은 그리지 않는다 (Word 와 같이. 커서가 들어가면 나타난다) */
+p[data-cell-tail]:is(:empty, :has(> br:only-child)):not(.k-caret-here) {
+  height: 0 !important;
+  min-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  overflow: hidden;
+}
+/* 떠 있는 개체 둘레로 글이 비켜 가는 자리 (floatWrap): 보이지 않고 누르거나 고를 수 없다 */
+.kdoc-content .k-wrap-x {
+  pointer-events: none;
+  user-select: none;
+}
+.kdoc-content .k-wrap-w {
+  display: none;
+}
+/*
+ * 그런 개체가 있는 문서의 빈 문단(떠 있는 개체만 든 것도): 폭이 조금 있어야 옆을 비운 개체 아래로 밀린다 (Word 와 같이).
+ * 비킴 자리가 든 문단은 그 float 뒤의 자리(k-wrap-w)에 폭을 준다 (앞에 두면 float 가 다음 줄로 밀린다)
+ */
+:is(.ProseMirror.k-has-wrap, .kdoc-content.k-has-wrap) :is(p, h1, h2, h3, h4, h5, h6):has(> br.ProseMirror-trailingBreak):not(:has(> :not(br, .k-float, .ProseMirror-separator)))::before,
+.kdoc-content :is(p, h1, h2, h3, h4, h5, h6):has(> br.ProseMirror-trailingBreak):not(:has(> :not(br, .k-wrap, .k-float, .ProseMirror-separator))) > .k-wrap > .k-wrap-w {
+  content: '';
+  display: inline-block;
+  width: 1px;
+}
+/* Word 의 틀·첫 글자 장식: 높이 없는 자리 표시 안의 CSS float (뒤 문단의 글줄이 옆으로 흐른다) */
+.kdoc-content .k-cfloat {
+  position: relative;
+  z-index: 1;
+}
+.kdoc-content .k-cfloat > .k-textbox {
+  max-width: none;
+}
 /* 떠 있는 글상자: 높이 없는 자리 표시 안에서 제 위치에 뜬다 (뒤따르는 문단 상자의 위쪽이 기준) */
 .kdoc-content .k-float-anchor {
   position: relative;
@@ -760,14 +854,18 @@
   border-right: var(--pb-r, none);
   border-top: var(--pb-t, none);
   border-bottom: var(--pb-b, none);
+  background: var(--pb-bg, none);
+  z-index: var(--pb-z, auto);
   pointer-events: none;
 }
-/* 이어진 문단의 테두리는 한 상자로: 사이의 위·아래 선을 그리지 않는다 */
-.kdoc-content p[data-pb-join] + p[data-pb-join]::after {
+/* 이어진 문단의 테두리는 한 상자로: 사이의 위·아래 선을 그리지 않는다 (값이 다른 이웃 묶음끼리는 잇지 않는다) */
+.kdoc-content p[data-pb-join='1'] + p[data-pb-join='1']::after,
+.kdoc-content p[data-pb-join='2'] + p[data-pb-join='2']::after {
   border-top: none;
   top: 0;
 }
-.kdoc-content p[data-pb-join]:has(+ p[data-pb-join])::after {
+.kdoc-content p[data-pb-join='1']:has(+ p[data-pb-join='1'])::after,
+.kdoc-content p[data-pb-join='2']:has(+ p[data-pb-join='2'])::after {
   border-bottom: none;
   bottom: 0;
 }
@@ -934,10 +1032,12 @@
 }
 
 /* 한글 문서·줄 높이 고정 문서: 글자 조각의 줄 높이가 0 이라 폭이 정해진 탭(인라인 블록)의 높이도 0 이 되어 채움(점선)이
-   보이지 않았다. 탭 상자에 글자 크기만큼의 높이를 주고 기준선 아래로 조금 내려 채움이 글자 아래쪽에 오게 한다 */
+   보이지 않았다. 탭 상자에 글자 크기만큼의 높이를 주어 한글의 글자 상자(기준선 위 0.85em, 아래 0.15em)와 같은 자리에 둔다:
+   기준선을 상자 아래 끝에 두고(overflow: hidden) 0.15em 내린다. 그보다 아래로 나가면 줄 상자가 늘어 칸이 높아진다 */
 :is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics, .workspace.fixed-lines .ProseMirror, .kdoc-content.fixed-lines) .k-tab[style*='width'] {
   height: 1em;
-  vertical-align: -0.2em;
+  overflow: hidden;
+  vertical-align: -0.15em;
 }
 /* 채움은 한글처럼 앞 글과 뒤 글(쪽 번호)에서 조금 떨어져 그린다 (탭 폭은 그대로: 안 여백 안쪽에만 채움) */
 .k-tab[data-leader]:not([data-leader='0'])[style*='width'] {

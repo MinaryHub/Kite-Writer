@@ -1,4 +1,7 @@
-import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, floatOverhang, gapInBox, isBreakBlock, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
+import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, floatOverhang, gapInBox, isBreakBlock, jsonContentSize, cellContentNeed, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx } from '../hwpLayout';
+import { cleanLook, type PicLook } from '../picLook';
+import { olePreview } from '../olePreview';
+import { isMetafileExt, metafileToSvg } from '../metafile';
 import { hwpToLatex } from '../../math/hwpEq';
 import * as CFB from 'cfb';
 import { Inflate } from 'pako';
@@ -18,6 +21,7 @@ import {
   NumberingCounter,
   paragraph,
   placeholderImage,
+  cleanPageHide,
   round,
   textNode,
   HWP_NUM_FORMATS,
@@ -27,6 +31,7 @@ import {
   normCrop,
   type BorderSide,
   FIXED_SPACE,
+  pushAll,
 } from '../common';
 import { charMarks, paraAttrs, paraBorderFrom, imgFillFit, langFontsOf, lineColorOf, gradientCss, gradientOf, pageBorderOf, type CharPr, type ParaPr, type BorderFill, type Numbering } from '../hwpx/reader';
 import { type Gradient, type Mat, type ShapeData, type ShapeItem, type ShapeRaw, HWP_ARROW_SIZES, HWP_ARROW_STYLES, HWP_LINE_STYLES, SHADOW_DEFAULT, SHADOW_UNIT_PX, arrowOf, arrowSizeOf, composeMats, matOfHwp, shapeBounds } from '../shape';
@@ -65,6 +70,7 @@ const T = {
   SHAPE_COMPONENT_ARC: 81,
   SHAPE_COMPONENT_POLYGON: 82,
   SHAPE_COMPONENT_CURVE: 83,
+  SHAPE_COMPONENT_OLE: 84,
   SHAPE_COMPONENT_PICTURE: 85,
   SHAPE_COMPONENT_CONTAINER: 86,
   CTRL_DATA: 87,
@@ -393,6 +399,8 @@ class HwpConverter {
   /** 지금 읽는 구역의 편집 용지 (구역 정의에서 처음 읽은 것) */
   sectionPage: PageSetup | null = null;
   private linkHref: string | null = null;
+  /** 이 문단에서 읽은 감추기 (첫 블록에 단다) */
+  private pageHide: string | null = null;
   /** 지금 읽는 문단이 놓인 쪽 (0 부터; 쪽 나누기와 줄 정보로 센다) */
   private page = 0;
   private lastVpos = 0;
@@ -559,9 +567,11 @@ class HwpConverter {
       // 새 단으로 넘어온 문단도 단 맨 위에서 시작한다
       hwpPage: hwpPage || newCol,
       pageBreak: !inSub && !!(breakType & 0x05),
-      pp: { spaceBefore: pp?.spaceBefore || 0, indentLeft: pp?.indentLeft || 0, indentRight: pp?.indentRight || 0, textIndent: pp?.textIndent || 0 },
+      pp: { spaceBefore: pp?.spaceBefore || 0, spaceAfter: pp?.spaceAfter || 0, indentLeft: pp?.indentLeft || 0, indentRight: pp?.indentRight || 0, textIndent: pp?.textIndent || 0 },
       state: this.layState,
       origin,
+      line0: lineSegs.length ? { x: lineSegs[0][2] + leftPx, w: lineSegs[0][1] } : undefined,
+      align: pAttrs.textAlign || null,
     });
 
     let inline: JNode[] = [];
@@ -674,6 +684,12 @@ class HwpConverter {
       if (id === 'secd' || id === 'cold' || id === 'head' || id === 'foot' || id === 'pgnp') this.handleCtrl(ctrls[ctrlIdx], 0, inline);
     }
     const lineSize = inline.length && !produced ? inlineSize() : 0;
+    // 표(블록)로 쪼개진 문단에 떠 있는 개체만 남았으면: 표와 같은 줄에 걸린 개체다. 새 문단(빈 줄)을 세우지 않고
+    // 높이 없는 자리 표시에 담아 표 앞에 둔다 (HWPX 와 같게)
+    if (produced && inline.length && inline.every((n) => !!n.attrs?.float && n.type !== 'text')) {
+      lay.before.push({ type: 'textBox', attrs: { width: null, height: null, padding: [0, 0, 0, 0], float: { x: 0, y: 0 } }, content: [paragraph({ ...pAttrs, fontSize }, inline)] });
+      inline = [];
+    }
     if (inline.length) flush();
     else if (!produced) blocks.push(paragraph({ ...pAttrs, fontSize }));
     // 문단이 표 등으로 쪼개지지 않고 줄 위치를 모두 찾았을 때만. 첫 줄은 문단 번호(머리 글자)부터
@@ -688,6 +704,11 @@ class HwpConverter {
     const seq0 = this.layState.seq;
     const done = lay.finish(blocks, lines, floating);
     const out = placeCaptions(done.blocks, captions);
+    if (!inSub && this.pageHide) {
+      const first = out.find((b) => !isBreakBlock(b));
+      if (first) first.attrs = { ...first.attrs, pageHide: cleanPageHide(this.pageHide) };
+      this.pageHide = null;
+    }
     if (!inSub) {
       // 캡션 문단도 본문 블록이다: 차례가 끊기지 않게 캡션까지 넣어 다시 매긴다
       this.layState.seq = seq0;
@@ -749,6 +770,13 @@ class HwpConverter {
       case 'en  ':
         inline.push({ type: 'footnote', attrs: { text: this.subText(ctrl, false) } });
         return [];
+      case 'pghd': {
+        // 감추기: 이 문단이 놓인 쪽에서 감출 것 (속성 비트: 머리말, 꼬리말, 바탕쪽, 테두리, 배경, 쪽 번호). 문단의 첫 블록에 단다
+        const a = u32(ctrl, 4);
+        const flags = ['h', 'f', 'm', 'b', 'x', 'n'].filter((_, i) => a & (1 << i)).join('');
+        if (flags) this.pageHide = (this.pageHide || '') + flags;
+        return [];
+      }
       case 'pgnp': {
         const a = u32(ctrl, 4);
         const fmt = a & 0xff;
@@ -916,6 +944,28 @@ class HwpConverter {
     return parts.join(' ').trim();
   }
 
+  /** 칸 안 문단에 떠 있는 개체(글자처럼 취급하지 않고 문단 기준으로 놓인 것)의 아래 끝 가운데 가장 아래 (px, 칸 안쪽 위끝 기준). 없으면 0 */
+  private cellObjectsBottom(paras: Rec[]): number {
+    let bottom = 0;
+    for (const p of paras) {
+      if (p.tag !== T.PARA_HEADER) continue;
+      const seg = p.children.find((c) => c.tag === T.PARA_LINE_SEG);
+      if (!seg || seg.data.length < 8) continue;
+      const pp = this.info.paraPrs[u16(p, 8)];
+      const top = hwpToPx(i32(seg, 4)) - (pp?.spaceBefore || 0) * (96 / 72);
+      for (const c of p.children) {
+        if (c.tag !== T.CTRL_HEADER) continue;
+        const id = ctrlIdOf(c);
+        if (id !== 'gso ' && id !== 'tbl ') continue;
+        const o = objPosOf(c);
+        if (o.inline || o.vRel !== 'PARA') continue;
+        const b = top + o.vOff + o.h + o.omB;
+        if (b > bottom && b < 30000) bottom = b;
+      }
+    }
+    return bottom;
+  }
+
   convertTable(ctrl: Rec): JNode {
     const tbl = ctrl.children.find((c) => c.tag === T.TABLE);
     const nRowsDecl = tbl ? u16(tbl, 4) : 0;
@@ -925,6 +975,8 @@ class HwpConverter {
     const rowH: number[] = [];
     /** 여러 줄을 합친 칸: 첫 줄, 줄 수, 칸 높이(px), 내용이 요구하는 높이(px) */
     const spans: { row: number; rs: number; h: number; need: number }[] = [];
+    /** 줄마다 낱칸 내용이 요구하는 높이(px, 위아래 안 여백 포함): 적힌 칸 높이보다 클 때만 */
+    const rowNeed: number[] = [];
     const VM = hwpToPx(CELL_VMARGIN_HWP);
     let cur: { lh: Rec; paras: Rec[] } | null = null;
     const finish = () => {
@@ -946,9 +998,15 @@ class HwpConverter {
       const cellVm = hwpToPx(cmv[2] + cmv[3]);
       let content = this.convertParagraphs(cur.paras, true, null, w - hwpToPx(cmv[0] + cmv[1])).filter((n) => n.type !== 'pageBreak');
       if (!content.length) content = [paragraph()];
-      // 적힌 칸 높이가 글보다 작으면 한글은 칸 높이를 내용으로 새로 셈한다 (마지막 줄 간격·문단 아래 간격 포함)
-      const need = markCellTrail(content, hwpToPx(u32(lh, 20)), cellVm);
+      // 적힌 칸 높이가 글보다 작으면 한글은 칸 높이를 내용(마지막 줄의 글자 높이까지)으로 늘린다.
+      // 칸 안에 떠 있는 개체(문단 기준)도 칸을 늘린다: 개체 아래 끝 = 문단 위끝(첫 줄 - 문단 위 간격) + 세로 오프셋 + 높이 + 바깥 아래 여백
+      const objBottom = this.cellObjectsBottom(cur.paras);
+      const objPx = objBottom > 0 ? objBottom + cellVm : 0;
+      if (rs === 1 && objPx > 0) rowH[row] = Math.max(rowH[row] || 0, objPx - VM);
+      const need = Math.max(cellContentNeed(content, hwpToPx(u32(lh, 20)), cellVm), objPx > hwpToPx(u32(lh, 20)) + 1 ? objPx : 0);
       if (rs > 1) spans.push({ row, rs, h: hwpToPx(u32(lh, 20)), need });
+      // 낱칸의 내용 높이: 합친 칸이 덮은 줄의 실제 높이를 셈할 때 쓴다
+      else if (need > 0) rowNeed[row] = Math.max(rowNeed[row] || 0, need);
       const va = (attrVal >>> 21) & 3;
       const attrs: Record<string, any> = { colspan: cs, rowspan: rs, colwidth: null };
       if (bf?.bg) attrs.backgroundColor = bf.bg;
@@ -959,7 +1017,7 @@ class HwpConverter {
       if (fillSrc && bf?.img) attrs.bgImages = [{ src: fillSrc, fit: imgFillFit(bf.img.mode) }];
       // 칸 자체 안 여백 (속성 뒤 2바이트의 bit 0 이 켜진 칸만; 아니면 표의 기본 여백)
       // (표의 기본 안 여백이 위·아래 0.5mm 가 아닐 때도 넣는다: 화면의 기본 위·아래 여백은 0.5mm)
-      if (ownMargin || Math.abs(cmv[2] - 141) > 2 || Math.abs(cmv[3] - 141) > 2) attrs.margins = cmv.map((v) => Math.round(hwpToPx(v) * 10) / 10);
+      if (ownMargin || Math.abs(cmv[2] - 141) > 2 || Math.abs(cmv[3] - 141) > 2) attrs.margins = cmv.map((v) => Math.round(hwpToPx(v) * 100) / 100);
       if (va === 0) attrs.verticalAlign = 'top';
       else if (va === 2) attrs.verticalAlign = 'bottom';
       // 제목 칸(속성 뒤 2바이트의 bit 2)이고 표가 '제목 줄 자동 반복'(표 속성 bit 2)이면 제목 칸으로: 쪽이 바뀌면 되풀이된다
@@ -991,9 +1049,11 @@ class HwpConverter {
     finish();
     const nColsDecl = tbl ? u16(tbl, 6) : 0;
     // 합친 칸으로만 덮인 줄의 높이, 내용이 넘치는 합친 칸의 마지막 줄
-    solveSpanRows(rowH, spans, VM);
+    solveSpanRows(rowH, spans, VM, rowNeed);
     const t = assembleTable(cells, nRowsDecl, nColsDecl, hwpToPx(u32(ctrl, 16)), rowH);
     if (tbl) t.attrs = { cellPadding: Math.round(hwpToPx((u16(tbl, 10) + u16(tbl, 12)) / 2) * 10) / 10 };
+    // 한글이 적어 둔 표 높이 (px, 쪽에 걸친 표는 첫 쪽 몫). 문서 노드에는 없는 값: 견주기 도구가 읽는다
+    t.attrs = { ...t.attrs, hwpH: Math.round(hwpToPx(u32(ctrl, 20)) * 100) / 100 };
     // 쪽 경계에서 나눔 (표 속성 bit 0~1): 0 나누지 않음, 1 셀 단위로 나눔(줄을 통째로 넘김), 2 나눔
     if (tbl) {
       const brk = u32(tbl, 0) & 3;
@@ -1025,6 +1085,7 @@ class HwpConverter {
     const w = Math.round(hwpToPx(u32(ctrl, 16)));
     const h = Math.round(hwpToPx(u32(ctrl, 20)));
     const pics: Rec[] = [];
+    let oleRec: Rec | null = null;
     const texts: { header: Rec; paras: Rec[]; shape: Rec }[] = [];
     let shapeRec: Rec | null = null;
     let rectRec: Rec | null = null;
@@ -1043,6 +1104,7 @@ class HwpConverter {
           continue;
         }
         if (c.tag === T.SHAPE_COMPONENT_PICTURE) pics.push(c);
+        else if (c.tag === T.SHAPE_COMPONENT_OLE && !oleRec) oleRec = c;
         else if (c.tag === T.SHAPE_COMPONENT && !shapeRec) shapeRec = c;
         else if (c.tag === T.SHAPE_COMPONENT_RECTANGLE) rectRec = c;
         else if (c.tag === T.SHAPE_COMPONENT_ELLIPSE) ellipse = true;
@@ -1071,6 +1133,16 @@ class HwpConverter {
     }
     const top = ctrl.children.find((c) => c.tag === T.SHAPE_COMPONENT) || null;
     const topKind = top ? ctrlIdOf(top) : '';
+    const oleR = oleRec as Rec | null;
+    if (oleR && topKind === '$ole' && oleR.data.length >= 14) {
+      // OLE 개체: 개체가 그려 둔 모양(BinData 에서 꺼낸 그림)을 그림처럼 그 자리에. 속성(4) 범위 x·y(8) 다음이 BinData 번호
+      const id = u16(oleR, 12);
+      const ole: JNode = { type: 'image', attrs: { src: this.images.get(id) || placeholderImage('OLE 개체', w || 120, h || 60), width: w || null, height: h || null, alt: 'OLE 개체' } };
+      if (fp && lay) ole.attrs = { ...ole.attrs, float: { ...fp, x: Math.round((fp.x - lay.paraLeft()) * 100) / 100 } };
+      else if (!(u32(ctrl, 4) & 1)) ole.attrs = { ...ole.attrs, [FLOATING]: true };
+      inline.push(ole);
+      return capFloats;
+    }
     if (pics.length === 1 && !texts.length && (topKind === '$pic' || !top)) {
       const pic = this.picture(pics[0], w, h);
       // 글자처럼 취급하지 않는(떠 있는) 그림: 한글의 줄 배치에 들지 않는다 (hasFloating)
@@ -1126,7 +1198,7 @@ class HwpConverter {
             for (const n of paras) if (n.type === 'paragraph') n.attrs = { ...n.attrs, indentLeft: (n.attrs?.indentLeft || 0) + l, indentRight: (n.attrs?.indentRight || 0) + rgt };
           }
         }
-        content.push(...paras);
+        pushAll(content, paras);
       }
       // 글의 세로 맞춤: LIST_HEADER 의 속성(문단 수 4바이트 뒤) bit 5~6 (0 위, 1 가운데, 2 아래)
       const va = hd.data.length >= 8 ? (u32(hd, 4) >>> 5) & 3 : 0;
@@ -1158,7 +1230,7 @@ class HwpConverter {
       const sh = Math.round(hwpToPx(Math.abs(i32(p, 32) - i32(p, 16)))) || h;
       blocks.push(paragraph({ textAlign: 'center' }, [this.picture(p, pics.length === 1 ? w : sw, pics.length === 1 ? h : sh)]));
     }
-    for (const t of texts) blocks.push(...this.convertParagraphs(t.paras, true));
+    for (const t of texts) pushAll(blocks, this.convertParagraphs(t.paras, true));
     return blocks;
   }
 
@@ -1330,7 +1402,23 @@ class HwpConverter {
     const oh = p.data.length >= 90 ? u32(p, 86) : Math.abs(i32(p, 32) - i32(p, 16));
     let crop = null;
     if (ow > 0 && oh > 0) crop = normCrop(i32(p, 48) / oh, 1 - i32(p, 52) / ow, 1 - i32(p, 56) / oh, i32(p, 44) / ow);
-    return { type: 'image', attrs: { src, width: w || null, height: h || null, crop } };
+    // 그림 보정: 밝기(INT8 68)·대비(INT8 69)·효과(70: 0 그대로, 1 회색조, 2 흑백). 선: 색(0)·굵기(4)·속성(8, bit 0~5 종류 — 0 선 없음)
+    const look: PicLook = {};
+    if (p.data.length >= 71) {
+      const s8 = (o: number) => (p.data[o] << 24) >> 24;
+      if (s8(68)) look.bright = s8(68);
+      if (s8(69)) look.contrast = s8(69);
+      const eff = p.data[70];
+      if (eff === 1) look.gray = 1;
+      else if (eff === 2) look.gray = 2;
+    }
+    const bw = p.data.length >= 12 ? i32(p, 4) : 0;
+    const btype = p.data.length >= 12 ? u32(p, 8) & 0x3f : 0;
+    // 개체 선 종류: 1 실선, 2 긴 점선, 3 점선, 4 -.-, 5 -..-, 6 긴 대시, 7 원형 점선, 8~ 이중선 계열
+    const bstyle = btype === 3 || btype === 7 ? 'dotted' : btype >= 8 ? 'double' : btype >= 2 ? 'dashed' : 'solid';
+    if (bw > 0 && btype > 0) look.line = { w: Math.max(1, Math.round(hwpToPx(bw) * 100) / 100), c: colorRefToHex(u32(p, 0)), s: bstyle };
+    const lk = cleanLook(look);
+    return { type: 'image', attrs: { src, width: w || null, height: h || null, crop, ...(lk ? { look: lk } : {}) } };
   }
 }
 
@@ -1543,7 +1631,7 @@ export function assembleTable(
     .map((r) => {
       const h = rowHeights[keptRows[r]];
       const row: JNode = { type: 'tableRow', content: byRow.get(r)!.sort((a, b) => a.col - b.col).map((c) => c.node) };
-      if (h && h > 0 && h < 3000) row.attrs = { height: Math.round(h * 10) / 10 };
+      if (h && h > 0 && h < 3000) row.attrs = { height: Math.round(h * 100) / 100 };
       return row;
     });
   const nCols = Math.max(1, ...cells.map((c) => c.col + c.cs));
@@ -1637,7 +1725,11 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
     const comp = b.compress === 0 ? compressed : b.compress === 1;
     if (comp) bytes = decompress(bytes, true);
     const mime = mimeFromExt(b.ext);
-    images.set(id, isBrowserImage(mime) ? bytesToDataUrl(bytes, mime) : placeholderImage(`그림(${b.ext.toUpperCase()})`));
+    // OLE 개체: 개체가 그려 둔 모양(비트맵)을 꺼낸다. 못 꺼내면 자리 표시
+    if (/^ole$/i.test(b.ext)) images.set(id, olePreview(bytes) || placeholderImage('OLE 개체'));
+    else if (isBrowserImage(mime)) images.set(id, bytesToDataUrl(bytes, mime));
+    // 윈도 메타파일(WMF·EMF): 그려서 SVG 로
+    else images.set(id, (isMetafileExt(b.ext) && metafileToSvg(bytes)) || placeholderImage(`그림(${b.ext.toUpperCase()})`));
   }
 
   const conv = new HwpConverter(info, images, defaultSettings(), warnings);
@@ -1651,7 +1743,7 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
     const brk: JNode | null = i > 0 && blocks.length ? { type: 'pageBreak' } : null;
     if (brk) blocks.push(brk);
     conv.startSection();
-    blocks.push(...conv.convertParagraphs(recs, false));
+    pushAll(blocks, conv.convertParagraphs(recs, false));
     if (brk && conv.sectionPage) brk.attrs = { sectionPage: conv.sectionPage };
   }
   while (blocks.length && blocks[0].type === 'pageBreak') blocks.shift();

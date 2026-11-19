@@ -4,7 +4,7 @@ import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
 import type { PageSetup } from '../types';
 import { useApp } from '../app/hooks';
-import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, pagePaintHtml, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
+import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, pageHidesOf, pagePaintHtml, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
 import { sectionsKey } from '../editor/extensions/sections';
 import { formatPageNumber, splitExt } from '../formats/common';
 import { applyFormatPainter, insertImagesFromFiles } from '../app/commands';
@@ -14,6 +14,7 @@ import { showContextMenu } from './ContextMenu';
 import { platform } from '../platform';
 import { hfRichHtml } from '../hfRich';
 import { layoutTabsHtml } from '../editor/tabLayout';
+import { LINE_NUM_FONT, LINE_NUM_PX, changeBarBoxes, changeBarsOf, lineMarksOf, lineNumberBoxes } from '../lineNumbers';
 
 export function PageView({ tab, active, hidden = false }: { tab: DocTab; active: boolean; hidden?: boolean }) {
   const app = useApp();
@@ -27,7 +28,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
   const pageCount = Math.max(1, tab.layout.pageCount);
   // 구역마다 용지가 다를 수 있다: 무대 폭은 가장 넓은 용지, 쪽은 저마다의 크기로 무대 가운데에
   const W = stageWidth(tab.settings, tab.editor.state.doc);
-  const plans = planPages(tab.settings, pageCount, tab.layout.pageSetups, W, PAGE_GAP);
+  const plans = planPages(tab.settings, pageCount, tab.layout.pageSetups, W, PAGE_GAP, tab.layout.pageHfs);
   const lastPlan = plans[plans.length - 1];
   const stageH = lastPlan.top + lastPlan.g.H;
   /** 편집기(문서 용지의 본문 칸) 왼쪽 */
@@ -185,6 +186,12 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
 
   const pages = [];
   const chrome = [];
+  // 줄 번호: 쪽 나누기가 끝난 화면에서 줄 자리를 잰다 (켜진 문서만)
+  const lineMarks = s.lineNumbers ? lineMarksOf(tab) : [];
+  // 변경 막대: 변경 내용(넣음·지움)이 있는 줄의 왼쪽 여백
+  const bars = changeBarsOf(tab);
+  // 쪽마다 감출 것 (한글의 감추기)
+  const hides = pageHidesOf(tab);
   for (let k = 0; k < pageCount; k++) {
     const pl = plans[k];
     const g = pl.g;
@@ -192,9 +199,10 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     const left = pl.left;
     const z = hfZones(pl.settings, g);
     // 쪽 테두리/배경·바탕쪽: 용지와, 용지를 덮는 쪽 경계 가리개에 같은 그림을 깐다
-    const paint = pagePaintHtml(pl.settings, g, k);
+    const hide = hides.get(k) || '';
+    const paint = pagePaintHtml(pl.settings, g, k, hide);
     const next = plans[k + 1];
-    const nextPaint = next ? pagePaintHtml(next.settings, next.g, k + 1) : '';
+    const nextPaint = next ? pagePaintHtml(next.settings, next.g, k + 1, hides.get(k + 1) || '') : '';
     pages.push(
       <div key={k} className="paper" style={{ top, left, width: g.W, height: g.H, ...(pageBackgroundStyle(s, k) || {}) }}>
         {paint && <div className="pg-paint-host" dangerouslySetInnerHTML={{ __html: paint }} />}
@@ -216,7 +224,9 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
         )}
       </div>,
     );
-    const num = pageNumAt(s, k);
+    // 이 쪽의 설정 (구역마다 다른 머리말·꼬리말·쪽 번호를 담은 것)
+    const ps = pl.settings;
+    const num = pageNumAt(ps, k);
     const hfStyle = (align: string): React.CSSProperties => ({
       left: left + g.ml,
       width: g.contentW,
@@ -225,33 +235,33 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     // 표·그림이 든 머리말/꼬리말은 한글처럼 영역 위쪽부터 모양 그대로 그린다
     // 첫 쪽 감추기 (표지): 영역은 그대로 두고(두 번 눌러 편집) 내용만 그리지 않는다
     // 이 쪽의 머리말·꼬리말 (짝수 쪽, 시작 쪽, 첫 쪽 감추기). 없는 쪽도 영역은 둔다 (두 번 눌러 편집)
-    const hd = hfAt(s, 'header', k);
-    const ft = hfAt(s, 'footer', k);
+    const hd = hide.includes('h') ? null : hfAt(ps, 'header', k);
+    const ft = hide.includes('f') ? null : hfAt(ps, 'footer', k);
     const hRich = hd ? hfRichHtml(hd) : null;
     const fRich = ft ? hfRichHtml(ft) : null;
-    const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: layoutTabsHtml(hfText(html, num, total, s.pageNumber.format), g.contentW) }} />;
+    const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: layoutTabsHtml(hfText(html, num, total, ps.pageNumber.format), g.contentW) }} />;
     chrome.push(
       <div
         key={'h' + k}
         className={'hf-zone' + (hd?.text || hRich ? '' : ' empty') + (hRich ? ' rich' : '')}
         data-hint="머리말 (두 번 누르면 편집)"
-        style={{ ...hfStyle((hd || s.header).align), top: top + z.header.top, height: z.header.height, alignItems: hRich && hd?.valign === 'bottom' ? 'flex-end' : hRich && hd?.valign === 'middle' ? 'center' : 'flex-start' }}
+        style={{ ...hfStyle((hd || ps.header).align), top: top + z.header.top, height: z.header.height, alignItems: hRich && hd?.valign === 'bottom' ? 'flex-end' : hRich && hd?.valign === 'middle' ? 'center' : 'flex-start' }}
         onDoubleClick={() => app.openDialog('headerFooter', { tab: 'header' })}
       >
-        {hRich ? rich(hRich) : hd?.text ? hfText(hd.text, num, total, s.pageNumber.format) : ''}
+        {hRich ? rich(hRich) : hd?.text ? hfText(hd.text, num, total, ps.pageNumber.format) : ''}
       </div>,
       <div
         key={'f' + k}
         className={'hf-zone' + (ft?.text || fRich ? '' : ' empty') + (fRich ? ' rich' : '')}
         data-hint="꼬리말 (두 번 누르면 편집)"
-        style={{ ...hfStyle((ft || s.footer).align), top: top + z.footer.top, height: z.footer.height, alignItems: fRich ? (ft?.valign === 'bottom' ? 'flex-end' : ft?.valign === 'middle' ? 'center' : 'flex-start') : 'flex-end' }}
+        style={{ ...hfStyle((ft || ps.footer).align), top: top + z.footer.top, height: z.footer.height, alignItems: fRich ? (ft?.valign === 'bottom' ? 'flex-end' : ft?.valign === 'middle' ? 'center' : 'flex-start') : 'flex-end' }}
         onDoubleClick={() => app.openDialog('headerFooter', { tab: 'footer' })}
       >
-        {fRich ? rich(fRich) : ft?.text ? hfText(ft.text, num, total, s.pageNumber.format) : ''}
+        {fRich ? rich(fRich) : ft?.text ? hfText(ft.text, num, total, ps.pageNumber.format) : ''}
       </div>,
     );
-    if (pageNumShown(s, k)) {
-      const [v, h] = s.pageNumber.pos.split('-');
+    if (pageNumShown(ps, k) && !hide.includes('n')) {
+      const [v, h] = ps.pageNumber.pos.split('-');
       const zz = v === 'top' ? z.header : z.footer;
       chrome.push(
         <div
@@ -267,7 +277,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
             justifyContent: h === 'left' ? 'flex-start' : h === 'right' ? 'flex-end' : 'center',
           }}
         >
-          {formatPageNumber(num, s.pageNumber.format)}
+          {formatPageNumber(num, ps.pageNumber.format)}
         </div>,
       );
     }
@@ -288,6 +298,14 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
         </div>,
       );
     }
+    if (s.lineNumbers)
+      for (const b of lineNumberBoxes(lineMarks, g, k, s.lineNumbers))
+        chrome.push(
+          <div key={`ln${k}-${b.n}-${b.top}`} className="line-num" style={{ left: left + b.left, top: top + b.top, width: b.width, height: b.height, lineHeight: b.height + 'px', fontFamily: LINE_NUM_FONT, fontSize: LINE_NUM_PX }}>
+            {b.n}
+          </div>,
+        );
+    for (const b of changeBarBoxes(bars, g, k)) chrome.push(<div key={`cb${k}-${b.top}`} className="change-bar" style={{ left: left + b.left, top: top + b.top, height: b.height, borderLeftColor: b.color }} />);
     chrome.push(
       <div key={'l' + k} className="page-label" style={{ top: top + 4 }}>
         {k + 1}
@@ -307,7 +325,11 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     >
       <div className="stage-wrap" style={{ width: W * zoom, height: stageH * zoom + 64 }}>
         <div className="stage" ref={stageRef} style={{ width: W, height: stageH, transform: `scale(${zoom})` }} onMouseDown={onStageMouseDown}>
-          {pages}
+          {/* 쪽 수가 바뀌면 용지·쪽 장식 묶음을 새로 만든다: 형제 앞에 수천 개를 하나씩 끼우면 React 가 끼울 때마다
+              뒤 형제를 끝까지 훑어(getHostSibling) 쪽 수의 제곱만큼 걸린다 (1만 6천 쪽 문서) */}
+          <div className="pages-layer" key={'p' + pageCount}>
+            {pages}
+          </div>
           <div
             className="editor-host"
             style={{ left: hostLeft, top: g.mt, width: g.contentW }}
@@ -319,7 +341,9 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
           >
             <EditorContent editor={tab.editor} style={{ minHeight: lastPlan.contentTop + lastPlan.g.contentH }} />
           </div>
-          <div className="chrome-layer">{chrome}</div>
+          <div className="chrome-layer" key={'c' + pageCount}>
+            {chrome}
+          </div>
         </div>
       </div>
     </div>
@@ -363,7 +387,7 @@ export function caretPage(tab: DocTab): number {
     const view = tab.editor.view;
     const c = view.coordsAtPos(view.state.selection.head);
     const r = view.dom.getBoundingClientRect();
-    const plans = planPages(tab.settings, tab.layout.pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP);
+    const plans = planPages(tab.settings, tab.layout.pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP, tab.layout.pageHfs);
     const y = (c.top - r.top) / (viewState.zoom || 1);
     return Math.max(1, Math.min(tab.layout.pageCount, pageAtY(plans, y) + 1));
   } catch {

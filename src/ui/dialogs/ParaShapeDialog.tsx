@@ -47,6 +47,15 @@ export function ParaShapeDialog({ onClose }: { onClose: () => void }) {
     return cleanParaBorder({ ...(s.bl ? { l: side } : {}), ...(s.br ? { r: side } : {}), ...(s.bt ? { t: side } : {}), ...(s.bb ? { b: side } : {}), o: [gap, gap, gap, gap], c: s.bJoin });
   };
 
+  /** 선을 바꾸지 않았으면 원래 값 그대로 (Word 에서 온 테두리의 묶음·간격 정보를 지킨다) */
+  const keptBorder = (): ParaBorder | null => {
+    const next = borderValue();
+    const orig = cleanParaBorder(a.paraBorder);
+    if (orig && next && (['l', 'r', 't', 'b'] as const).every((k) => orig[k] === next[k]) && !!orig.c === !!next.c) return orig;
+    if (orig && !next && orig.a && !orig.l && !orig.r && !orig.t && !orig.b) return orig;
+    return next;
+  };
+
   const apply = () => {
     const textIndent = s.firstMode === 'normal' ? null : s.firstMode === 'indent' ? s.firstVal : -s.firstVal;
     const lineHeight = s.lhType === 'fixed' ? `${s.lhVal}pt` : s.lhVal === 160 ? null : String(s.lhVal / 100);
@@ -62,7 +71,7 @@ export function ParaShapeDialog({ onClose }: { onClose: () => void }) {
         spaceBefore: s.before || null,
         spaceAfter: s.after || null,
         paraBg: s.bg,
-        paraBorder: borderValue(),
+        paraBorder: keptBorder(),
       })
       .run();
     onClose();

@@ -4,10 +4,11 @@ import { Mapping } from '@tiptap/pm/transform';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { viewState } from '../viewState';
-import type { Columns, PageSetup } from '../../types';
+import type { Columns, PageSetup, SectionHf } from '../../types';
 import { columnGeom, type ColGeom } from '../../formats/common';
 import { hwpLineBoxes } from './hwpMetrics';
 import { ownMargins } from './sections';
+import { decorationSet } from '../decoSet';
 
 /**
  * 쪽 나누기(페이지네이션) 엔진.
@@ -68,6 +69,22 @@ export interface TableCut {
   table: number;
   page: number;
   y: number;
+  /**
+   * 닫는 선 (Word 등 한글 문서가 아닌 것): CSS 선 값. 'none' 이면 긋지 않는다 (줄이 통째로 넘어간 곳: 표 자신의 선이 그 자리에 있다).
+   * off: 덮개를 그만큼 아래에서 시작한다 (그 자리의 표 선을 가리지 않게). 없으면 1px 검은 선 (한글)
+   */
+  line?: string;
+  off?: number;
+}
+
+/** 표 칸의 한 변의 선 (CSS 값·굵기 px). 선이 없으면 null */
+function cellLine(td: Element | null | undefined, side: 'Top' | 'Bottom'): { css: string; w: number } | null {
+  if (!(td instanceof HTMLElement)) return null;
+  const cs = getComputedStyle(td);
+  const w = parseFloat(side === 'Top' ? cs.borderTopWidth : cs.borderBottomWidth) || 0;
+  const st = side === 'Top' ? cs.borderTopStyle : cs.borderBottomStyle;
+  if (!(w > 0) || st === 'none' || st === 'hidden') return null;
+  return { css: `${w}px ${st} ${side === 'Top' ? cs.borderTopColor : cs.borderBottomColor}`, w };
 }
 
 export interface RepeatHead {
@@ -105,6 +122,8 @@ export interface LayoutResult {
   cuts?: TableCut[];
   /** 쪽마다의 편집 용지 (구역마다 용지가 다른 문서만. null 은 문서 용지) */
   pageSetups?: (PageSetup | null)[];
+  /** 쪽마다 그 쪽이 든 구역의 머리말·꼬리말(구역 나누기의 sectionHf)과 그 구역이 시작한 쪽. 구역마다 다른 머리말이 있는 문서에만 */
+  pageHfs?: ({ hf: SectionHf; start: number } | null)[];
   /** 다단의 단 구분선 */
   colLines?: ColLine[];
 }
@@ -194,11 +213,12 @@ function buildDecos(doc: PMNode, breaks: PageBreakInfo[]): DecorationSet {
       ),
     );
   }
-  return DecorationSet.create(doc, decos);
+  return decorationSet(doc, decos);
 }
 
 /** 제목 칸으로만 된 줄인가 */
 export function isHeaderRow(row: PMNode): boolean {
+  if (row.attrs?.repeat === true) return true;
   let all = true;
   row.forEach((c) => {
     if (c.type.name !== 'tableHeader') all = false;
@@ -270,6 +290,54 @@ export interface DirtyRange {
  *              그 뒤 블록의 절대 위치·쪽 상태가 지난번과 같아지는 순간 멈추고 지난 결과를 이어 쓴다.
  * @param curBreaks 플러그인 상태의 현재 나눔 목록 (지난 결과를 문서 변경에 맞춰 옮겨 둔 것)
  */
+/** 최상위 블록들의 그리기 정보(ProseMirror 의 ViewDesc)와 문서 안 시작 자리 */
+interface TopDescs {
+  offsets: number[];
+  descs: any[];
+}
+
+/** 편집기의 최상위 블록 ViewDesc 들을 문서 차례로 (내부 구조가 다르거나 문서와 맞지 않으면 null) */
+function topLevelDescs(view: EditorView): TopDescs | null {
+  const children = (view as any).docView?.children;
+  if (!Array.isArray(children)) return null;
+  const offsets: number[] = [];
+  const descs: any[] = [];
+  let off = 0;
+  for (const c of children) {
+    const size = c?.size;
+    if (typeof size !== 'number') return null;
+    if (c.node && size > 0) {
+      offsets.push(off);
+      descs.push(c);
+    }
+    off += size;
+  }
+  return off === view.state.doc.content.size ? { offsets, descs } : null;
+}
+
+/** pos 에 있는 노드의 DOM (view.nodeDOM 과 같은 것): pos 를 품은 최상위 블록을 이분 탐색으로 찾고 그 안에서 찾는다 */
+function domIn(t: TopDescs, pos: number): Node | null {
+  const { offsets, descs } = t;
+  if (!offsets.length) return null;
+  let lo = 0;
+  let hi = offsets.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (offsets[mid] <= pos) lo = mid;
+    else hi = mid - 1;
+  }
+  const d = descs[lo];
+  const off = offsets[lo];
+  if (!d || pos < off || pos >= off + d.size) return null;
+  try {
+    if (pos === off) return d.nodeDOM ?? d.dom ?? null;
+    const inner = typeof d.descAt === 'function' ? d.descAt(pos - off - (d.border ?? 1)) : null;
+    return inner ? inner.nodeDOM ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
 function computeLayout(
   view: EditorView,
   g: PageGeometry,
@@ -281,6 +349,13 @@ function computeLayout(
 ): { breaks: PageBreakInfo[]; result: LayoutResult; cache: LayoutCache; incremental: boolean; fixed: FixedBlock[]; tops: number[] } | null {
   const root = view.dom as HTMLElement;
   const s = viewState.zoom || 1;
+  // 블록의 DOM: view.nodeDOM(pos) 는 부를 때마다 문서 처음부터 블록을 세므로(블록 수만큼) 블록 수만 개 문서에서
+  // 배치가 블록 수의 제곱만큼 걸렸다. 최상위 블록들의 자리를 한 번 모아 두고 그 안에서만 찾는다
+  let topDescs: TopDescs | null | undefined;
+  const nodeDom = (pos: number): Node | null => {
+    if (topDescs === undefined) topDescs = topLevelDescs(view);
+    return (topDescs && domIn(topDescs, pos)) || view.nodeDOM(pos);
+  };
   // 공간을 숨기면 스크롤이 조정되어 편집기 자체가 움직일 수 있으므로, 전환할 때마다 기준점을 다시 읽는다
   let rootTop = root.getBoundingClientRect().top;
   const refreshRootTop = () => {
@@ -299,6 +374,8 @@ function computeLayout(
     CH: number;
     mt: number;
     setup: PageSetup | null;
+    /** 이 구역의 머리말·꼬리말 (구역 나누기에 담긴 것) */
+    hf?: SectionHf | null;
   }
   const basePg: Pg = { H: g.pageHeight, CH: g.contentHeight, mt: g.mt ?? 0, setup: null };
   /** 확정된 쪽(지금 쪽까지)의 기하와 본문 맨 위 */
@@ -759,7 +836,9 @@ function computeLayout(
 
   /**
    * '다음 문단과 함께'인 문단(제목 등): 이어지는 그런 문단들과 그 뒤 문단의 첫 줄(외톨이줄 방지면 두 줄, 세 줄 이하면 모두)까지
-   * 이 쪽에 들어가야 한다. 들어가지 않으면 이 문단부터 다음 쪽으로 넘긴다
+   * 이 쪽에 들어가야 한다. 들어가지 않으면 이 문단부터 다음 쪽으로 넘긴다.
+   * Word 는 그런 문단이 이어진 사슬 전체(사슬의 첫 문단부터)가 한 쪽에 들어갈 때만 이 규칙을 지킨다:
+   * 한 쪽보다 긴 사슬은 보통 문단처럼 흐르고(문단 보호는 문단마다 따로 지킨다), 사슬 중간의 남은 꼬리만 따로 넘기지 않는다
    */
   const keepWithNext = (pos: number, top: number) => {
     const sTop = top + shift;
@@ -767,20 +846,38 @@ function computeLayout(
     // 쪽 맨 위에 있으면 넘길 곳이 없다
     if (sTop <= T(p) + 0.5) return;
     let need = NaN;
+    /** 사슬의 첫 문단의 위 (자연 배치) */
+    let chainTop = top;
     try {
       const $p = doc.resolve(pos);
       const parent = $p.parent;
       const idx = $p.index();
+      let first = idx;
+      let firstPos = pos;
+      while (first > 0 && idx - first < 400) {
+        const pv = parent.child(first - 1);
+        if (!pv.isTextblock || !String(pv.attrs?.pageKeep || '').includes('n')) break;
+        first--;
+        firstPos -= pv.nodeSize;
+      }
+      if (first < idx) {
+        const fel = nodeDom(firstPos) as HTMLElement | null;
+        if (fel instanceof HTMLElement) chainTop = rel(fel.getBoundingClientRect().top);
+      }
+      const room = CHof(p + 1);
       let npos = pos + parent.child(idx).nodeSize;
-      for (let i = idx + 1; i < parent.childCount && i <= idx + 8; i++) {
+      for (let i = idx + 1; i < parent.childCount && i <= idx + 400; i++) {
         const nx = parent.child(i);
         if (nx.type.name === 'pageBreak' || nx.type.name === 'columnBreak') return;
         const flags = String(nx.attrs?.pageKeep || '');
         if (nx.isTextblock && flags.includes('n')) {
+          // 사슬이 한 쪽보다 길어지면 지킬 수 없다
+          const cel = nodeDom(npos) as HTMLElement | null;
+          if (cel instanceof HTMLElement && rel(cel.getBoundingClientRect().bottom) - chainTop > room + 0.5) return;
           npos += nx.nodeSize;
           continue;
         }
-        const nel = view.nodeDOM(npos) as HTMLElement | null;
+        const nel = nodeDom(npos) as HTMLElement | null;
         if (!(nel instanceof HTMLElement)) return;
         need = rel(nel.getBoundingClientRect().bottom);
         if (nx.isTextblock) {
@@ -798,12 +895,12 @@ function computeLayout(
     }
     if (!isFinite(need)) return;
     const limit = T(p) + CHof(p) - (p === page ? fnUsed : 0);
-    // 다음 쪽에서도 다 들어가지 않을 만큼 길면 넘겨도 소용없다
-    if (need + shift > limit + 0.5 && need - top <= CHof(p + 1)) forceNext = true;
+    // 사슬 전체가 다음 쪽에서도 다 들어가지 않을 만큼 길면 넘겨도 소용없다
+    if (need + shift > limit + 0.5 && need - chainTop <= CHof(p + 1)) forceNext = true;
   };
 
   const handleTextblock = (node: PMNode, pos: number) => {
-    const el = view.nodeDOM(pos) as HTMLElement | null;
+    const el = nodeDom(pos) as HTMLElement | null;
     if (!el || !(el instanceof HTMLElement)) return;
     const r = el.getBoundingClientRect();
     const top = rel(r.top);
@@ -945,36 +1042,68 @@ function computeLayout(
     };
     // 칸마다 끊긴 자리 가운데 가장 아래: 그 쪽에서 표가 끝나는 곳 (닫는 선을 긋는다)
     const cutRef = new Map<number, PageBreakInfo>();
+    // 나뉜 줄의 앞 조각을 닫는 선: 그 줄 칸의 아래 선 (Word 는 나뉜 칸을 쪽마다 선으로 닫는다)
+    let splitLine: string | null = null;
     const noteCut = (pg: number, y: number) => {
       const b = breaks[breaks.length - 1];
       const ref = cutRef.get(pg);
       if (ref && ref.cut) ref.cut.y = Math.max(ref.cut.y, y);
       else if (b && curTable >= 0) {
-        b.cut = { table: curTable, page: pg, y };
+        if (splitLine === null) {
+          const el = nodeDom(rowPos) as HTMLElement | null;
+          splitLine = cellLine(el?.firstElementChild, 'Bottom')?.css || 'none';
+        }
+        b.cut = { table: curTable, page: pg, y, line: splitLine };
         cutRef.set(pg, b);
       }
     };
     // 나뉜 줄의 높이 = max(줄 최소 높이, 칸마다 '내용 높이 + 끼운 공간'). 자연 배치의 아래 끝(uBottom)을 기준으로 하면
     // 최소 높이 안에서 가운데 정렬된 칸의 남는 공간까지 늘어난다고 보게 되어 뒤 내용의 자리가 어긋난다
-    const rowEl = view.nodeDOM(rowPos) as HTMLElement | null;
+    const rowEl = nodeDom(rowPos) as HTMLElement | null;
     const minH = rowEl ? parseFloat(getComputedStyle(rowEl).getPropertyValue('--row-h')) || 0 : 0;
     let rowBottom = uTop + minH; // 자연 배치 기준 (shift 미포함)
     /** 내용이 가장 꽉 찬 칸에서 내용 아래로 남는 자리 (자연 배치의 줄 높이 - 칸 내용 높이의 최솟값): 나뉜 뒤에도 지킨다 */
     let minSlack = Infinity;
     let grew = false;
-    rowNode.forEach((cell, off) => {
-      const cellPos = rowPos + 1 + off;
-      let cs = 0;
-      let pc = startPage;
+    /**
+     * 칸 하나의 내용을 쪽 경계에서 나눈다: 문단은 줄 사이에서, 그 밖의 블록은 통째로 다음 쪽으로.
+     * 쪽 경계에 걸친 안쪽 표는 줄마다, 그 줄의 칸마다 따로 나눈다 (Word 처럼 안쪽 표의 줄도 쪽에 걸쳐 나뉜다).
+     * cs0: 이 칸 앞에서 이미 끼운 공간, pc0: 칸이 시작하는 쪽. 끝난 뒤의 끼운 공간·쪽·내용 아래 끝을 돌려준다
+     */
+    const walkCell = (cell: PMNode, cellPos: number, cs0: number, pc0: number, depth: number): { cs: number; pc: number; last: number } => {
+      let cs = cs0;
+      let pc = pc0;
       let last = -Infinity;
       for (const lf of collectLeaves(cell, cellPos + 1)) {
-        const el = view.nodeDOM(lf.pos) as HTMLElement | null;
+        const el = nodeDom(lf.pos) as HTMLElement | null;
         if (!(el instanceof HTMLElement)) continue;
         const r = el.getBoundingClientRect();
         const top = rel(r.top);
         const bottom = rel(r.bottom);
         const sT = top + shift + cs;
         pc = pageAtY(sT + 0.5, pc);
+        if (lf.node.type.name === 'table' && depth < 6 && bottom + shift + cs > T(pc) + CHof(pc) + 0.5) {
+          // 안쪽 표: 줄마다 그 줄의 칸들을 같은 출발점에서 따로 나누고, 가장 많이 밀린 칸만큼 다음 줄을 민다
+          let rowCs = cs;
+          let rowPc = pc;
+          lf.node.forEach((nrow, roff) => {
+            const nrowPos = lf.pos + 1 + roff;
+            let maxCs = rowCs;
+            let maxPc = rowPc;
+            nrow.forEach((ncell, coff) => {
+              const w = walkCell(ncell, nrowPos + 1 + coff, rowCs, rowPc, depth + 1);
+              maxCs = Math.max(maxCs, w.cs);
+              maxPc = Math.max(maxPc, w.pc);
+              last = Math.max(last, w.last);
+            });
+            rowCs = maxCs;
+            rowPc = maxPc;
+          });
+          cs = rowCs;
+          pc = rowPc;
+          last = Math.max(last, bottom + cs);
+          continue;
+        }
         if (bottom + shift + cs > T(pc) + CHof(pc) + 0.5) {
           const lines = lf.node.isTextblock ? getLines(el) : [];
           if (lines.length >= 2) {
@@ -1003,9 +1132,14 @@ function computeLayout(
         }
         last = Math.max(last, bottom + cs);
       }
+      return { cs, pc, last };
+    };
+    rowNode.forEach((cell, off) => {
+      const cellPos = rowPos + 1 + off;
+      const { cs, last } = walkCell(cell, cellPos, 0, startPage, 0);
       // 여러 줄을 합친 칸은 끼운 공간이 합친 줄들에 나뉘어 들어가므로 이 줄의 높이로 치지 않는다
       if ((cell.attrs.rowspan || 1) > 1) return;
-      const h = cellContentHeight(view.nodeDOM(cellPos) as HTMLElement | null);
+      const h = cellContentHeight(nodeDom(cellPos) as HTMLElement | null);
       if (h != null) {
         rowBottom = Math.max(rowBottom, uTop + h + cs);
         minSlack = Math.min(minSlack, Math.max(0, uBottom - uTop - h));
@@ -1043,7 +1177,7 @@ function computeLayout(
   };
 
   const handleTable = (node: PMNode, pos: number) => {
-    const el = view.nodeDOM(pos) as HTMLElement | null;
+    const el = nodeDom(pos) as HTMLElement | null;
     if (!el || !(el instanceof HTMLElement)) return;
     const r = el.getBoundingClientRect();
     const top = rel(r.top);
@@ -1075,7 +1209,7 @@ function computeLayout(
     const rows: { pos: number; el: HTMLElement }[] = [];
     node.forEach((row, offset) => {
       const rp = pos + 1 + offset;
-      const re = view.nodeDOM(rp) as HTMLElement | null;
+      const re = nodeDom(rp) as HTMLElement | null;
       if (re instanceof HTMLElement) rows.push({ pos: rp, el: re });
     });
     if (!rows.length) {
@@ -1108,7 +1242,13 @@ function computeLayout(
       if (i === 0) place(uTop, uBottom, fnH, () => pos, 'block', pos);
       else place(uTop, uBottom, fnH, () => row.pos, 'row', row.pos);
       // 줄이 통째로 다음 쪽으로 넘어갔으면 앞 쪽에서는 표를 그 자리에서 닫는다 (넘긴 줄의 세로선이 빈자리까지 이어지지 않게)
-      if (i > 0 && breaks.length > nb && page > pg0) breaks[breaks.length - 1].cut = { table: pos, page: pg0, y: Math.round((uTop + shift0 - T(pg0)) * 100) / 100 };
+      if (i > 0 && breaks.length > nb && page > pg0) {
+        // 그 자리에는 앞 줄의 아래 선과 넘긴 줄의 위 선이 겹친 표 선이 있다: 덮개는 그 선 아래에서 시작한다 (한글 문서는 닫는 선을 따로 긋는다)
+        const a = cellLine(row.el.previousElementSibling?.firstElementChild, 'Bottom');
+        const c = cellLine(row.el.firstElementChild, 'Top');
+        const off = Math.round((Math.max(a?.w || 0, c?.w || 0) / 2) * 100) / 100;
+        breaks[breaks.length - 1].cut = { table: pos, page: pg0, y: Math.round((uTop + shift0 - T(pg0)) * 100) / 100, line: 'none', ...(off ? { off } : {}) };
+      }
       // 이 줄이 다음 쪽으로 넘어갔으면 그 쪽 맨 위에 제목 줄 자리를 비운다
       if (tableHead && breaks.length > nb && page > pg0) {
         const b = breaks[breaks.length - 1];
@@ -1123,7 +1263,7 @@ function computeLayout(
   };
 
   const handleOther = (pos: number) => {
-    const el = view.nodeDOM(pos) as HTMLElement | null;
+    const el = nodeDom(pos) as HTMLElement | null;
     if (!el || !(el instanceof HTMLElement)) return;
     const r = el.getBoundingClientRect();
     const fns = collectFootnotes(el, pos);
@@ -1139,7 +1279,7 @@ function computeLayout(
       const sp = child.attrs?.sectionPage as PageSetup | null;
       if (sp && g.resolve) {
         const sg = g.resolve(sp);
-        curPg = { H: sg.pageHeight, CH: sg.contentHeight, mt: sg.mt ?? 0, setup: sp };
+        curPg = { H: sg.pageHeight, CH: sg.contentHeight, mt: sg.mt ?? 0, setup: sp, hf: (child.attrs?.sectionHf as SectionHf | null) || null };
         pendingZone = { cols: columnGeom(sp.columns, sg.contentWidth), w: sg.contentWidth };
       }
       return;
@@ -1219,7 +1359,7 @@ function computeLayout(
       pos += child.nodeSize;
       continue;
     }
-    const el = view.nodeDOM(pos) as HTMLElement | null;
+    const el = nodeDom(pos) as HTMLElement | null;
     if (useCache && el instanceof HTMLElement) {
       if (j >= resumeNew + INCREMENTAL_LIMIT) return null;
       naturalize(el);
@@ -1338,6 +1478,14 @@ function computeLayout(
     page = pageCount - 1;
     commit();
     result.pageSetups = pgs.slice(0, pageCount).map((x) => x.setup);
+    // 구역의 머리말·꼬리말: 같은 구역의 쪽은 같은 기하 객체를 나눠 가진다 (구역이 시작한 쪽 = 처음 나온 쪽)
+    if (pgs.some((x) => x.hf)) {
+      const startOf = new Map<Pg, number>();
+      result.pageHfs = pgs.slice(0, pageCount).map((x, k) => {
+        if (!startOf.has(x)) startOf.set(x, k);
+        return x.hf ? { hf: x.hf, start: startOf.get(x)! } : null;
+      });
+    }
   }
   // 쪽마다 본문 맨 위 (편집기 좌표): 쪽·종이 기준으로 놓인 개체를 놓는 데 쓴다
   const topsOut: number[] = [];
@@ -1525,14 +1673,17 @@ export const Pagination = Extension.create<{}, PaginationStorage>({
               view.dispatch(tr);
             }
             // 한글 자리에 맞춘 블록이 실제로 그 자리에 왔는지 잰다. 어긋났으면 보정값을 고쳐 한 번 더 배치한다
-            if (out.fixed.length && !out.incremental && corrRuns < 6) {
+            // 아주 긴 문서(최상위 블록 2만 개 넘게)는 전체 배치 한 번이 수 초라 보정 배치를 한 번만 한다
+            if (out.fixed.length && !out.incremental && corrRuns < (view.state.doc.childCount > 20000 ? 1 : 6)) {
               const z = viewState.zoom || 1;
               const rootTop = root.getBoundingClientRect().top;
               let off = false;
               // 앞 블록을 바로잡으면 뒤 블록도 그만큼 따라 움직인다: 앞에서 바로잡은 몫(carry)을 빼고 남은 차이만 보정한다
               let carry = 0;
+              // 블록 DOM 은 한 번 모은 최상위 블록 자리에서 찾는다 (view.nodeDOM 은 블록 수만큼 센다)
+              const td = topLevelDescs(view);
               for (const fb of out.fixed) {
-                const el = view.nodeDOM(fb.pos) as HTMLElement | null;
+                const el = ((td && domIn(td, fb.pos)) || view.nodeDOM(fb.pos)) as HTMLElement | null;
                 if (!(el instanceof HTMLElement)) continue;
                 const box = (el.matches('table') ? el : el.querySelector(':scope > table')) || el;
                 const err = (box.getBoundingClientRect().top - rootTop) / z - fb.y - carry;

@@ -32,6 +32,10 @@ import {
   TabStop,
 } from './extensions/nodes';
 import { Search } from './extensions/search';
+import { installFastForChild } from './decoSet';
+
+// 아주 긴 문서에서 꾸밈 찾기가 블록 수의 제곱만큼 느려지지 않게 (decoSet)
+installFastForChild();
 import { Pagination } from './extensions/pagination';
 import { TableResize } from './extensions/tableResize';
 import { CheckMarks } from './extensions/checkMarks';
@@ -41,6 +45,7 @@ import { HwpMetrics } from './extensions/hwpMetrics';
 import { TabFill } from './extensions/tabFill';
 import { Sections } from './extensions/sections';
 import { Shape } from './extensions/shape';
+import { FloatWrap } from './extensions/floatWrap';
 import { Compose, KStrike, KUnderline, Ruby } from './extensions/charMarks';
 
 /** 문서 스키마를 구성하는 확장 (편집기 없이 변환에도 사용) */
@@ -138,7 +143,7 @@ export function getExtensions(): AnyExtension[] {
 
 /** 편집 화면용 확장 (스키마 + 편집 기능) */
 export function getEditorExtensions(): AnyExtension[] {
-  return [...getExtensions(), KeyboardExtras, CellNoWrap, Search, CharacterCount, Pagination, TableResize, CheckMarks, TrackChanges, HwpMetrics, Sections, TabFill];
+  return [...getExtensions(), KeyboardExtras, CellNoWrap, Search, CharacterCount, Pagination, TableResize, CheckMarks, TrackChanges, HwpMetrics, Sections, TabFill, FloatWrap];
 }
 
 let cachedSchema: Schema | null = null;

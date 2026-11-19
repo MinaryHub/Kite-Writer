@@ -138,11 +138,12 @@ export async function exportDocument(format: SaveFormatId, doc: KDocument, opts:
     out.set(body, 3);
     return out;
   };
-  // 변경 내용·메모를 저장하지 못하는 형식은 변경을 모두 반영하고 메모를 뺀 사본으로 저장한다
+  // 변경 내용·메모를 저장하지 못하는 형식은 변경을 모두 반영하고 메모를 뺀 사본으로 저장한다 (HWPX 는 변경 기록을 저장하고 메모만 뺀다)
   if (format !== 'docx') {
-    const { acceptAllJson, hasReviewMarks } = await import('./review');
+    const { acceptAllJson, hasReviewMarks, keepsChanges, stripCommentsJson } = await import('./review');
     const r = hasReviewMarks(doc.content);
-    if (r.changes || r.comments) doc = { ...doc, content: acceptAllJson(doc.content), settings: { ...doc.settings, comments: undefined } };
+    if (r.changes && !keepsChanges(format)) doc = { ...doc, content: acceptAllJson(doc.content), settings: { ...doc.settings, comments: undefined } };
+    else if (r.comments) doc = { ...doc, content: stripCommentsJson(doc.content), settings: { ...doc.settings, comments: undefined } };
   }
   switch (format) {
     case 'hwpx':

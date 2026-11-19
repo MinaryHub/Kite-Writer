@@ -3,6 +3,7 @@ import type { Node as PMNode } from '@tiptap/pm/model';
 import { Plugin, PluginKey } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { PageSetup } from '../../types';
+import { decorationSet } from '../decoSet';
 
 /**
  * 구역마다 다른 용지. 한글 문서는 구역마다 용지 크기·방향·여백이 다를 수 있는데, 편집기는 하나의 본문 칸(문서 용지의
@@ -53,7 +54,7 @@ function build(doc: PMNode, shiftOf: SectionsStorage['shiftOf']): DecorationSet 
     const style = `margin-left: ${(ml + cur.dl).toFixed(2)}px; margin-right: ${(mr + cur.dr).toFixed(2)}px; --sec-r: ${cur.dr.toFixed(2)}px`;
     out.push(Decoration.node(pos, pos + node.nodeSize, { style }));
   });
-  return DecorationSet.create(doc, out);
+  return decorationSet(doc, out);
 }
 
 export const Sections = Extension.create<object, SectionsStorage>({

@@ -680,6 +680,21 @@ input[type='number'] {
   color: #222;
   white-space: nowrap;
 }
+/* 변경 막대: 변경 내용이 있는 줄의 왼쪽 여백 (자리는 lineNumbers.ts) */
+.change-bar {
+  position: absolute;
+  width: 0;
+  border-left: 1px solid #f00;
+  pointer-events: none;
+}
+/* 줄 번호: 본문 왼쪽 여백에 오른쪽 맞춤 (자리·크기는 lineNumbers.ts) */
+.line-num {
+  position: absolute;
+  text-align: right;
+  color: #000;
+  white-space: nowrap;
+  pointer-events: none;
+}
 .fn-area {
   position: absolute;
   font-family: '함초롬바탕', 'HCR Batang', '바탕', serif;

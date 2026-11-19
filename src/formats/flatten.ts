@@ -1,7 +1,8 @@
+import { cleanLook, type PicLook } from './picLook';
 import { latexToHwp } from '../math/hwpEq';
 import { cleanTabs, type TabDefs } from '../editor/tabLayout';
-import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type JMark, type JNode, type ParaBorder, cleanColumns, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
-import type { Columns } from '../types';
+import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type FloatWrap, type JMark, type JNode, type ParaBorder, cleanColumns, cleanFloatWrap, cleanPageHide, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
+import type { Columns, PageSetup, SectionHf } from '../types';
 import { cleanShape, type ShapeData } from './shape';
 import type { FloatHw } from './hwpLayout';
 
@@ -9,8 +10,18 @@ import type { FloatHw } from './hwpLayout';
 export interface FlatFloat {
   x: number;
   y: number;
+  /** 쪽 본문 맨 위 기준 세로 자리 (종이·여백 기준으로 놓인 개체) */
+  py?: number | null;
   behind?: boolean;
   hw?: FloatHw | null;
+  /** 둘레 글 흐름 (Word 문서에서 읽은 것) */
+  wrap?: FloatWrap | null;
+  /** 폭이 내용대로인 글상자(Word 의 틀)의 가로 기준: r 오른쪽 끝·c 가운데에서 잰 x */
+  ax?: 'r' | 'c' | null;
+  /** 왼쪽(l)·오른쪽(r) 끝에 붙어 글이 옆으로 흐르는 틀 (x 는 붙은 끝에서 민 거리) */
+  cf?: 'l' | 'r' | null;
+  /** 크기를 정하지 않은 상자의 어림 폭 (px) */
+  zw?: number | null;
 }
 
 /** 문서 노드의 float 속성 → FlatFloat (이상한 값은 null) */
@@ -20,7 +31,13 @@ export function flatFloatOf(v: any): FlatFloat | null {
   const y = Number(v.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   const out: FlatFloat = { x, y };
+  if (v.py != null && Number.isFinite(+v.py)) out.py = +v.py;
   if (v.behind === true) out.behind = true;
+  const wrap = cleanFloatWrap(v.wrap);
+  if (wrap) out.wrap = wrap;
+  if (v.ax === 'r' || v.ax === 'c') out.ax = v.ax;
+  if (v.cf === 'l' || v.cf === 'r') out.cf = v.cf;
+  if (Number.isFinite(+v.zw) && +v.zw > 0 && +v.zw < 5000) out.zw = +v.zw;
   const h = v.hw;
   if (h && typeof h === 'object' && [h.vo, h.ho].every((n: any) => Number.isFinite(+n))) {
     const pick = (val: any, list: string[], def: string) => (list.includes(val) ? val : def);
@@ -126,7 +143,7 @@ export interface ReviewInfo {
 export type FlatInline =
   | { type: 'text'; text: string; style: CharStyle; link: string | null; tab?: TabInfo | null; review?: ReviewInfo; math?: { latex: string; hwp: string }; ruby?: { text: string; pos: string } | null; compose?: string | null }
   | { type: 'break' }
-  | { type: 'image'; src: string; width: number | null; height: number | null; style: CharStyle; crop: { t: number; r: number; b: number; l: number } | null; float?: FlatFloat | null; rotate?: number | null }
+  | { type: 'image'; src: string; width: number | null; height: number | null; style: CharStyle; crop: { t: number; r: number; b: number; l: number } | null; float?: FlatFloat | null; rotate?: number | null; look?: PicLook | null }
   | { type: 'shape'; width: number; height: number; d: ShapeData; float: FlatFloat | null; style: CharStyle }
   | { type: 'footnote'; text: string; style: CharStyle };
 
@@ -134,6 +151,12 @@ export type FlatInline =
 export interface FlatColumnBreak {
   columnBreakBefore?: boolean;
   columnsBefore?: Columns | null;
+  /** 이 블록에서 새 구역이 시작한다: 그 구역의 용지 (구역 나누기의 sectionPage) */
+  sectionPageBefore?: PageSetup | null;
+  /** 그 구역의 머리말·꼬리말·쪽 번호 (구역 나누기의 sectionHf: 구역마다 다른 머리말) */
+  sectionHfBefore?: SectionHf | null;
+  /** 한글의 감추기: 이 블록이 놓인 쪽에서 감출 것 (h 머리말, f 꼬리말, m 바탕쪽, b 쪽 테두리, x 쪽 배경, n 쪽 번호) */
+  pageHide?: string | null;
 }
 
 export interface FlatPara extends FlatColumnBreak {
@@ -180,6 +203,8 @@ export interface FlatTable extends FlatColumnBreak {
   rowHeightsPx: (number | null)[];
   /** 쪽 경계에서 나누는 방식: 없으면 나눔, row 셀 단위로 나눔, none 나누지 않음 */
   pageSplit?: 'row' | 'none' | null;
+  /** 칸 사이 간격 (px) */
+  cellSpacingPx?: number | null;
 }
 
 /** 글상자 (도형 안의 문단들) */
@@ -210,14 +235,27 @@ export type FlatBlock = FlatPara | FlatTable | FlatBox;
 /** 글상자를 지원하지 않는 형식을 위해 상자를 풀어 안의 블록만 남긴다 (표 안까지) */
 export function unwrapBoxes(blocks: FlatBlock[]): FlatBlock[] {
   const out: FlatBlock[] = [];
+  // 상자에 달린 감추기는 안의 첫 블록으로 (빈 상자면 다음 블록으로)
+  let carry = '';
   for (const b of blocks) {
     if (b.kind === 'box') {
       const inner = unwrapBoxes(b.blocks);
       if (inner.length && b.pageBreakBefore) inner[0].pageBreakBefore = true;
       if (inner.length && b.columnBreakBefore) inner[0].columnBreakBefore = true;
       if (inner.length && b.columnsBefore) inner[0].columnsBefore = b.columnsBefore;
+      const hide = (b.pageHide || '') + carry;
+      if (inner.length) {
+        if (hide) inner[0].pageHide = (inner[0].pageHide || '') + hide;
+        carry = '';
+      } else carry = hide;
       out.push(...inner);
-    } else if (b.kind === 'table') {
+      continue;
+    }
+    if (carry) {
+      b.pageHide = (b.pageHide || '') + carry;
+      carry = '';
+    }
+    if (b.kind === 'table') {
       for (const row of b.cells) for (const c of row) c.blocks = unwrapBoxes(c.blocks);
       out.push(b);
     } else out.push(b);
@@ -436,10 +474,18 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
   let pendingBreak = false;
   let pendingCol = false;
   let pendingCols: Columns | null = null;
+  let pendingSection: PageSetup | null = null;
+  let pendingHf: SectionHf | null = null;
   const push = (b: FlatBlock) => {
     if (pendingBreak) {
       b.pageBreakBefore = true;
       pendingBreak = false;
+    }
+    if (pendingSection) {
+      b.sectionPageBefore = pendingSection;
+      if (pendingHf) b.sectionHfBefore = pendingHf;
+      pendingSection = null;
+      pendingHf = null;
     }
     if (pendingCol) {
       b.columnBreakBefore = true;
@@ -452,11 +498,25 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
     out.push(b);
   };
   for (const n of nodes) {
+    // 감추기 표시는 이 노드에서 나온 첫 블록에 단다
+    const hide = cleanPageHide(n.attrs?.pageHide);
+    const at = out.length;
+    flattenOne(n);
+    if (hide && out.length > at) out[at].pageHide = hide;
+  }
+  if (pendingBreak || pendingCol || pendingCols) push(flattenPara({ type: 'paragraph' }, ctx, 0));
+  return out;
+
+  function flattenOne(n: JNode) {
     switch (n.type) {
       case 'pageBreak':
         pendingBreak = true;
         // 구역 나누기: 그 구역의 다단으로 바꾼다 (쓰는 쪽이 앞 다단과 같으면 건너뛴다)
-        if (n.attrs?.sectionPage) pendingCols = cleanColumns(n.attrs.sectionPage.columns) || { count: 1, gap: 0 };
+        if (n.attrs?.sectionPage) {
+          pendingCols = cleanColumns(n.attrs.sectionPage.columns) || { count: 1, gap: 0 };
+          pendingSection = n.attrs.sectionPage as PageSetup;
+          pendingHf = n.attrs.sectionHf && typeof n.attrs.sectionHf === 'object' ? (n.attrs.sectionHf as SectionHf) : null;
+        }
         break;
       case 'columnBreak':
         if (n.attrs?.columns) pendingCols = cleanColumns(n.attrs.columns) || pendingCols;
@@ -521,8 +581,6 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
         if (n.content) for (const b of flattenBlocks(n.content, ctx)) push(b);
     }
   }
-  if (pendingBreak || pendingCol || pendingCols) push(flattenPara({ type: 'paragraph' }, ctx, 0));
-  return out;
 }
 
 function codeContent(n: JNode): JNode[] {
@@ -575,7 +633,7 @@ function flattenPara(n: JNode, ctx: Ctx, level: number): FlatPara {
     else if (c.type === 'image') {
       const { style: cs } = applyMarks(base, c.marks);
       const rot = Number(c.attrs?.rotate);
-      inlines.push({ type: 'image', src: c.attrs?.src, width: c.attrs?.width || null, height: c.attrs?.height || null, style: cs, crop: c.attrs?.crop || null, float: flatFloatOf(c.attrs?.float), rotate: Number.isFinite(rot) && rot % 360 ? rot : null });
+      inlines.push({ type: 'image', src: c.attrs?.src, width: c.attrs?.width || null, height: c.attrs?.height || null, style: cs, crop: c.attrs?.crop || null, float: flatFloatOf(c.attrs?.float), rotate: Number.isFinite(rot) && rot % 360 ? rot : null, look: cleanLook(c.attrs?.look) });
     } else if (c.type === 'shape') {
       const d = cleanShape(c.attrs?.d);
       if (d) inlines.push({ type: 'shape', width: +c.attrs?.width || 1, height: +c.attrs?.height || 1, d, float: flatFloatOf(c.attrs?.float), style: applyMarks(base, c.marks).style });
@@ -619,6 +677,12 @@ export function flattenContent(nodes: JNode[]): FlatBlock[] {
   return flattenBlocks(nodes, { indent: 0, baseChar: defaultChar(), quote: false, mono: false });
 }
 
+/** 칸 사이 간격 값 검사 (px, 없으면 null) */
+const cellSpacingOf = (v: unknown): number | null => {
+  const n = Number(v);
+  return n > 0 && n <= 50 ? n : null;
+};
+
 function flattenTable(n: JNode, ctx: Ctx): FlatTable {
   const rowsJ = n.content || [];
   const occupied: boolean[][] = [];
@@ -650,7 +714,7 @@ function flattenTable(n: JNode, ctx: Ctx): FlatTable {
         noBorders: cell.attrs?.borderStyle ? String(cell.attrs.borderStyle).split(/\s+/).filter(Boolean) : [],
         borderCss: cell.attrs?.borderCss || null,
         blocks: flattenBlocks(cell.content || [], { ...ctx, indent: 0 }),
-        header: cell.type === 'tableHeader',
+        header: cell.type === 'tableHeader' || row.attrs?.repeat === true,
         marginsPx: cleanMargins(cell.attrs?.margins),
       };
       cellWidths.set(fc, cw);
@@ -678,5 +742,5 @@ function flattenTable(n: JNode, ctx: Ctx): FlatTable {
   for (const row of cells) for (const cell of row) if (!cell.widthPx) cell.widthPx = colWidthsPx.slice(cell.col, cell.col + cell.colspan).reduce((a, b) => a + b, 0);
   const cellPadPx = n.attrs?.cellPadding != null ? +n.attrs.cellPadding : 6.8;
   const rowHeightsPx = rowsJ.map((r) => ((r.attrs?.height ?? 0) > 0 ? +r.attrs!.height : null));
-  return { kind: 'table', rows: rowsJ.length, cols: maxCols, colWidthsPx, cells, pageBreakBefore: false, align: n.attrs?.align || 'left', cellPadPx, rowHeightsPx, outMarginPx: cleanMargins(n.attrs?.outMargin), inline: n.attrs?.inline === true, pageSplit: n.attrs?.pageSplit === 'row' || n.attrs?.pageSplit === 'none' ? n.attrs.pageSplit : null };
+  return { kind: 'table', rows: rowsJ.length, cols: maxCols, colWidthsPx, cells, pageBreakBefore: false, align: n.attrs?.align || 'left', cellPadPx, rowHeightsPx, outMarginPx: cleanMargins(n.attrs?.outMargin), inline: n.attrs?.inline === true, pageSplit: n.attrs?.pageSplit === 'row' || n.attrs?.pageSplit === 'none' ? n.attrs.pageSplit : null, cellSpacingPx: cellSpacingOf(n.attrs?.cellSpacing) };
 }

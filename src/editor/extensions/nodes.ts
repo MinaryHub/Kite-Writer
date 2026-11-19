@@ -12,7 +12,10 @@ import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import { viewState } from '../viewState';
 import type { Columns } from '../../types';
 import { cleanMargins } from '../../formats/flatten';
-import { cleanColumns, normColor } from '../../formats/common';
+import { cleanColumns, cleanFloatWrap, normColor, parseBorderCss, type FloatWrap } from '../../formats/common';
+import { cleanLook, lookCss, lookStyle } from '../../formats/picLook';
+import { viewSrc } from '../imageUrls';
+import { decorationSet } from '../decoSet';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -24,14 +27,22 @@ declare module '@tiptap/core' {
 }
 
 /** 떠 있는 개체의 자리 (px). 값이 이상하면 null */
-export function floatOf(v: any): { x: number; y: number; behind: boolean; py: number | null } | null {
+export function floatOf(v: any): { x: number; y: number; behind: boolean; py: number | null; wrap: FloatWrap | null; ax: 'r' | 'c' | null; zw: number | null; zh: number | null; cf: 'l' | 'r' | null } | null {
   if (!v || typeof v !== 'object') return null;
   const x = Number(v.x);
   const y = Number(v.y);
   if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 20000 || Math.abs(y) > 20000) return null;
   // py: 쪽·종이 기준으로 놓인 개체의 쪽 본문 안 세로 자리 (쪽 나누기가 그 자리에 놓는다: placePageFloats)
   const py = v.py != null && Number.isFinite(+v.py) && Math.abs(+v.py) < 20000 ? +v.py : null;
-  return { x, y, behind: v.behind === true, py };
+  // ax: 폭이 내용대로인 글상자(Word 의 틀)의 가로 기준 — r: x 는 오른쪽 끝에서 잰 거리, c: 가운데에서 민 거리
+  const ax = v.ax === 'r' || v.ax === 'c' ? v.ax : null;
+  // zw·zh: 크기를 정하지 않은 상자의 어림 폭·높이 (둘레 글이 비켜 갈 자리를 셀 때만 쓴다)
+  const zw = Number.isFinite(+v.zw) && +v.zw > 0 && +v.zw < 5000 ? +v.zw : null;
+  const zh = Number.isFinite(+v.zh) && +v.zh > 0 && +v.zh < 5000 ? +v.zh : null;
+  // cf: 왼쪽(l)·오른쪽(r) 끝에 붙어 글이 옆으로 흐르는 글상자 (Word 의 틀·첫 글자 장식): 내용 폭 그대로 CSS float 로 그린다
+  const cf = v.cf === 'l' || v.cf === 'r' ? v.cf : null;
+  // wrap: 둘레 글이 비켜 가는 개체 (Word 의 정사각형·위아래 배치 — floatWrap 이 글줄을 비킨다)
+  return { x, y, behind: v.behind === true, py, wrap: cleanFloatWrap(v.wrap), ax, zw, zh, cf };
 }
 
 // ---------------- 글상자 (도형 안의 글) ----------------
@@ -120,8 +131,19 @@ export const TextBox = Node.create({
     if (typeof a.radius === 'string' && RADIUS_RE.test(a.radius)) st.push(`border-radius:${a.radius}`);
     if (Array.isArray(a.padding) && a.padding.length === 4) st.push(`padding:${a.padding.map((v: any) => Math.max(0, +v || 0) + 'px').join(' ')}`);
     if (a.valign === 'middle' || a.valign === 'bottom') st.push('display:flex', 'flex-direction:column', `justify-content:${a.valign === 'middle' ? 'center' : 'flex-end'}`);
+    if (fl && fl.cf && fl.py == null) {
+      // 글이 옆으로 흐르는 틀: 상자를 감싼 CSS float (안쪽 여백이 둘레 글과의 간격). x 는 붙은 끝에서 민 거리
+      const d = fl.wrap?.d || [0, 0, 0, 0];
+      const side = fl.cf === 'r' ? 'right' : 'left';
+      // hg: 곁 문단의 내어쓰기 (CSS 는 첫 줄을 그만큼 틀 쪽으로 당긴다: 비킬 자리를 그만큼 넓힌다)
+      const hg = Number.isFinite(+(a.float as any)?.hg) ? Math.max(0, Math.min(500, +(a.float as any).hg)) : 0;
+      const outer = [`float:${side}`, `margin-top:${fl.y}px`, `margin-${side}:${fl.x}px`, fl.cf === 'r' ? `padding:0 0 ${d[2]}px ${d[3]}px` : `padding:0 ${d[1] + hg}px ${d[2]}px 0`];
+      return ['div', { class: 'k-float-anchor' }, ['div', { class: 'k-cfloat', style: outer.join(';'), 'data-f': side, 'data-t': '0' }, ['div', { class: 'k-textbox', style: st.join(';') }, 0]]];
+    }
     if (fl) {
-      st.push(`left:${fl.x}px`, `top:${fl.y}px`);
+      if (fl.ax === 'r') st.push(`right:${fl.x}px`, `top:${fl.y}px`);
+      else if (fl.ax === 'c') st.push(`left:calc(50% + ${fl.x}px)`, 'transform:translateX(-50%)', `top:${fl.y}px`);
+      else st.push(`left:${fl.x}px`, `top:${fl.y}px`);
       return ['div', { class: 'k-float-anchor' }, ['div', { class: 'k-textbox k-float' + (fl.behind ? ' behind' : ''), style: st.join(';'), ...(fl.py != null ? { 'data-py': String(fl.py) } : {}) }, 0]];
     }
     return ['div', { class: 'k-textbox', style: st.join(';') }, 0];
@@ -192,6 +214,9 @@ export interface Crop {
   l: number;
 }
 
+/** 그림 효과가 쓰는 CSS 속성들 (바꿀 때 지난 것을 지운다) */
+const LOOK_PROPS = ['filter', 'opacity', 'outline', 'outline-offset', '-webkit-mask-image', 'mask-image', '-webkit-mask-composite', 'mask-composite', '-webkit-box-reflect'];
+
 export const cropOf = (v: any): Crop | null => {
   if (!v) return null;
   const c = { t: +v.t || 0, r: +v.r || 0, b: +v.b || 0, l: +v.l || 0 };
@@ -224,6 +249,18 @@ export const KImage = Image.extend({
       float: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       /** 돌린 각도(도, 시계 방향). 한글 문서 화면 전용 */
       rotate: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 그림 보정·효과 (밝기·대비·회색조·투명도·선·그림자·네온·부드러운 가장자리·반사: picLook). 한글 문서에서 읽은 값 */
+      look: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          try {
+            return cleanLook(JSON.parse(el.getAttribute('data-look') || 'null'));
+          } catch {
+            return null;
+          }
+        },
+        renderHTML: () => ({}),
+      },
       /** 잘라 낸 비율 (0~1): 위/오른쪽/아래/왼쪽 */
       crop: {
         default: null,
@@ -249,7 +286,8 @@ export const KImage = Image.extend({
     const rot = Number(a.rotate);
     const turned = Number.isFinite(rot) && rot % 360 !== 0;
     const base = mergeAttributes(this.options.HTMLAttributes, HTMLAttributes);
-    if (!fl && !c && !turned) return ['img', base];
+    const look = cleanLook(a.look);
+    if (!fl && !c && !turned && !look) return ['img', base];
     const st: string[] = [];
     const w = +a.width || 0;
     const h = +a.height || 0;
@@ -262,8 +300,11 @@ export const KImage = Image.extend({
     } else if (w && h) imgStyle = `width:${w}px;height:${h}px`;
     if (fl) st.push(`left:${fl.x}px`, `top:${fl.y}px`);
     if (turned) st.push(`transform:rotate(${rot}deg)`);
-    const cls = 'k-image' + (fl ? ' k-float' + (fl.behind ? ' behind' : '') : '') + (c ? ' cropped' : '');
-    return ['span', { class: cls, style: st.join(';'), ...(fl && fl.py != null ? { 'data-py': String(fl.py) } : {}) }, ['img', imgStyle ? mergeAttributes(base, { style: imgStyle }) : base]];
+    const ls = look ? lookStyle(look) : null;
+    if (ls?.wrap) st.push(ls.wrap);
+    if (ls?.img) imgStyle = imgStyle ? imgStyle + ';' + ls.img : ls.img;
+    const cls = 'k-image' + (fl ? ' k-float' + (fl.behind ? ' behind' : '') : '') + (c ? ' cropped' : '') + (look?.play ? ' k-play' : '');
+    return ['span', { class: cls, style: st.join(';'), ...(fl && fl.py != null ? { 'data-py': String(fl.py) } : {}), ...(look ? { 'data-look': JSON.stringify(look) } : {}) }, ['img', imgStyle ? mergeAttributes(base, { style: imgStyle }) : base]];
   },
 
   addNodeView() {
@@ -301,7 +342,9 @@ export const KImage = Image.extend({
         }
       };
       const apply = (n: typeof node) => {
-        if (img.getAttribute('src') !== n.attrs.src) img.src = n.attrs.src;
+        // 큰 그림은 한 번만 푼 짧은 주소로 (imageUrls)
+        const want = viewSrc(n.attrs.src);
+        if (img.getAttribute('src') !== want) img.src = want;
         if (n.attrs.alt) img.alt = n.attrs.alt;
         layout(n.attrs.width, n.attrs.height, cropOf(n.attrs.crop));
         const fl = floatOf(n.attrs.float);
@@ -316,6 +359,17 @@ export const KImage = Image.extend({
         else wrap.style.removeProperty('--kh');
         const rot = Number(n.attrs.rotate);
         wrap.style.transform = Number.isFinite(rot) && rot % 360 ? `rotate(${rot}deg)` : '';
+        // 그림 보정·효과: 지난번에 준 속성은 지우고 새로
+        for (const k of LOOK_PROPS) {
+          wrap.style.removeProperty(k);
+          img.style.removeProperty(k);
+        }
+        const css = lookCss(n.attrs.look);
+        wrap.classList.toggle('k-play', !!cleanLook(n.attrs.look)?.play);
+        for (const [k, v] of Object.entries(css.wrap)) wrap.style.setProperty(k, v);
+        for (const [k, v] of Object.entries(css.img)) img.style.setProperty(k, v);
+        if (Object.keys(css.wrap).length || Object.keys(css.img).length) wrap.setAttribute('data-look', JSON.stringify(cleanLook(n.attrs.look)));
+        else wrap.removeAttribute('data-look');
       };
       apply(node);
       // 그림이 로드되면 그 블록의 높이만 달라지므로 위치를 알려 그 부분만 다시 재게 한다
@@ -476,6 +530,8 @@ export const PageBreak = Node.create({
         },
         renderHTML: (a: Record<string, any>) => (a.sectionPage ? { 'data-section': JSON.stringify(a.sectionPage) } : {}),
       },
+      /** 여기서 시작하는 구역의 머리말·꼬리말·쪽 번호 (Word 의 구역마다 다른 머리말: SectionHf). 화면에 적지 않는다 */
+      sectionHf: { default: null, rendered: false },
     };
   },
   parseHTML() {
@@ -699,6 +755,7 @@ const cellAttrs = {
     renderHTML: (a: Record<string, any>) => {
       if (!a.borderCss) return {};
       const names: Record<string, string> = { t: 'top', b: 'bottom', l: 'left', r: 'right' };
+      const half: string[] = [];
       const style = String(a.borderCss)
         .split(';')
         .map((p: string) => {
@@ -706,9 +763,16 @@ const cellAttrs = {
           if (!names[k] || !v) return '';
           // 이중선: 한글은 두 줄이 보이게 그린다 (적힌 굵기의 두 배 남짓). 화면에서 3px 는 되어야 두 줄로 보인다
           const m = /^([\d.]+)mm double (#[0-9A-Fa-f]{6})$/.exec(v.trim());
+          const mm = m ? parseFloat(m[1]) * 2.4 : parseFloat(v);
+          // 위·아래 굵은 선: 그려지는 굵기(화면 px 로 내림)의 절반. 한글은 칸 높이에 선 굵기를 넣지 않으므로 그만큼 안 여백을 줄인다 (CSS)
+          if ((k === 't' || k === 'b') && mm > 0) {
+            const px = Math.max(m ? 3 : 1, Math.floor((mm * 96) / 25.4));
+            if (px > 1) half.push(`--bh-${k}: ${px / 2}px`);
+          }
           return m ? `border-${names[k]}: max(3px, ${Math.round(parseFloat(m[1]) * 240) / 100}mm) double ${m[2]}` : `border-${names[k]}: ${v}`;
         })
         .filter(Boolean)
+        .concat(half)
         .join('; ');
       return { 'data-border-css': a.borderCss, style };
     },
@@ -725,7 +789,20 @@ const cellAttrs = {
     },
     renderHTML: (a: Record<string, any>) => {
       const v = cleanMargins(a.margins);
-      return v ? { 'data-cm': JSON.stringify(v), style: `--cm-l: ${v[0]}px; --cm-r: ${v[1]}px; --cm-t: ${v[2]}px; --cm-b: ${v[3]}px` } : {};
+      if (!v) return {};
+      // 위·아래 안 여백이 테두리 굵기의 절반보다 작은 칸: 한글은 선 굵기를 칸 높이에 넣지 않으므로, 모자란 만큼 첫·끝 내용을
+      // 테두리 쪽으로 당긴다 (CSS --cneg-t/b → 첫 블록의 margin-top, 끝 블록의 margin-bottom. 한글 문서에서만)
+      const half = (k: 't' | 'b') => {
+        const side = parseBorderCss(a.borderCss)[k];
+        if (!side) return 0.5;
+        const mm = side.s === 'double' ? side.w * 2.4 : side.w;
+        return Math.max(side.s === 'double' ? 3 : 1, Math.floor((mm * 96) / 25.4)) / 2;
+      };
+      const neg = (k: 't' | 'b', m: number) => Math.round(Math.max(0, half(k) - m) * 100) / 100;
+      const nt = neg('t', v[2]);
+      const nb = neg('b', v[3]);
+      const extra = (nt > 0 ? `; --cneg-t: -${nt}px` : '') + (nb > 0 ? `; --cneg-b: -${nb}px` : '');
+      return { 'data-cm': JSON.stringify(v), style: `--cm-l: ${v[0]}px; --cm-r: ${v[1]}px; --cm-t: ${v[2]}px; --cm-b: ${v[3]}px${extra}` };
     },
   },
   borderStyle: {
@@ -841,6 +918,12 @@ export const KTableRow = TableRow.extend({
         },
         renderHTML: (a: Record<string, any>) => (a.height ? { style: `height: ${a.height}px; --row-h: ${a.height}px` } : {}),
       },
+      // 제목 줄 되풀이 (Word 의 tblHeader): 표가 다음 쪽으로 이어지면 쪽 맨 위에 다시 그린다. 칸 모양은 보통 칸 그대로
+      repeat: {
+        default: null,
+        parseHTML: (el: HTMLElement) => (el.getAttribute('data-repeat') === '1' ? true : null),
+        renderHTML: (a: Record<string, any>) => (a.repeat === true ? { 'data-repeat': '1' } : {}),
+      },
     };
   },
 });
@@ -887,6 +970,10 @@ class KTableView extends TableView {
     else t.removeAttribute('data-tight');
     if (node.attrs.cellPadding != null) t.style.setProperty('--cell-px', node.attrs.cellPadding + 'px');
     else t.style.removeProperty('--cell-px');
+    // 칸 사이 간격 (Word 의 셀 간격): 칸마다 제 테두리를 따로 그린다
+    const sp = +node.attrs.cellSpacing;
+    t.style.borderCollapse = sp > 0 && sp <= 50 ? 'separate' : '';
+    t.style.borderSpacing = sp > 0 && sp <= 50 ? sp + 'px' : '';
     const align = node.attrs.align;
     const indent = typeof node.attrs.indent === 'number' && isFinite(node.attrs.indent) ? Math.max(-200, Math.min(400, node.attrs.indent)) : 0;
     // 한글 표의 바깥 여백 [왼, 오른, 위, 아래]: 위·아래는 그대로 띄우고, 왼쪽은 정렬이 없을 때만 (가운데·오른쪽은 auto 가 자리를 정한다)
@@ -895,7 +982,9 @@ class KTableView extends TableView {
     t.style.marginLeft = align === 'center' || align === 'right' ? 'auto' : left ? left.toFixed(1) + 'px' : '';
     t.style.marginRight = align === 'center' ? 'auto' : '';
     t.style.marginTop = om && om[2] ? om[2] + 'px' : '';
-    t.style.marginBottom = om && om[3] ? om[3] + 'px' : '';
+    // 한글 문서의 칸 안에서 표 하나뿐인 문단: 그 줄의 아래 간격(hwpAfter)도 표 아래에 둔다
+    const after = (om ? om[3] : 0) + (+node.attrs.hwpAfter > 0 ? +node.attrs.hwpAfter : 0);
+    t.style.marginBottom = after ? Math.round(after * 100) / 100 + 'px' : '';
   }
 }
 
@@ -926,6 +1015,8 @@ export const KTable = Table.extend({
         parseHTML: (el: HTMLElement) => el.getAttribute('data-inline') === 'true',
         renderHTML: (a: Record<string, any>) => (a.inline ? { 'data-inline': 'true' } : {}),
       },
+      /** 한글 문서의 칸·글상자 안에서 표 하나뿐인 문단: 그 줄의 아래 간격과 문단 아래 간격 (px). 표 아래에 둔다 (화면 전용) */
+      hwpAfter: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
       /** 표 바깥 여백 [왼, 오른, 위, 아래] (px) — 한글 문서에서 읽은 값을 저장할 때 되돌리려고 둔다 */
       outMargin: {
         default: null,
@@ -938,9 +1029,10 @@ export const KTable = Table.extend({
         },
         renderHTML: (a: Record<string, any>) => {
           const v = cleanMargins(a.outMargin);
-          if (!v) return {};
+          if (!v) return +a.hwpAfter > 0 ? { style: `margin-bottom: ${Math.round(+a.hwpAfter * 100) / 100}px` } : {};
           // 한글처럼 위·아래 바깥 여백만큼 표를 띄운다 (왼쪽 여백은 정렬이 없을 때만: 가운데·오른쪽 정렬은 CSS 가 자리를 정한다)
-          const st = [`margin-top: ${v[2]}px`, `margin-bottom: ${v[3]}px`];
+          const after = v[3] + (+a.hwpAfter > 0 ? +a.hwpAfter : 0);
+          const st = [`margin-top: ${v[2]}px`, `margin-bottom: ${Math.round(after * 100) / 100}px`];
           if (!a.align && v[0]) st.push(`margin-left: ${v[0]}px`);
           return { 'data-out-margin': JSON.stringify(v), style: st.join('; ') };
         },
@@ -968,6 +1060,18 @@ export const KTable = Table.extend({
         default: false,
         parseHTML: (el: HTMLElement) => el.getAttribute('data-borderless') === 'true',
         renderHTML: (a: Record<string, any>) => (a.borderless ? { 'data-borderless': 'true' } : {}),
+      },
+      /** 칸 사이 간격 (px): 칸마다 제 테두리를 따로 그리고 이웃한 칸·표 가장자리와 이만큼 띄운다 (Word 의 '셀 간격', HTML 의 cellspacing) */
+      cellSpacing: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          const v = parseFloat(el.getAttribute('data-cell-spacing') || '');
+          return v > 0 && v <= 50 ? v : null;
+        },
+        renderHTML: (a: Record<string, any>) => {
+          const v = +a.cellSpacing;
+          return v > 0 && v <= 50 ? { 'data-cell-spacing': String(v), style: `border-collapse: separate; border-spacing: ${v}px` } : {};
+        },
       },
       /** 칸 위아래 안 여백 없음 (PDF 에서 나란한 상자들을 담는 배치용 표) */
       tight: {
@@ -1082,7 +1186,7 @@ function noWrapDecosIn(doc: PMNode, from: number, to: number): Decoration[] {
 }
 
 function noWrapDecos(doc: PMNode): DecorationSet {
-  return DecorationSet.create(doc, noWrapDecosIn(doc, 0, doc.content.size));
+  return decorationSet(doc, noWrapDecosIn(doc, 0, doc.content.size));
 }
 
 /** 최상위 블록 경계로 넓힌 범위 */

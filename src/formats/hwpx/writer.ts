@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import type { Columns, HeaderFooter, KDocument } from '../../types';
 import { type JNode, mmToHwp, pxToHwp, ptToHwp, xmlEscape, parseBorderCss, paraBorderToFill, normColor, safeIsoDate, cleanColumns, FIXED_SPACE } from '../common';
+import type { PicLook } from '../picLook';
 import { type CharStyle, type FlatBlock, type FlatFloat, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, type FlatBox } from '../flatten';
 import { prepareImage } from '../imageUtil';
 import { shapeImageSrcs, shapeXml } from './shapeWriter';
@@ -41,6 +42,10 @@ class Registry {
   borderFills: BorderFillDef[] = [];
   bfIds = new Map<string, number>();
   images: { id: string; path: string; mime: string; bytes: Uint8Array }[] = [];
+  /** 변경 추적: 바뀐 내용(hh:trackChange, id 는 1부터)과 사람(hh:trackChangeAuthor, id 는 1부터) */
+  changes: { type: 'ins' | 'del'; author: number; time: number }[] = [];
+  changeIds = new Map<string, number>();
+  authors: string[] = [];
 
   constructor() {
     // 1: 쪽 테두리(없음), 2: 글자 기본(없음), 3: 표 기본(실선)
@@ -51,6 +56,23 @@ class Registry {
     this.font('함초롬돋움');
     this.char(defaultChar());
     this.para(defaultPara());
+  }
+
+  /** 바뀐 내용 하나의 id (같은 종류·사람·시각이면 같은 id) */
+  change(c: { type: 'ins' | 'del'; author: string; time: number }): number {
+    const key = `${c.type}|${c.author}|${c.time}`;
+    let id = this.changeIds.get(key);
+    if (id == null) {
+      let a = this.authors.indexOf(c.author);
+      if (a < 0) {
+        a = this.authors.length;
+        this.authors.push(c.author);
+      }
+      this.changes.push({ type: c.type, author: a + 1, time: c.time });
+      id = this.changes.length;
+      this.changeIds.set(key, id);
+    }
+    return id;
   }
 
   font(name: string): number {
@@ -137,14 +159,15 @@ class SectionWriter {
       };
     }
     const hw = fl.hw || {
-      wrap: fl.behind ? 'BEHIND_TEXT' : 'IN_FRONT_OF_TEXT',
+      // Word 문서의 둘레 글 흐름은 한글의 어울림·자리 차지로 (바깥 여백: 왼쪽·오른쪽·위·아래)
+      wrap: fl.wrap ? (fl.wrap.s === 'tb' ? 'TOP_AND_BOTTOM' : 'SQUARE') : fl.behind ? 'BEHIND_TEXT' : 'IN_FRONT_OF_TEXT',
       vr: 'PARA',
       hr: 'COLUMN',
       va: 'TOP',
       ha: 'LEFT',
       vo: Math.max(0, pxToHwp(fl.y - sb)),
       ho: pxToHwp(fl.x + paraLeft),
-      om: [0, 0, 0, 0],
+      om: fl.wrap ? [fl.wrap.d[3], fl.wrap.d[1], fl.wrap.d[0], fl.wrap.d[2]].map((v) => Math.min(60000, pxToHwp(v))) : [0, 0, 0, 0],
     };
     const om = hw.om || [0, 0, 0, 0];
     const overlay = hw.wrap === 'IN_FRONT_OF_TEXT' || hw.wrap === 'BEHIND_TEXT';
@@ -224,6 +247,27 @@ class SectionWriter {
         tOpen = true;
       }
     };
+    // 변경 추적 구간 (hp:t 안의 insertBegin~insertEnd, deleteBegin~deleteEnd). 문단 끝에서 닫는다
+    let chKey = '';
+    let chTag = '';
+    let chId = 0;
+    const endChange = () => {
+      if (!chKey) return;
+      openT();
+      xml += `<hp:${chTag}End Id="${chId}" TcId="${chId}" paraend="0"/>`;
+      chKey = '';
+    };
+    const toChange = (ch: { type: 'ins' | 'del'; author: string; time: number } | undefined) => {
+      const key = ch ? `${ch.type}|${ch.author}|${ch.time}` : '';
+      if (key === chKey) return;
+      endChange();
+      if (!ch) return;
+      chId = this.reg.change(ch);
+      chTag = ch.type === 'ins' ? 'insert' : 'delete';
+      chKey = key;
+      openT();
+      xml += `<hp:${chTag}Begin Id="${chId}" TcId="${chId}"/>`;
+    };
     for (const it of p.inlines) {
       if (it.type === 'text' && it.math && it.math.hwp.trim()) {
         // 수식: 한글 수식 개체로 (글자처럼 취급)
@@ -244,6 +288,7 @@ class SectionWriter {
       } else if (it.type === 'text') {
         ensureRun(this.reg.char(it.style), it.link);
         openT();
+        toChange(it.review?.change);
         const parts = it.text.split('\t');
         const tb = it.tab;
         const tabXml = `<hp:tab width="${tb?.width ? pxToHwp(tb.width) : 4000}" leader="${tb?.leader || 0}" type="${tb ? tb.type : 1}"/>`;
@@ -269,7 +314,7 @@ class SectionWriter {
         const info = this.images.get(it.src);
         ensureRun(this.reg.char(it.style), null);
         closeT();
-        if (info) xml += this.pic(info, it.width, it.height, it.crop, it.float ? this.place(it.float, (p.style.indentLeft + Math.max(0, -p.style.textIndent)) * PT2PX, p.style.spaceBefore * PT2PX) : null, it.rotate || 0);
+        if (info) xml += this.pic(info, it.width, it.height, it.crop, it.float ? this.place(it.float, (p.style.indentLeft + Math.max(0, -p.style.textIndent)) * PT2PX, p.style.spaceBefore * PT2PX) : null, it.rotate || 0, it.look || null);
       } else if (it.type === 'shape') {
         ensureRun(this.reg.char(it.style), null);
         closeT();
@@ -280,11 +325,15 @@ class SectionWriter {
         xml += this.footnote(it.text);
       }
     }
+    if (chKey) {
+      if (!open) ensureRun(this.reg.char(p.baseChar), null);
+      endChange();
+    }
     closeRun();
     return xml;
   }
 
-  private pic(info: { id: string; w: number; h: number }, wPx: number | null, hPx: number | null, crop: { t: number; r: number; b: number; l: number } | null = null, pl: { wrap: string; tail: string } | null = null, rotate = 0): string {
+  private pic(info: { id: string; w: number; h: number }, wPx: number | null, hPx: number | null, crop: { t: number; r: number; b: number; l: number } | null = null, pl: { wrap: string; tail: string } | null = null, rotate = 0, look: PicLook | null = null): string {
     let w = wPx ? pxToHwp(wPx) : pxToHwp(info.w);
     let h = hPx ? pxToHwp(hPx) : pxToHwp(info.h);
     if (!hPx && wPx) h = Math.round((w * info.h) / Math.max(1, info.w));
@@ -315,7 +364,7 @@ class SectionWriter {
       `<hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="${sx}" e2="0" e3="0" e4="0" e5="${sy}" e6="0"/><hc:rotMatrix ${rot}/></hp:renderingInfo>` +
       `<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${ow}" y="0"/><hc:pt2 x="${ow}" y="${oh}"/><hc:pt3 x="0" y="${oh}"/></hp:imgRect>` +
       `<hp:imgClip ${clip}/><hp:inMargin left="0" right="0" top="0" bottom="0"/>` +
-      `<hp:imgDim dimwidth="${ow}" dimheight="${oh}"/><hc:img binaryItemIDRef="${info.id}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/>` +
+      `<hp:imgDim dimwidth="${ow}" dimheight="${oh}"/><hc:img binaryItemIDRef="${info.id}" bright="${Math.round(look?.bright || 0)}" contrast="${Math.round(look?.contrast || 0)}" effect="${look?.gray === 1 ? 'GRAY_SCALE' : look?.gray === 2 ? 'BLACK_WHITE' : 'REAL_PIC'}" alpha="${look?.alpha ? Math.round(look.alpha * 255) : 0}"/><hp:effects/>` +
       `<hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/>` +
       `${place.tail}</hp:pic>`
     );
@@ -379,7 +428,7 @@ class SectionWriter {
     const rowHs = Array.from({ length: t.rows }, (_, i) => (t.rowHeightsPx?.[i] ? Math.max(283, pxToHwp(t.rowHeightsPx[i]!) + 282) : 1000));
     const spanH = (r: number, n: number) => rowHs.slice(r, r + n).reduce((a, b) => a + b, 0);
     const id = nextId();
-    let xml = `<hp:tbl id="${id}" zOrder="${this.zOrder++}" numberingType="TABLE" textWrap="${pl ? pl.wrap : 'TOP_AND_BOTTOM'}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="${t.pageSplit === 'row' ? 'TABLE' : t.pageSplit === 'none' ? 'NONE' : 'CELL'}" repeatHeader="1" rowCnt="${t.rows}" colCnt="${t.cols}" cellSpacing="0" borderFillIDRef="3" noAdjust="0">`;
+    let xml = `<hp:tbl id="${id}" zOrder="${this.zOrder++}" numberingType="TABLE" textWrap="${pl ? pl.wrap : 'TOP_AND_BOTTOM'}" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="${t.pageSplit === 'row' ? 'TABLE' : t.pageSplit === 'none' ? 'NONE' : 'CELL'}" repeatHeader="1" rowCnt="${t.rows}" colCnt="${t.cols}" cellSpacing="${t.cellSpacingPx ? pxToHwp(t.cellSpacingPx) : 0}" borderFillIDRef="3" noAdjust="0">`;
     xml += `<hp:sz width="${tableW}" widthRelTo="ABSOLUTE" height="${spanH(0, t.rows)}" heightRelTo="ABSOLUTE" protect="0"/>`;
     const pad = pxToHwp(t.cellPadPx);
     if (pl) xml += pl.tail;
@@ -469,9 +518,12 @@ class SectionWriter {
     let xml = '';
     let pending = '';
     let begun = false;
+    // 떠 있는 블록에 달린 감추기는 뒤따르는 문단으로 넘긴다
+    let pendingHide = '';
     for (const b of blocks) {
       if (b.kind === 'box' && b.float) {
         pending += this.floatRun(b);
+        pendingHide += b.pageHide || '';
         continue;
       }
       const isFirst = first && !begun;
@@ -481,6 +533,13 @@ class SectionWriter {
       if (!sub && !isFirst && b.columnsBefore && colKey(b.columnsBefore) !== this.curCols) {
         this.curCols = colKey(b.columnsBefore);
         colRun = `<hp:run charPrIDRef="0"><hp:ctrl>${colPrXml(b.columnsBefore)}</hp:ctrl></hp:run>`;
+      }
+      // 감추기: 이 문단이 놓인 쪽에서 감출 것
+      const hide = (b.pageHide || '') + pendingHide;
+      pendingHide = '';
+      if (hide && !sub) {
+        const on = (c: string) => (hide.includes(c) ? 1 : 0);
+        colRun += `<hp:run charPrIDRef="0"><hp:ctrl><hp:pageHiding hideHeader="${on('h')}" hideFooter="${on('f')}" hideMasterPage="${on('m')}" hideBorder="${on('b')}" hideFill="${on('x')}" hidePageNum="${on('n')}"/></hp:ctrl></hp:run>`;
       }
       let bx: string;
       if (b.kind === 'para') bx = this.paragraph(b, { sub, first: isFirst, extraRuns: colRun + pending });
@@ -524,8 +583,12 @@ class SectionWriter {
     }
     let xml = `<hp:run charPrIDRef="${charId}"><hp:secPr id="" textDirection="HORIZONTAL" spaceColumns="1134" tabStop="8000" tabStopVal="4000" tabStopUnit="HWPUNIT" outlineShapeIDRef="1" memoShapeIDRef="0" textVerticalWidthHead="0" masterPageCnt="${this.masterXml.length}">`;
     xml += `<hp:grid lineGrid="0" charGrid="0" wonggojiFormat="0"/><hp:startNum pageStartsOn="BOTH" page="${s.pageNumber.start !== 1 ? s.pageNumber.start : 0}" pic="0" tbl="0" equation="0"/>`;
-    xml += `<hp:visibility hideFirstHeader="${s.hideFirst?.header ? 1 : 0}" hideFirstFooter="${s.hideFirst?.footer ? 1 : 0}" hideFirstMasterPage="${s.hideFirst?.masterPage ? 1 : 0}" border="${vis(pb?.borderOn)}" fill="${vis(pb?.fillOn)}" hideFirstPageNum="${s.hideFirst?.pageNum ? 1 : 0}" hideFirstEmptyLine="0" showLineNumber="0"/>`;
-    xml += `<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>`;
+    xml += `<hp:visibility hideFirstHeader="${s.hideFirst?.header ? 1 : 0}" hideFirstFooter="${s.hideFirst?.footer ? 1 : 0}" hideFirstMasterPage="${s.hideFirst?.masterPage ? 1 : 0}" border="${vis(pb?.borderOn)}" fill="${vis(pb?.fillOn)}" hideFirstPageNum="${s.hideFirst?.pageNum ? 1 : 0}" hideFirstEmptyLine="0" showLineNumber="${s.lineNumbers ? 1 : 0}"/>`;
+    // 줄 번호 (새로 시작: 1 쪽마다, 2 구역마다, 3 이어서)
+    const ln = s.lineNumbers;
+    xml += ln
+      ? `<hp:lineNumberShape restartType="${ln.restart === 'page' ? 1 : ln.restart === 'section' ? 2 : 3}" countBy="${Math.max(1, Math.round(+ln.countBy || 1))}" distance="${Math.max(0, mmToHwp(+ln.distance || 0))}" startNumber="${Math.max(1, Math.round(+ln.start || 1))}"/>`
+      : `<hp:lineNumberShape restartType="0" countBy="0" distance="0" startNumber="0"/>`;
     xml += `<hp:pagePr landscape="${pg.landscape ? 'NARROWLY' : 'WIDELY'}" width="${w}" height="${h}" gutterType="LEFT_ONLY">`;
     xml += `<hp:margin header="${mmToHwp(pg.marginHeader)}" footer="${mmToHwp(pg.marginFooter)}" gutter="${mmToHwp(pg.gutter)}" left="${mmToHwp(pg.marginLeft)}" right="${mmToHwp(pg.marginRight)}" top="${mmToHwp(pg.marginTop)}" bottom="${mmToHwp(pg.marginBottom)}"/></hp:pagePr>`;
     xml += `<hp:footNotePr><hp:autoNumFormat type="DIGIT" userChar="" prefixChar="" suffixChar=")" supscript="0"/><hp:noteLine length="-1" type="SOLID" width="0.12 mm" color="#000000"/><hp:noteSpacing betweenNotes="283" belowLine="567" aboveLine="850"/><hp:numbering type="CONTINUOUS" newNum="1"/><hp:placement place="EACH_COLUMN" beneathText="0"/></hp:footNotePr>`;
@@ -601,6 +664,19 @@ class SectionWriter {
   pageCount = 1;
   /** 바탕쪽 파일들 (구역 정의를 쓸 때 채운다) */
   masterXml: { id: string; xml: string }[] = [];
+}
+
+/** 변경 추적 목록: 바뀐 내용(종류·시각·사람)과 사람들 */
+function trackChangesXml(reg: Registry): string {
+  if (!reg.changes.length) return '';
+  const iso = (t: number) => new Date(t > 0 ? t : Date.now()).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return (
+    `<hh:trackChanges itemCnt="${reg.changes.length}">` +
+    reg.changes.map((c, i) => `<hh:trackChange type="${c.type === 'ins' ? 'Insert' : 'Delete'}" date="${iso(c.time)}" authorID="${c.author}" hide="0" id="${i + 1}"/>`).join('') +
+    `</hh:trackChanges><hh:trackChangeAuthors itemCnt="${reg.authors.length}">` +
+    reg.authors.map((a, i) => `<hh:trackChangeAuthor name="${xmlEscape(a || 'Kite')}" mark="1" id="${i + 1}"/>`).join('') +
+    `</hh:trackChangeAuthors>`
+  );
 }
 
 function headerXml(reg: Registry): string {
@@ -714,6 +790,7 @@ function headerXml(reg: Registry): string {
     numbering +
     `<hh:paraProperties itemCnt="${reg.paras.length}">${paraXml}</hh:paraProperties>` +
     `<hh:styles itemCnt="1"><hh:style id="0" type="PARA" name="바탕글" engName="Normal" paraPrIDRef="0" charPrIDRef="0" nextStyleIDRef="0" langID="1042" lockForm="0"/></hh:styles>` +
+    trackChangesXml(reg) +
     `</hh:refList><hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument>` +
     `<hh:docOption><hh:linkinfo path="" pageInherit="0" footnoteInherit="0"/></hh:docOption><hh:trackchageConfig flags="56"/></hh:head>`
   );

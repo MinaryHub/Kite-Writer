@@ -1,7 +1,7 @@
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
-import { pageNumAt } from '../print';
+import { pageNumAt, printPlans } from '../print';
 import { LEADER_DOTS, TAB_TYPE_RIGHT } from '../editor/extensions/tabFill';
 import { formatPageNumber } from '../formats/common';
 
@@ -41,10 +41,11 @@ function pageIndexOf(tab: DocTab, pos: number): number {
   return k;
 }
 
-/** 제목이 놓인 쪽 번호 글자 */
+/** 제목이 놓인 쪽 번호 글자 (구역에서 쪽 번호를 다시 시작한 문서는 그 쪽의 구역 번호로) */
 function pageLabel(tab: DocTab, pos: number): string {
-  const s = tab.settings;
-  const n = pageNumAt(s, pageIndexOf(tab, pos));
+  const k = pageIndexOf(tab, pos);
+  const s = tab.layout.pageHfs ? printPlans(tab)[k]?.settings || tab.settings : tab.settings;
+  const n = pageNumAt(s, k);
   return formatPageNumber(n, s.pageNumber.format === 'dash' ? 'digit' : s.pageNumber.format);
 }
 

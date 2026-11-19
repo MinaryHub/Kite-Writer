@@ -43,6 +43,83 @@ export function indentByBlanks(table: JNode, blanks: JNode[]) {
   if (pt > 0.2 && pt < 200) table.attrs = { ...table.attrs, indent: r2((+table.attrs?.indent || 0) + pt) };
 }
 
+/** 빈칸 글의 폭(px): 한글의 빈칸은 글자 크기의 절반 (장평을 곱하고 자간 — 글자 크기에 대한 % — 을 더한다) */
+function blankWidthPx(n: JNode): number {
+  const ts = n.marks?.find((m) => m.type === 'textStyle')?.attrs || {};
+  const size = +ts.fontSize > 0 ? +ts.fontSize : 10;
+  const fw = +ts.fontWidth > 0 ? +ts.fontWidth / 100 : 1;
+  const ls = Number.isFinite(+ts.letterSpacing) ? +ts.letterSpacing / 100 : 0;
+  return (n.text || '').length * Math.max(0, size * (0.5 * fw + ls)) * PT2PX;
+}
+
+/**
+ * 한 줄 문단에 글자처럼 취급하는 표 하나와 그 뒤의 글·그림이 함께 있는 것: 한글은 한 줄에 왼쪽부터 차례로 나란히 놓는다
+ * (표 + 빈칸 + 그래프 그림, 표 + 글 등). 표는 블록이라 글·그림과 한 줄에 둘 수 없으므로, 표 뒤의 내용을 한 줄짜리 문단에 담아
+ * 표 옆 제자리에 띄운다. paras: 표로 쪼개진 문단의 블록들 (표 앞은 빈칸만, 표는 하나).
+ * line: 한글이 놓은 줄의 가로 자리 (x 는 본문·칸 왼쪽에서, px), align: 문단 정렬, seg: 그 줄의 [위쪽, 높이, 아래 간격, 기준선] (px).
+ * 표는 정렬 대신 줄 안 자리만큼 들여 쓰고, 표 뒤 내용은 높이 없는 자리 표시(anchor)의 문단으로 — 그 문단의 줄 상자를 한글의
+ * 줄(높이·기준선)과 같게 하므로 글은 기준선에, 그림은 글자처럼 놓인다. 자리 표시의 위쪽이 줄 위쪽이다
+ * (본문에서는 부르는 쪽이 자리 표시를 그 줄의 쪽 안 위치(hwpTop)에 둔다).
+ * 줄에서 가장 큰 개체가 표가 아니거나, 가운데·오른쪽 정렬인데 폭을 모르는 글이 있으면 null
+ */
+export function sideBySide(paras: JNode[], line: { x: number; w: number }, align: string | null | undefined, seg: number[]): { table: JNode; anchor: JNode } | null {
+  const objs = paras.filter((b) => b.type !== 'paragraph');
+  const table = objs.length === 1 && objs[0].type === 'table' && objs[0].attrs?.inline === true ? objs[0] : null;
+  if (!table || !(seg[1] > 0)) return null;
+  const om: number[] = Array.isArray(table.attrs?.outMargin) && table.attrs!.outMargin.length === 4 ? table.attrs!.outMargin.map((v: any) => +v || 0) : [0, 0, 0, 0];
+  // 표 폭: 첫 줄 칸들의 폭 합
+  let tw = 0;
+  for (const c of table.content?.[0]?.content || []) {
+    const cw = c.attrs?.colwidth;
+    if (!Array.isArray(cw) || !cw.length) return null;
+    for (const w of cw) tw += +w || 0;
+  }
+  const tH = (+table.attrs?.hwpH || 0) + om[2] + om[3];
+  if (!(tw > 0) || !(tH > 0)) return null;
+  const ti = paras.indexOf(table);
+  // 표 앞: 빈칸만 (표를 그만큼 민다)
+  let lead = 0;
+  for (const b of paras.slice(0, ti))
+    for (const n of b.content || []) {
+      if (n.type === 'text' && !(n.text || '').trim()) lead += blankWidthPx(n);
+      else return null;
+    }
+  // 표 뒤: 빈칸·글·그림
+  const rest: JNode[] = [];
+  let restW = 0;
+  let text = false;
+  let shown = false;
+  let size: number | null = null;
+  for (const b of paras.slice(ti + 1)) {
+    if (size == null && +b.attrs?.fontSize > 0) size = +b.attrs!.fontSize;
+    for (const n of b.content || []) {
+      if (n.type === 'text') {
+        if ((n.text || '').trim()) text = shown = true;
+        else restW += blankWidthPx(n);
+      } else if (n.type === 'image' && !n.attrs?.float && +n.attrs?.width > 0 && +n.attrs?.height > 0) {
+        if (+n.attrs!.height > tH + 1) return null;
+        restW += +n.attrs!.width;
+        shown = true;
+      } else return null;
+      rest.push(n);
+    }
+  }
+  if (!shown || (text && (align === 'right' || align === 'center'))) return null;
+  // 정렬: 줄 폭에서 남는 만큼 (가운데·오른쪽). 양쪽·배분 정렬은 왼쪽부터
+  const tOuter = om[0] + tw + om[1];
+  const free = Math.max(0, line.w - (lead + tOuter + restW));
+  const x0 = line.x + (align === 'right' ? free : align === 'center' ? free / 2 : 0);
+  const { align: _drop, ...ta } = table.attrs || {};
+  table.attrs = { ...ta, indent: r2(((x0 + lead) * 72) / 96) };
+  const rx = x0 + lead + tOuter;
+  const H = Math.max(seg[1], tH);
+  const base = seg[3] >= seg[1] * 0.6 ? seg[3] : seg[1] * 0.85;
+  const p: JNode = { type: 'paragraph', attrs: size ? { fontSize: size } : {}, content: rest };
+  p.attrs = { ...p.attrs, hwpLen: jsonContentSize(p), hwpLines: [[0, r2(Math.max(10, line.x + line.w - rx))]], hwpVs: [[0, r2(H), 0, r2(base + (H - seg[1]))]] };
+  const anchor: JNode = { type: 'textBox', attrs: { width: null, height: null, padding: [0, 0, 0, 0], float: { x: r2(rx), y: 0 } }, content: [p] };
+  return { table, anchor };
+}
+
 /** 개체의 자리 정보 (px) */
 export interface ObjPos {
   /** 글자처럼 취급 */
@@ -76,6 +153,8 @@ export interface PageGeomPx {
 /** 문단 모양 가운데 배치에 쓰는 값 (pt) */
 export interface ParaBox {
   spaceBefore: number;
+  /** 문단 아래 간격 (pt). 없으면 0 */
+  spaceAfter?: number;
   indentLeft: number;
   indentRight: number;
   textIndent: number;
@@ -123,7 +202,19 @@ export class ParaLayout {
   constructor(
     /** 줄마다 [줄 위쪽, 줄 높이, 줄 아래 간격, 기준선] (px) */
     readonly segV: number[][],
-    private o: { inSub: boolean; width?: number; geom: () => PageGeomPx; hwpPage: boolean; pageBreak: boolean; pp: ParaBox; state: LayoutState; origin?: { x: number; y: number } },
+    private o: {
+      inSub: boolean;
+      width?: number;
+      geom: () => PageGeomPx;
+      hwpPage: boolean;
+      pageBreak: boolean;
+      pp: ParaBox;
+      state: LayoutState;
+      origin?: { x: number; y: number };
+      /** 첫 줄의 가로 자리 (본문·칸 왼쪽에서, px)와 문단 정렬: 한 줄에 나란히 놓인 표와 글·그림을 그 자리에 놓는 데 쓴다 */
+      line0?: { x: number; w: number };
+      align?: string | null;
+    },
   ) {
     this.prevEnd = o.hwpPage || o.pageBreak ? 0 : o.state.prevEndV;
     if (!o.inSub && segV.length) {
@@ -221,6 +312,7 @@ export class ParaLayout {
     const { segV } = this;
     const { inSub, pp, state } = this.o;
     let paras = blocks.filter((b) => !isBreakBlock(b));
+    let sideAnchor: JNode | null = null;
     // 글자처럼 취급하는 표·글상자 하나와 빈칸뿐인 글: 한글에서는 한 줄(개체 높이)이다
     if (segV.length === 1 && paras.length > 1) {
       const objs = paras.filter((b) => b.type !== 'paragraph');
@@ -228,6 +320,14 @@ export class ParaLayout {
       if (objs.length === 1 && paras.every((b) => b === objs[0] || blank(b))) {
         indentByBlanks(objs[0], paras.slice(0, paras.indexOf(objs[0])));
         paras = objs;
+      } else if (!floating && this.o.line0) {
+        // 표와 글·그림이 한 줄에 나란히: 표 뒤의 내용을 표 옆 제자리에 띄운다
+        const side = sideBySide(paras, this.o.line0, this.o.align, segV[0]);
+        if (side) {
+          this.before.push(side.anchor);
+          sideAnchor = side.anchor;
+          paras = [side.table];
+        }
       }
     }
     const one = paras.length === 1 ? paras[0] : null;
@@ -238,6 +338,11 @@ export class ParaLayout {
       if (a.hwpLines || segV.length === 1) a.hwpVs = segV;
       one.attrs = a;
     }
+    // 칸·글상자 안에서 글자처럼 취급하는 표 하나뿐인 문단: 표 아래에 그 줄의 아래 간격과 문단 아래 간격을 둔다 (HWPX 와 같게)
+    if (inSub && one && one.type === 'table' && segV.length === 1) {
+      const after = segV[0][2] + (pp.spaceAfter || 0) * PT2PX;
+      one.attrs = { ...one.attrs, hwpVs: segV, ...(after > 0.3 && after < 400 ? { hwpAfter: r2(after) } : {}) };
+    }
     const breaks = blocks.filter(isBreakBlock);
     if (inSub) return { blocks: [...this.before, ...paras, ...this.after], lead: null };
     const v0 = segV.length ? segV[0][0] : null;
@@ -247,6 +352,8 @@ export class ParaLayout {
       const omT = one.type === 'table' ? +(one.attrs?.outMargin?.[2] || 0) : 0;
       one.attrs = { ...one.attrs, hwpTop: r2(v0 - sb + omT) };
       for (const b of this.before) if (b.attrs?.float) b.attrs = { ...b.attrs, hwpTop: r2(v0 - sb) };
+      // 표 옆에 띄운 내용의 자리 표시는 줄 위쪽에 (그 안 문단의 줄 상자가 한글의 줄과 같다)
+      if (sideAnchor) sideAnchor.attrs = { ...sideAnchor.attrs, hwpTop: r2(v0) };
       if (this.leadTables.length && one.type === 'paragraph' && !this.o.hwpPage) {
         // 밀린 첫 줄 바로 위에서부터 거꾸로 쌓아 올린다
         let y = v0 - sb;
@@ -281,21 +388,35 @@ export function gapInBox(groups: JNode[][]) {
     const paras = blocks.filter((b) => !isBreakBlock(b) && !b.attrs?.float);
     const one = paras.length === 1 && paras[0].type === 'paragraph' ? paras[0] : null;
     const vs = one?.attrs?.hwpVs as number[][] | undefined;
+    // 글자처럼 취급하는 표 하나뿐인 문단: 표 아래 간격(hwpAfter)까지 그 줄이 끝난 자리
+    const tvs = paras.length === 1 && paras[0].type === 'table' ? (paras[0].attrs?.hwpVs as number[][] | undefined) : undefined;
     if (one && vs && vs.length) {
       const sb = (+one.attrs!.spaceBefore || 0) * PT2PX;
       const gap = prevEnd == null ? 0 : vs[0][0] - sb - prevEnd;
       if (gap > 0.5 && gap < 4000) one.attrs!.hwpGap = r2(gap);
       const last = vs[vs.length - 1];
       prevEnd = last[0] + last[1] + last[2] + (+one.attrs!.spaceAfter || 0) * PT2PX;
-    } else prevEnd = null;
+    } else if (tvs && tvs.length === 1) prevEnd = tvs[0][0] + tvs[0][1] + (+paras[0].attrs!.hwpAfter || 0);
+    else prevEnd = null;
+  }
+  // 칸·글상자의 마지막 줄 아래 간격은 칸 높이에 들지 않는다: 마지막 블록이 표면 그 아래 간격을 지운다
+  for (let g = groups.length - 1; g >= 0; g--) {
+    const last = [...groups[g]].reverse().find((b) => !isBreakBlock(b) && !b.attrs?.float);
+    if (!last) continue;
+    if (last.type === 'table' && last.attrs?.hwpAfter != null) {
+      const { hwpAfter: _drop, ...rest } = last.attrs;
+      last.attrs = rest;
+    }
+    break;
   }
 }
 
 /**
- * 칸의 마지막 문단: 적힌 칸 높이가 글(마지막 줄의 글자 높이까지)보다 작으면 한글은 칸 높이를 내용으로 새로 셈하고
- * 마지막 줄 간격·문단 아래 간격까지 넣는다 (hwpTrail). 돌려주는 값은 그때 내용이 요구하는 높이(px), 아니면 0
+ * 칸 내용이 요구하는 높이(px): 적힌 칸 높이가 글(마지막 줄의 글자 높이까지 + 위아래 안 여백)보다 작으면 한글은 칸 높이를
+ * 그 내용 높이로 늘린다. 마지막 줄 아래 간격과 문단 아래 간격은 넣지 않는다 — 한글이 적어 둔 표 높이(sz)와 견주어
+ * 표 42개 모두 이 셈과 맞았다. 적힌 높이로 충분하면 0
  */
-export function markCellTrail(content: JNode[], cellHeightPx: number, vMarginPx: number): number {
+export function cellContentNeed(content: JNode[], cellHeightPx: number, vMarginPx: number): number {
   const lastP = content[content.length - 1];
   const vs = lastP && lastP.type === 'paragraph' ? (lastP.attrs?.hwpVs as number[][] | undefined) : undefined;
   if (!vs || !vs.length) return 0;
@@ -303,16 +424,14 @@ export function markCellTrail(content: JNode[], cellHeightPx: number, vMarginPx:
   if (content.length === 1 && !(lastP.content || []).length) return 0;
   const l = vs[vs.length - 1];
   const textOnly = l[0] + l[1] + vMarginPx;
-  if (cellHeightPx >= textOnly - 1) return 0;
-  lastP.attrs = { ...lastP.attrs, hwpTrail: true };
-  return textOnly + l[2] + (+lastP.attrs.spaceAfter || 0) * PT2PX;
+  return cellHeightPx >= textOnly - 1 ? 0 : textOnly;
 }
 
 /**
  * 표 줄 높이 마무리 (rowH: 줄마다 '칸 높이 - 위아래 안 여백' px, 낱칸에서 읽은 것).
  * 합친 칸으로만 덮인 줄의 높이를 거꾸로 셈하고, 합친 칸의 내용이 덮은 줄들보다 크면 마지막 줄을 늘린다
  */
-export function solveSpanRows(rowH: number[], spans: { row: number; rs: number; h: number; need: number }[], vMarginPx: number) {
+export function solveSpanRows(rowH: number[], spans: { row: number; rs: number; h: number; need: number }[], vMarginPx: number, rowNeed: number[] = []) {
   for (let pass = 0; pass < spans.length + 1; pass++) {
     let found = false;
     for (const sp of spans) {
@@ -331,15 +450,19 @@ export function solveSpanRows(rowH: number[], spans: { row: number; rs: number; 
     }
     if (!found) break;
   }
+  // 합친 칸의 내용이 덮은 줄들보다 크면 합친 마지막 줄을 늘린다. 덮은 줄의 높이는 실제로 그려질 높이:
+  // 적힌 칸 높이와 그 줄 낱칸들의 내용 높이(rowNeed) 가운데 큰 값 (적힌 높이만 더하면 모자람을 크게 셈해 줄이 너무 늘었다)
+  const eff = (r: number) => Math.max(rowH[r] + vMarginPx, rowNeed[r] || 0);
   for (const sp of spans) {
     if (!(sp.need > 0)) continue;
     let sum = 0;
     let all = true;
     for (let r = sp.row; r < sp.row + sp.rs; r++) {
       if (rowH[r] == null) all = false;
-      else sum += rowH[r] + vMarginPx;
+      else sum += eff(r);
     }
-    if (all && sp.need > sum + 1) rowH[sp.row + sp.rs - 1] += sp.need - sum;
+    const last = sp.row + sp.rs - 1;
+    if (all && sp.need > sum + 1) rowH[last] = eff(last) - vMarginPx + (sp.need - sum);
   }
 }
 
