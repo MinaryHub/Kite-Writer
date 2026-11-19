@@ -15,6 +15,7 @@ import { cleanMargins } from '../../formats/flatten';
 import { cleanColumns, normColor, parseBorderCss } from '../../formats/common';
 import { cleanLook, lookCss, lookStyle } from '../../formats/picLook';
 import { viewSrc } from '../imageUrls';
+import { decorationSet } from '../decoSet';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -1142,7 +1143,7 @@ function noWrapDecosIn(doc: PMNode, from: number, to: number): Decoration[] {
 }
 
 function noWrapDecos(doc: PMNode): DecorationSet {
-  return DecorationSet.create(doc, noWrapDecosIn(doc, 0, doc.content.size));
+  return decorationSet(doc, noWrapDecosIn(doc, 0, doc.content.size));
 }
 
 /** 최상위 블록 경계로 넓힌 범위 */

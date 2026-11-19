@@ -8,6 +8,7 @@ import type { Columns, PageSetup } from '../../types';
 import { columnGeom, type ColGeom } from '../../formats/common';
 import { hwpLineBoxes } from './hwpMetrics';
 import { ownMargins } from './sections';
+import { decorationSet } from '../decoSet';
 
 /**
  * 쪽 나누기(페이지네이션) 엔진.
@@ -194,7 +195,7 @@ function buildDecos(doc: PMNode, breaks: PageBreakInfo[]): DecorationSet {
       ),
     );
   }
-  return DecorationSet.create(doc, decos);
+  return decorationSet(doc, decos);
 }
 
 /** 제목 칸으로만 된 줄인가 */
@@ -270,6 +271,54 @@ export interface DirtyRange {
  *              그 뒤 블록의 절대 위치·쪽 상태가 지난번과 같아지는 순간 멈추고 지난 결과를 이어 쓴다.
  * @param curBreaks 플러그인 상태의 현재 나눔 목록 (지난 결과를 문서 변경에 맞춰 옮겨 둔 것)
  */
+/** 최상위 블록들의 그리기 정보(ProseMirror 의 ViewDesc)와 문서 안 시작 자리 */
+interface TopDescs {
+  offsets: number[];
+  descs: any[];
+}
+
+/** 편집기의 최상위 블록 ViewDesc 들을 문서 차례로 (내부 구조가 다르거나 문서와 맞지 않으면 null) */
+function topLevelDescs(view: EditorView): TopDescs | null {
+  const children = (view as any).docView?.children;
+  if (!Array.isArray(children)) return null;
+  const offsets: number[] = [];
+  const descs: any[] = [];
+  let off = 0;
+  for (const c of children) {
+    const size = c?.size;
+    if (typeof size !== 'number') return null;
+    if (c.node && size > 0) {
+      offsets.push(off);
+      descs.push(c);
+    }
+    off += size;
+  }
+  return off === view.state.doc.content.size ? { offsets, descs } : null;
+}
+
+/** pos 에 있는 노드의 DOM (view.nodeDOM 과 같은 것): pos 를 품은 최상위 블록을 이분 탐색으로 찾고 그 안에서 찾는다 */
+function domIn(t: TopDescs, pos: number): Node | null {
+  const { offsets, descs } = t;
+  if (!offsets.length) return null;
+  let lo = 0;
+  let hi = offsets.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (offsets[mid] <= pos) lo = mid;
+    else hi = mid - 1;
+  }
+  const d = descs[lo];
+  const off = offsets[lo];
+  if (!d || pos < off || pos >= off + d.size) return null;
+  try {
+    if (pos === off) return d.nodeDOM ?? d.dom ?? null;
+    const inner = typeof d.descAt === 'function' ? d.descAt(pos - off - (d.border ?? 1)) : null;
+    return inner ? inner.nodeDOM ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
 function computeLayout(
   view: EditorView,
   g: PageGeometry,
@@ -281,6 +330,13 @@ function computeLayout(
 ): { breaks: PageBreakInfo[]; result: LayoutResult; cache: LayoutCache; incremental: boolean; fixed: FixedBlock[]; tops: number[] } | null {
   const root = view.dom as HTMLElement;
   const s = viewState.zoom || 1;
+  // 블록의 DOM: view.nodeDOM(pos) 는 부를 때마다 문서 처음부터 블록을 세므로(블록 수만큼) 블록 수만 개 문서에서
+  // 배치가 블록 수의 제곱만큼 걸렸다. 최상위 블록들의 자리를 한 번 모아 두고 그 안에서만 찾는다
+  let topDescs: TopDescs | null | undefined;
+  const nodeDom = (pos: number): Node | null => {
+    if (topDescs === undefined) topDescs = topLevelDescs(view);
+    return (topDescs && domIn(topDescs, pos)) || view.nodeDOM(pos);
+  };
   // 공간을 숨기면 스크롤이 조정되어 편집기 자체가 움직일 수 있으므로, 전환할 때마다 기준점을 다시 읽는다
   let rootTop = root.getBoundingClientRect().top;
   const refreshRootTop = () => {
@@ -780,7 +836,7 @@ function computeLayout(
           npos += nx.nodeSize;
           continue;
         }
-        const nel = view.nodeDOM(npos) as HTMLElement | null;
+        const nel = nodeDom(npos) as HTMLElement | null;
         if (!(nel instanceof HTMLElement)) return;
         need = rel(nel.getBoundingClientRect().bottom);
         if (nx.isTextblock) {
@@ -803,7 +859,7 @@ function computeLayout(
   };
 
   const handleTextblock = (node: PMNode, pos: number) => {
-    const el = view.nodeDOM(pos) as HTMLElement | null;
+    const el = nodeDom(pos) as HTMLElement | null;
     if (!el || !(el instanceof HTMLElement)) return;
     const r = el.getBoundingClientRect();
     const top = rel(r.top);
@@ -956,7 +1012,7 @@ function computeLayout(
     };
     // 나뉜 줄의 높이 = max(줄 최소 높이, 칸마다 '내용 높이 + 끼운 공간'). 자연 배치의 아래 끝(uBottom)을 기준으로 하면
     // 최소 높이 안에서 가운데 정렬된 칸의 남는 공간까지 늘어난다고 보게 되어 뒤 내용의 자리가 어긋난다
-    const rowEl = view.nodeDOM(rowPos) as HTMLElement | null;
+    const rowEl = nodeDom(rowPos) as HTMLElement | null;
     const minH = rowEl ? parseFloat(getComputedStyle(rowEl).getPropertyValue('--row-h')) || 0 : 0;
     let rowBottom = uTop + minH; // 자연 배치 기준 (shift 미포함)
     /** 내용이 가장 꽉 찬 칸에서 내용 아래로 남는 자리 (자연 배치의 줄 높이 - 칸 내용 높이의 최솟값): 나뉜 뒤에도 지킨다 */
@@ -968,7 +1024,7 @@ function computeLayout(
       let pc = startPage;
       let last = -Infinity;
       for (const lf of collectLeaves(cell, cellPos + 1)) {
-        const el = view.nodeDOM(lf.pos) as HTMLElement | null;
+        const el = nodeDom(lf.pos) as HTMLElement | null;
         if (!(el instanceof HTMLElement)) continue;
         const r = el.getBoundingClientRect();
         const top = rel(r.top);
@@ -1005,7 +1061,7 @@ function computeLayout(
       }
       // 여러 줄을 합친 칸은 끼운 공간이 합친 줄들에 나뉘어 들어가므로 이 줄의 높이로 치지 않는다
       if ((cell.attrs.rowspan || 1) > 1) return;
-      const h = cellContentHeight(view.nodeDOM(cellPos) as HTMLElement | null);
+      const h = cellContentHeight(nodeDom(cellPos) as HTMLElement | null);
       if (h != null) {
         rowBottom = Math.max(rowBottom, uTop + h + cs);
         minSlack = Math.min(minSlack, Math.max(0, uBottom - uTop - h));
@@ -1043,7 +1099,7 @@ function computeLayout(
   };
 
   const handleTable = (node: PMNode, pos: number) => {
-    const el = view.nodeDOM(pos) as HTMLElement | null;
+    const el = nodeDom(pos) as HTMLElement | null;
     if (!el || !(el instanceof HTMLElement)) return;
     const r = el.getBoundingClientRect();
     const top = rel(r.top);
@@ -1075,7 +1131,7 @@ function computeLayout(
     const rows: { pos: number; el: HTMLElement }[] = [];
     node.forEach((row, offset) => {
       const rp = pos + 1 + offset;
-      const re = view.nodeDOM(rp) as HTMLElement | null;
+      const re = nodeDom(rp) as HTMLElement | null;
       if (re instanceof HTMLElement) rows.push({ pos: rp, el: re });
     });
     if (!rows.length) {
@@ -1123,7 +1179,7 @@ function computeLayout(
   };
 
   const handleOther = (pos: number) => {
-    const el = view.nodeDOM(pos) as HTMLElement | null;
+    const el = nodeDom(pos) as HTMLElement | null;
     if (!el || !(el instanceof HTMLElement)) return;
     const r = el.getBoundingClientRect();
     const fns = collectFootnotes(el, pos);
@@ -1219,7 +1275,7 @@ function computeLayout(
       pos += child.nodeSize;
       continue;
     }
-    const el = view.nodeDOM(pos) as HTMLElement | null;
+    const el = nodeDom(pos) as HTMLElement | null;
     if (useCache && el instanceof HTMLElement) {
       if (j >= resumeNew + INCREMENTAL_LIMIT) return null;
       naturalize(el);
@@ -1525,14 +1581,17 @@ export const Pagination = Extension.create<{}, PaginationStorage>({
               view.dispatch(tr);
             }
             // 한글 자리에 맞춘 블록이 실제로 그 자리에 왔는지 잰다. 어긋났으면 보정값을 고쳐 한 번 더 배치한다
-            if (out.fixed.length && !out.incremental && corrRuns < 6) {
+            // 아주 긴 문서(최상위 블록 2만 개 넘게)는 전체 배치 한 번이 수 초라 보정 배치를 한 번만 한다
+            if (out.fixed.length && !out.incremental && corrRuns < (view.state.doc.childCount > 20000 ? 1 : 6)) {
               const z = viewState.zoom || 1;
               const rootTop = root.getBoundingClientRect().top;
               let off = false;
               // 앞 블록을 바로잡으면 뒤 블록도 그만큼 따라 움직인다: 앞에서 바로잡은 몫(carry)을 빼고 남은 차이만 보정한다
               let carry = 0;
+              // 블록 DOM 은 한 번 모은 최상위 블록 자리에서 찾는다 (view.nodeDOM 은 블록 수만큼 센다)
+              const td = topLevelDescs(view);
               for (const fb of out.fixed) {
-                const el = view.nodeDOM(fb.pos) as HTMLElement | null;
+                const el = ((td && domIn(td, fb.pos)) || view.nodeDOM(fb.pos)) as HTMLElement | null;
                 if (!(el instanceof HTMLElement)) continue;
                 const box = (el.matches('table') ? el : el.querySelector(':scope > table')) || el;
                 const err = (box.getBoundingClientRect().top - rootTop) / z - fb.y - carry;

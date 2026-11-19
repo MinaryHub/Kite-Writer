@@ -5,6 +5,7 @@ import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import { DEFAULT_FONT, DEFAULT_FONT_SIZE, FIXED_SPACE, hwpToPx } from '../../formats/common';
 import { CELL_VMARGIN_HWP } from '../../formats/hwp/reader';
 import { fontMissing, fontStack, fontWeightFallback } from '../../fonts';
+import { decorationSet } from '../decoSet';
 
 /**
  * 한글(HWP)과 같은 글자 폭.
@@ -416,7 +417,8 @@ function leadingPt(lineHeight: unknown, size: number): number {
 function buildAll(doc: PMNode): DecorationSet {
   const out: Decoration[] = [];
   decosIn(doc, 0, doc.content.size, out);
-  return DecorationSet.create(doc, out);
+  // 블록 수만 개 문서에서도 블록 수에 비례하는 시간에 (decoSet)
+  return decorationSet(doc, out);
 }
 
 /** 트랜잭션이 바꾼 범위 (새 문서 기준) */

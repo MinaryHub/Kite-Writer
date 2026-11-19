@@ -32,6 +32,10 @@ import {
   TabStop,
 } from './extensions/nodes';
 import { Search } from './extensions/search';
+import { installFastForChild } from './decoSet';
+
+// 아주 긴 문서에서 꾸밈 찾기가 블록 수의 제곱만큼 느려지지 않게 (decoSet)
+installFastForChild();
 import { Pagination } from './extensions/pagination';
 import { TableResize } from './extensions/tableResize';
 import { CheckMarks } from './extensions/checkMarks';

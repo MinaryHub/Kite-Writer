@@ -323,7 +323,11 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     >
       <div className="stage-wrap" style={{ width: W * zoom, height: stageH * zoom + 64 }}>
         <div className="stage" ref={stageRef} style={{ width: W, height: stageH, transform: `scale(${zoom})` }} onMouseDown={onStageMouseDown}>
-          {pages}
+          {/* 쪽 수가 바뀌면 용지·쪽 장식 묶음을 새로 만든다: 형제 앞에 수천 개를 하나씩 끼우면 React 가 끼울 때마다
+              뒤 형제를 끝까지 훑어(getHostSibling) 쪽 수의 제곱만큼 걸린다 (1만 6천 쪽 문서) */}
+          <div className="pages-layer" key={'p' + pageCount}>
+            {pages}
+          </div>
           <div
             className="editor-host"
             style={{ left: hostLeft, top: g.mt, width: g.contentW }}
@@ -335,7 +339,9 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
           >
             <EditorContent editor={tab.editor} style={{ minHeight: lastPlan.contentTop + lastPlan.g.contentH }} />
           </div>
-          <div className="chrome-layer">{chrome}</div>
+          <div className="chrome-layer" key={'c' + pageCount}>
+            {chrome}
+          </div>
         </div>
       </div>
     </div>
