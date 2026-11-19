@@ -48,6 +48,20 @@ export interface Command {
 const ed = (): Editor | null => app.active?.editor || null;
 const chain = () => ed()!.chain().focus();
 const hasDoc = () => !!app.active;
+
+function switchDoc(step: number) {
+  const i = app.docs.findIndex((d) => d.id === app.activeId);
+  if (i < 0 || app.docs.length < 2) return;
+  app.activate(app.docs[(i + step + app.docs.length) % app.docs.length].id);
+}
+
+/** 메뉴·단추로 붙이기: 클립보드를 읽을 수 없는 곳(브라우저 권한 거부)에서는 단축키를 안내한다 */
+async function pasteFromMenu(plain: boolean) {
+  const e = ed();
+  e?.commands.focus();
+  const ok = await platform.paste(plain, e?.view);
+  if (!ok) app.toast(`클립보드를 읽을 수 없습니다. ${plain ? 'Ctrl+Shift+V' : 'Ctrl+V'} 로 붙여 넣으세요.`, 'warn');
+}
 const inTable = () => !!ed()?.isActive('table');
 
 export function insertImagesFromFiles(files: { name: string; data: Uint8Array }[]) {
@@ -227,12 +241,35 @@ export const commands: Record<string, Command> = {
   'edit.redo': { label: '다시 실행', icon: 'Redo2', shortcut: 'Ctrl+Shift+Z', run: () => collab.collabUndo(true) || chain().redo().run(), enabled: () => collab.isCollabTab(app.active) || !!ed()?.can().redo() },
   'edit.cut': { label: '오려 두기', icon: 'Scissors', shortcut: 'Ctrl+X', run: () => (ed()?.commands.focus(), document.execCommand('cut')), enabled: hasDoc },
   'edit.copy': { label: '복사하기', icon: 'Copy', shortcut: 'Ctrl+C', run: () => (ed()?.commands.focus(), document.execCommand('copy')), enabled: hasDoc },
-  'edit.paste': { label: '붙이기', icon: 'ClipboardPaste', shortcut: 'Ctrl+V', run: () => (ed()?.commands.focus(), platform.paste()), enabled: hasDoc },
-  'edit.pastePlain': { label: '텍스트만 붙이기', icon: 'ClipboardType', shortcut: 'Ctrl+Shift+V', run: () => (ed()?.commands.focus(), platform.paste(true)), enabled: hasDoc },
+  'edit.paste': { label: '붙이기', icon: 'ClipboardPaste', shortcut: 'Ctrl+V', run: () => pasteFromMenu(false), enabled: hasDoc },
+  'edit.pastePlain': { label: '텍스트만 붙이기', icon: 'ClipboardType', shortcut: 'Ctrl+Shift+V', run: () => pasteFromMenu(true), enabled: hasDoc },
   'edit.selectAll': { label: '모두 선택', icon: 'TextSelect', shortcut: 'Ctrl+A', run: () => chain().selectAll().run(), enabled: hasDoc },
   'edit.painter': { label: '모양 복사', icon: 'Paintbrush', shortcut: 'Alt+C', keys: ['Alt+C'], run: startFormatPainter, enabled: hasDoc, active: () => !!app.painter },
   'edit.find': { label: '찾기...', icon: 'Search', shortcut: 'Ctrl+F', keys: ['Ctrl+F'], run: () => app.set({ findOpen: 'find' }), enabled: hasDoc },
   'edit.replace': { label: '찾아 바꾸기...', icon: 'Replace', shortcut: 'Ctrl+H', keys: ['Ctrl+H', 'Ctrl+F2'], run: () => app.set({ findOpen: 'replace' }), enabled: hasDoc },
+  'edit.findNext': {
+    label: '다시 찾기',
+    shortcut: 'Ctrl+L',
+    keys: ['Ctrl+L', 'F3'],
+    // 찾던 낱말이 없으면 찾기 창을 연다
+    run: () => {
+      const e = ed();
+      if (e && !e.commands.findNext()) app.set({ findOpen: 'find' });
+    },
+    enabled: hasDoc,
+  },
+  'edit.findPrev': {
+    label: '앞으로 다시 찾기',
+    shortcut: 'Shift+F3',
+    keys: ['Shift+F3', 'Ctrl+Shift+F3'],
+    run: () => {
+      const e = ed();
+      if (e && !e.commands.findPrev()) app.set({ findOpen: 'find' });
+    },
+    enabled: hasDoc,
+  },
+  'window.nextDoc': { label: '다음 문서', shortcut: 'Ctrl+Tab', keys: ['Ctrl+Tab'], run: () => switchDoc(1), enabled: () => app.docs.length > 1 },
+  'window.prevDoc': { label: '이전 문서', shortcut: 'Ctrl+Shift+Tab', keys: ['Ctrl+Shift+Tab'], run: () => switchDoc(-1), enabled: () => app.docs.length > 1 },
   'edit.goto': { label: '찾아가기...', icon: 'CornerDownRight', shortcut: 'Alt+G', keys: ['Alt+G'], run: () => app.openDialog('goto'), enabled: hasDoc },
   'edit.upper': { label: '대문자로', icon: 'CaseSensitive', run: () => ed() && changeCase(ed()!, 'upper'), enabled: hasDoc },
   'edit.lower': { label: '소문자로', icon: 'CaseSensitive', run: () => ed() && changeCase(ed()!, 'lower'), enabled: hasDoc },
@@ -532,14 +569,23 @@ export const commands: Record<string, Command> = {
     run: () => {
       app.prefs.spellcheck = !app.prefs.spellcheck;
       app.savePrefs();
-      document.querySelectorAll('.kdoc-content').forEach((el) => el.setAttribute('spellcheck', String(app.prefs.spellcheck)));
+      app.applySpellcheck();
       app.toast(app.prefs.spellcheck ? '맞춤법 검사를 켰습니다.' : '맞춤법 검사를 껐습니다.');
       app.emit();
     },
     active: () => app.prefs.spellcheck,
   },
   'tools.wordCount': { label: '글자 수 세기...', icon: 'BarChart3', run: () => app.openDialog('docInfo'), enabled: hasDoc },
-  'tools.ai': { label: 'AI 도우미 (Claude·GPT·Gemini)', icon: 'Sparkles', shortcut: 'Ctrl+Shift+A', keys: ['Ctrl+Shift+A'], run: () => app.set({ aiOpen: !app.aiOpen }), active: () => app.aiOpen },
+  'tools.ai': {
+    label: 'AI 도우미 (Claude·GPT·Gemini)',
+    icon: 'Sparkles',
+    shortcut: 'Ctrl+Shift+A',
+    keys: ['Ctrl+Shift+A'],
+    run: () => app.set({ aiOpen: !app.aiOpen }),
+    active: () => app.aiOpen,
+    // AI 도우미는 데스크톱 앱에서만 쓸 수 있다 (안드로이드·브라우저에서는 안내만 뜨는 빈 창이었다)
+    enabled: () => platform.isElectron,
+  },
   'tools.prefs': { label: '환경 설정...', icon: 'Settings', run: () => app.openDialog('prefs') },
   'tools.shortcuts': { label: '단축키 목록', icon: 'Keyboard', shortcut: 'Shift+F1', keys: ['Shift+F1'], run: () => app.openDialog('shortcuts') },
   'tools.mcp': { label: 'AI 앱 연결 (MCP)...', icon: 'Plug', run: () => app.openDialog('mcp') },
@@ -653,6 +699,15 @@ export function installShortcuts() {
       }
     }
     if (inField && !/^(F\d+|Alt\+.|Ctrl\+(S|O|P|W|F4))$/.test(name)) return;
+    // Alt+F(파일)·Alt+E(편집) … : 메뉴 이름 옆의 글자로 그 메뉴를 연다
+    if (/^Alt\+[A-Z]$/.test(name) && !keyMap.has(name) && !app.dialog) {
+      const ev = new CustomEvent('kite:open-menu', { detail: name.slice(4).toLowerCase(), cancelable: true });
+      if (!window.dispatchEvent(ev)) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+    }
     const id = keyMap.get(name);
     if (id) {
       if (app.dialog && !id.startsWith('file.')) return;

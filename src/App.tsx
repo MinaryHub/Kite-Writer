@@ -19,7 +19,7 @@ import { ReviewPanel } from './ui/ReviewPanel';
 import { VersionPanel } from './ui/VersionPanel';
 import { SelectionBubble } from './ui/SelectionBubble';
 import { baseName } from './formats/common';
-import { displayPath } from './android';
+import { displayPath, isAndroid } from './android';
 
 export function App() {
   const app = useApp();
@@ -32,6 +32,17 @@ export function App() {
       app.openDialog('footnote', { pos: d.pos, text: d.text });
     };
     window.addEventListener('kite:edit-footnote', onFootnote);
+    // 안드로이드: 화면 키보드가 올라와 화면이 줄면 입력 중인 자리가 키보드에 가리지 않게 다시 보이게 한다
+    let kbRaf = 0;
+    const onResize = () => {
+      if (!isAndroid) return;
+      cancelAnimationFrame(kbRaf);
+      kbRaf = requestAnimationFrame(() => {
+        const ed = app.active?.editor;
+        if (ed && ed.view.hasFocus()) ed.commands.scrollIntoView();
+      });
+    };
+    window.addEventListener('resize', onResize);
     const onMath = (e: Event) => app.openDialog('math', (e as CustomEvent).detail);
     window.addEventListener('kite:edit-math', onMath);
     // 브라우저에서 창 닫기 전 경고
@@ -45,6 +56,8 @@ export function App() {
     return () => {
       off();
       window.removeEventListener('kite:edit-footnote', onFootnote);
+      window.removeEventListener('resize', onResize);
+      cancelAnimationFrame(kbRaf);
       window.removeEventListener('kite:edit-math', onMath);
       window.removeEventListener('beforeunload', before);
     };

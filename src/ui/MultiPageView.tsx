@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
-import { useApp } from '../app/hooks';
+import { useApp, usePinchZoom } from '../app/hooks';
 import { buildPrintPage, collectPageBoxes, computeGeom, PAGE_GAP, printPlans, type PageBox, type PageGeom, type PagePlan } from '../print';
 
 const GAP = 28;
@@ -16,6 +16,7 @@ export function MultiPageView({ tab }: { tab: DocTab }) {
   const [, force] = useReducer((x: number) => x + 1, 0);
   useEffect(() => tab.subscribe(force), [tab]);
   const wsRef = useRef<HTMLDivElement>(null);
+  usePinchZoom(wsRef);
   const g: PageGeom = computeGeom(tab.settings, PAGE_GAP);
   const zoom = app.zoom;
   const pageCount = Math.max(1, tab.layout.pageCount);

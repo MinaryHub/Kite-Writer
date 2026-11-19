@@ -398,6 +398,7 @@ export function PrefsDialog({ onClose }: { onClose: () => void }) {
     app.prefs = p;
     app.savePrefs();
     app.restartAutosave();
+    app.applySpellcheck();
     app.applyTheme();
     refreshAuthor();
     app.emit();

@@ -1704,7 +1704,9 @@ export const Pagination = Extension.create<{}, PaginationStorage>({
             } catch {
               /* 화면 배치 보정일 뿐이다 */
             }
-            const key = JSON.stringify(out.result);
+            // 쪽 시작 위치·각주 위치는 앞쪽에서 글자를 칠 때마다 바뀐다: 그것만 바뀐 것으로는 알리지 않는다
+            // (화면을 다시 그릴 일이 아니고, 읽는 쪽은 늘 storage.result 의 최신 값을 본다)
+            const key = JSON.stringify(out.result, (k, v) => (k === 'pageStarts' || k === 'pos' ? undefined : v));
             storage.result = out.result;
             if (key !== lastResultKey) {
               lastResultKey = key;

@@ -21,7 +21,10 @@ export class DocTab {
   meta: DocMeta;
   dirty = false;
   warnings: string[] = [];
-  layout: LayoutResult = { pageCount: 1, footnotes: [], pageStarts: [0] };
+  /** 쪽 배치 결과: 늘 최신 값 (쪽 시작 위치처럼 화면을 다시 그리지 않는 변화도 반영) */
+  get layout(): LayoutResult {
+    return this.editor.storage.pagination.result;
+  }
   scrollTop = 0;
   private listeners = new Set<() => void>();
   private savedDoc: any = null;
@@ -66,10 +69,7 @@ export class DocTab {
         this.emit();
       }
     });
-    this.editor.storage.pagination.listeners.add((r: LayoutResult) => {
-      this.layout = r;
-      this.emit();
-    });
+    this.editor.storage.pagination.listeners.add(() => this.emit());
   }
 
   setContent(json: JSONContent, initial = false) {
@@ -88,9 +88,12 @@ export class DocTab {
     return { content: this.editor.getJSON(), settings: this.settings, meta: this.meta };
   }
 
-  markSaved() {
-    this.savedDoc = this.editor.state.doc;
-    this.dirty = false;
+  /**
+   * 저장 완료. snap: 저장한 내용의 문서 (저장하는 동안 더 고친 것이 있으면 그것은 여전히 '수정됨' 이다)
+   */
+  markSaved(snap = this.editor.state.doc) {
+    this.savedDoc = snap;
+    this.dirty = this.editor.state.doc !== snap;
     this.emit();
   }
 

@@ -2725,6 +2725,28 @@ input[type='number'] {
 
 /* ----- 좁은 화면 (휴대폰·안드로이드 앱) ----- */
 @media (max-width: 760px) {
+  /* 옆 창(AI·검사·검토·버전)은 본문을 0 폭으로 밀어내지 않게 화면을 덮어 연다 */
+  .ai-panel,
+  .side-panel {
+    position: fixed;
+    top: 30px;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    z-index: 900;
+  }
+  .find-panel {
+    left: 8px;
+    right: 8px;
+    width: auto;
+  }
+  /* 알림은 화면 폭을 다 쓴다 (가운데 정렬 상자는 화면의 절반 폭에 갇혀 여러 줄로 접혔다) */
+  .toast-wrap {
+    left: 12px;
+    right: 12px;
+    transform: none;
+  }
   .menubar {
     overflow-x: auto;
     overflow-y: hidden;
@@ -2798,4 +2820,12 @@ input[type='number'] {
 .is-android body,
 .is-android .app {
   -webkit-tap-highlight-color: transparent;
+}
+
+/* 손가락으로 쓰는 화면: 작은 단추를 누르기 쉽게 */
+@media (pointer: coarse) {
+  .doc-tab .dt-close {
+    min-width: 28px;
+    min-height: 28px;
+  }
 }

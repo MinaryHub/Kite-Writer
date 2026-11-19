@@ -29,7 +29,9 @@ export function Modal(props: {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [props.onClose, props.onEnter]);
   useEffect(() => {
-    const first = ref.current?.querySelector<HTMLElement>('[data-autofocus], input:not([type=checkbox]):not([type=radio]):not([type=color]), select, textarea');
+    // 손가락 화면에서는 입력 칸에 초점을 주면 화면 키보드가 대화 상자를 덮는다: 일부러 정한 것(data-autofocus)만
+    const touch = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+    const first = ref.current?.querySelector<HTMLElement>(touch ? '[data-autofocus]' : '[data-autofocus], input:not([type=checkbox]):not([type=radio]):not([type=color]), select, textarea');
     first?.focus();
     if (first instanceof HTMLInputElement) first.select();
   }, []);
