@@ -113,8 +113,9 @@ export function lookCss(v: any): { wrap: Record<string, string>; img: Record<str
     img['mask-composite'] = 'intersect';
   }
   if (l.reflect) {
+    // 반사의 마스크는 뒤집기 전 그림 좌표에 걸린다: 그림의 아래쪽(뒤집으면 그림에 붙는 쪽)을 진하게, 위로 갈수록 투명하게
     const end = Math.round(l.reflect.size * 1000) / 10;
-    css['-webkit-box-reflect'] = `below ${l.reflect.gap}px linear-gradient(to bottom, rgba(0, 0, 0, ${l.reflect.a}) 0%, transparent ${end}%)`;
+    css['-webkit-box-reflect'] = `below ${l.reflect.gap}px linear-gradient(to top, rgba(0, 0, 0, ${l.reflect.a}) 0%, transparent ${end}%)`;
   }
   return { wrap: css, img };
 }
