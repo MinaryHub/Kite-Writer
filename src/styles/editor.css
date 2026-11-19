@@ -848,12 +848,14 @@ p[data-cell-tail]:is(:empty, :has(> br:only-child)):not(.k-caret-here) {
   border-bottom: var(--pb-b, none);
   pointer-events: none;
 }
-/* 이어진 문단의 테두리는 한 상자로: 사이의 위·아래 선을 그리지 않는다 */
-.kdoc-content p[data-pb-join] + p[data-pb-join]::after {
+/* 이어진 문단의 테두리는 한 상자로: 사이의 위·아래 선을 그리지 않는다 (값이 다른 이웃 묶음끼리는 잇지 않는다) */
+.kdoc-content p[data-pb-join='1'] + p[data-pb-join='1']::after,
+.kdoc-content p[data-pb-join='2'] + p[data-pb-join='2']::after {
   border-top: none;
   top: 0;
 }
-.kdoc-content p[data-pb-join]:has(+ p[data-pb-join])::after {
+.kdoc-content p[data-pb-join='1']:has(+ p[data-pb-join='1'])::after,
+.kdoc-content p[data-pb-join='2']:has(+ p[data-pb-join='2'])::after {
   border-bottom: none;
   bottom: 0;
 }

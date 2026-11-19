@@ -226,5 +226,51 @@ const text = (n) => (n.type === 'text' ? n.text : (n.content || []).map(text).jo
   ok(!pg.landscape && Math.abs(pg.width - 210) < 0.5 && Math.abs(pg.height - 297) < 0.5, '문서의 용지는 첫 구역의 것 (A4 세로)', JSON.stringify(pg));
 }
 
+// ---- 8. 문단 테두리 (w:pBdr): 같은 테두리의 이웃 문단은 한 상자, 위·아래 선이 자리를 차지, 스타일 상속, 저장 후 다시 읽기 ----
+{
+  const box = '<w:pBdr><w:top w:val="single" w:sz="8" w:space="4" w:color="FF0000"/><w:left w:val="single" w:sz="8" w:space="4" w:color="auto"/><w:bottom w:val="double" w:sz="4" w:space="1" w:color="0000FF"/><w:right w:val="dotted" w:sz="8" w:space="4"/></w:pBdr>';
+  const styles =
+    '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
+    '<w:style w:type="paragraph" w:styleId="Ruled"><w:name w:val="Ruled"/><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="12" w:space="1" w:color="00FF00"/></w:pBdr><w:spacing w:after="240"/></w:pPr></w:style>';
+  const body =
+    p(t('위'), `${box}<w:spacing w:before="120" w:after="60"/>`) +
+    p(t('가운데'), box) +
+    p(t('아래'), `${box}<w:spacing w:after="200"/>`) +
+    p(t('제목'), '<w:pStyle w:val="Ruled"/>') +
+    p(t('지운 선'), '<w:pStyle w:val="Ruled"/><w:pBdr><w:bottom w:val="nil"/><w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/></w:pBdr>') +
+    p(t('사이1'), '<w:pBdr><w:between w:val="single" w:sz="4" w:space="1" w:color="000000"/><w:left w:val="single" w:sz="4" w:space="4" w:color="000000"/></w:pBdr>') +
+    p(t('사이2'), '<w:pBdr><w:between w:val="single" w:sz="4" w:space="1" w:color="000000"/><w:left w:val="single" w:sz="4" w:space="4" w:color="000000"/></w:pBdr>') +
+    p(t('내어쓰기'), '<w:ind w:left="720" w:hanging="360"/><w:pBdr><w:left w:val="single" w:sz="8" w:space="4" w:color="000000"/></w:pBdr>');
+  const doc = await m.readDocx(await makeDocx({ body, styles }));
+  const ps = doc.content.content;
+  const pb = (i) => ps[i].attrs?.paraBorder;
+  const [a, b, c] = [pb(0), pb(1), pb(2)];
+  ok(a && b && c && a.c && a.c === b.c && b.c === c.c, '같은 테두리의 이웃 문단은 한 상자 (이음 표시)', JSON.stringify([a, b, c]));
+  ok(a.t === '0.353mm solid #FF0000' && a.l === '0.353mm solid #000000' && a.r === '0.353mm dotted #000000', '선 굵기(1/8 pt → mm)·종류·색 (auto·없음은 검정)', JSON.stringify(a));
+  // 이중선: 그려지는 굵기 = 선 둘 + 틈 = 0.5pt × 3 = 1.5pt → 2.4 로 나눈 값
+  ok(c.b === '0.22mm double #0000FF', '이중선은 그려지는 굵기(선 둘과 틈)', c.b);
+  // 위 간격: 6pt + 선 1pt + 간격 4pt, 아래 간격: 10pt + 이중선 1.5pt + 간격 1pt. 가운데 문단은 그대로
+  ok(ps[0].attrs.spaceBefore === 11 && ps[2].attrs.spaceAfter === 12.5 && !ps[1].attrs.spaceBefore && !ps[1].attrs.spaceAfter, '위 선은 첫 문단 위, 아래 선은 끝 문단 아래에 자리를 차지 (문단 간격은 상자 바깥)', JSON.stringify([ps[0].attrs.spaceBefore, ps[1].attrs, ps[2].attrs.spaceAfter]));
+  ok(JSON.stringify(a.a) === JSON.stringify([6.67, 0]) && JSON.stringify(c.a) === JSON.stringify([0, 3.33]) && JSON.stringify(a.sp) === JSON.stringify([4, 4, 4, 1]), '선이 차지하는 자리(px)와 Word 의 간격(pt)', JSON.stringify([a.a, c.a, a.sp]));
+  // 왼쪽 선은 글 바깥으로 간격 + 굵기 (4pt + 1pt = 6.67px)
+  ok(a.o[0] === 6.67 && a.o[1] === 6.67, '왼쪽·오른쪽 선은 글 바깥으로 간격 + 굵기만큼', JSON.stringify(a.o));
+  ok(pb(3)?.b === '0.529mm solid #00FF00' && !pb(3).t && ps[3].attrs.spaceAfter === 14.5, '스타일의 테두리 (아래 선 1.5pt + 간격 1pt 가 아래 간격 12pt 에 더해진다)', JSON.stringify([pb(3), ps[3].attrs.spaceAfter]));
+  ok(pb(4)?.t && !pb(4).b && pb(3).a[1] > 0 && pb(4).a[0] > 0, '문단에서 nil 로 지운 변과 더한 변 (다른 테두리라 다른 상자: 저마다 선 자리를 차지)', JSON.stringify(pb(4)));
+  ok(pb(5)?.b && !pb(5).c && !pb(6)?.b && pb(5).a[1] === -1 && pb(6).a[0] === -1, '사이 선: 앞 문단 상자의 아래에 (상자끼리 이어 붙는다)', JSON.stringify([pb(5), pb(6)]));
+  ok(pb(4).c === undefined && pb(3).c === undefined, '한 문단뿐인 테두리는 잇지 않는다', '');
+  // 내어쓰기: 왼쪽 선은 첫 줄(가장 왼쪽 글) 바깥 → 내어쓰기 18pt + 4pt + 1pt = 23pt
+  ok(Math.abs(pb(7).o[0] - 30.67) < 0.01, '내어쓰기 문단의 왼쪽 선은 첫 줄 바깥', JSON.stringify(pb(7)));
+
+  // 저장: 같은 테두리를 문단마다 적고, 읽을 때 더한 간격은 뺀다 → 다시 읽으면 같다
+  const out = await m.writeDocx({ content: doc.content, settings: doc.settings, meta: {} });
+  const dx = await (await JSZip.loadAsync(out)).file('word/document.xml').async('string');
+  ok(/<w:pBdr><w:top w:val="single" w:sz="8" w:space="4" w:color="FF0000"\/><w:left w:val="single" w:sz="8" w:space="4" w:color="000000"\/><w:bottom w:val="double" w:sz="4" w:space="1" w:color="0000FF"\/><w:right w:val="dotted" w:sz="8" w:space="4" w:color="000000"\/><\/w:pBdr>/.test(dx), '저장: w:pBdr (선 종류·굵기·간격·색)', dx.slice(dx.indexOf('<w:pBdr>'), dx.indexOf('<w:pBdr>') + 360));
+  ok(/<w:spacing w:before="120" w:after="60"/.test(dx), '저장: 읽을 때 더한 테두리 자리는 문단 간격에서 뺀다', '');
+  const back = await m.readDocx(out);
+  const bp = back.content.content;
+  const same = [0, 1, 2, 3].every((i) => JSON.stringify(bp[i].attrs.paraBorder) === JSON.stringify(ps[i].attrs.paraBorder) && bp[i].attrs.spaceBefore === ps[i].attrs.spaceBefore && bp[i].attrs.spaceAfter === ps[i].attrs.spaceAfter);
+  ok(same, '저장 후 다시 읽으면 테두리·간격이 같다', JSON.stringify([bp[0].attrs, ps[0].attrs]));
+}
+
 console.log(failed ? `실패 ${failed}건` : '모두 통과');
 process.exit(failed ? 1 : 0);

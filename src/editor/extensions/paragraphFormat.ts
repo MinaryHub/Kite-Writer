@@ -230,8 +230,17 @@ export const ParagraphFormat = Extension.create({
               const o = pb.o || [0, 0, 0, 0];
               const st = ['position: relative'];
               for (const k of ['l', 'r', 't', 'b'] as const) st.push(`--pb-${k}: ${pb[k] ? pb[k]!.replace(/^([\d.]+)mm (double)/, (_m, w) => `max(3px, ${Math.round(parseFloat(w) * 240) / 100}mm) double`).replace(/^([\d.]+)mm (solid|dashed|dotted)/, 'max(1px, $1mm) $2') : 'none'}`);
-              st.push(`--pb-ol: ${o[0]}px`, `--pb-or: ${o[1]}px`, `--pb-ot: ${o[2]}px`, `--pb-ob: ${o[3]}px`);
-              return { 'data-pb': JSON.stringify(pb), ...(pb.c ? { 'data-pb-join': '1' } : {}), style: st.join('; ') };
+              let ot = `${o[2]}px`;
+              let ob = `${o[3]}px`;
+              // Word 의 테두리: 위·아래 선은 문단 간격 안쪽(간격 - 선이 차지하는 자리)에 (간격은 상자 바깥이다). 음수면 상자가 간격까지 덮는다
+              if (pb.a) {
+                const sb = Math.max(0, +attrs.spaceBefore || 0);
+                const sa = Math.max(0, +attrs.spaceAfter || 0);
+                ot = pb.a[0] < 0 ? '0px' : `calc(${pb.a[0]}px - ${sb}pt)`;
+                ob = pb.a[1] < 0 ? '0px' : `calc(${pb.a[1]}px - ${sa}pt)`;
+              }
+              st.push(`--pb-ol: ${o[0]}px`, `--pb-or: ${o[1]}px`, `--pb-ot: ${ot}`, `--pb-ob: ${ob}`);
+              return { 'data-pb': JSON.stringify(pb), ...(pb.c ? { 'data-pb-join': pb.c === 2 ? '2' : '1' } : {}), style: st.join('; ') };
             },
           },
           paraBg: {

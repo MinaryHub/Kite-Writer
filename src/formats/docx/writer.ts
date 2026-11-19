@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 import type { Columns, HeaderFooter, KDocument, LineNumbering, PageBorder, PageSetup } from '../../types';
-import { type JNode, mmToTwip, xmlEscape, parseBorderCss, normColor, safeIsoDate, cleanColumns } from '../common';
+import { type JNode, type ParaBorder, mmToTwip, xmlEscape, parseBorderCss, normColor, safeIsoDate, cleanColumns } from '../common';
 import { type CharStyle, type FlatBlock, type FlatBox, type FlatFloat, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, flattenContent, flattenDoc } from '../flatten';
 import { prepareImage } from '../imageUtil';
 import { pathOf, type ShapeItem } from '../shape';
@@ -78,7 +78,8 @@ function pPr(p: ParaStyle, pageBreak: boolean, markChar?: CharStyle, font?: stri
   if (p.keep?.includes('l')) x += '<w:keepLines/>';
   if (pageBreak) x += '<w:pageBreakBefore/>';
   if (p.keep?.includes('w')) x += '<w:widowControl/>';
-  if (p.borderBottom) x += '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="000000"/></w:pBdr>';
+  if (p.border) x += pBdrXml(p.border);
+  else if (p.borderBottom) x += '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="000000"/></w:pBdr>';
   if (p.bg) x += `<w:shd w:val="clear" w:color="auto" w:fill="${hex(p.bg)}"/>`;
   if (p.tabs?.s?.length) {
     const al = { l: 'left', c: 'center', r: 'right', d: 'decimal' } as const;
@@ -90,7 +91,13 @@ function pPr(p: ParaStyle, pageBreak: boolean, markChar?: CharStyle, font?: stri
   // 배수로 적으면 그 컴퓨터에 없는 글꼴이 다른 글꼴로 바뀔 때 빈 줄 높이가 달라진다
   else if (markChar) line = ` w:line="${Math.round((parseFloat(p.lineHeight) || 1.6) * markChar.size * 20)}" w:lineRule="exact"`;
   else line = ` w:line="${Math.round(((parseFloat(p.lineHeight) || 1.6) / naturalLineRatio(font)) * 240)}" w:lineRule="auto"`;
-  x += `<w:spacing w:before="${Math.round(p.spaceBefore * 20)}" w:after="${Math.round(p.spaceAfter * 20)}"${line}/>`;
+  // Word 에서 온 테두리: 위·아래 선이 차지하던 자리(읽을 때 문단 간격에 더한 것)는 Word 가 다시 더하므로 뺀다
+  let before = p.spaceBefore;
+  let after = p.spaceAfter;
+  const room = p.border?.a;
+  if (room && room[0] > 0 && p.border?.t) before = Math.max(0, before - room[0] * 0.75);
+  if (room && room[1] > 0 && p.border?.b) after = Math.max(0, after - room[1] * 0.75);
+  x += `<w:spacing w:before="${Math.round(before * 20)}" w:after="${Math.round(after * 20)}"${line}/>`;
   // 한글식 여백 → 워드식 (내어쓰기: left = 왼쪽 + 내어쓰기 폭, hanging = 폭)
   const left = Math.round(p.indentLeft * 20);
   const right = Math.round(p.indentRight * 20);
@@ -105,6 +112,27 @@ function pPr(p: ParaStyle, pageBreak: boolean, markChar?: CharStyle, font?: stri
   if (!p.heading && p.outline) x += `<w:outlineLvl w:val="${Math.max(0, Math.min(8, p.outline - 1))}"/>`;
   if (markChar) x += rPr(markChar);
   return x + '</w:pPr>';
+}
+
+/**
+ * 문단 테두리 → w:pBdr. Word 에서 온 테두리는 그 간격(sp) 그대로, 한글 문서의 것은 글과의 간격(o)을 간격으로 적는다.
+ * 같은 테두리를 적은 이웃 문단은 Word 가 한 상자로 묶는다
+ */
+function pBdrXml(pb: ParaBorder): string {
+  const VAL = { solid: 'single', dashed: 'dashed', dotted: 'dotted', double: 'double' } as const;
+  const PT_MM = 25.4 / 72;
+  let x = '';
+  for (const [k, tag, i] of [['t', 'top', 2], ['l', 'left', 0], ['b', 'bottom', 3], ['r', 'right', 1]] as const) {
+    const m = pb[k] ? /^([\d.]+)mm (solid|dashed|dotted|double) #([0-9A-Fa-f]{6})$/.exec(pb[k]!) : null;
+    if (!m) continue;
+    const mm = parseFloat(m[1]);
+    // 굵기(1/8 pt): 이중선은 그려지는 굵기(값 × 2.4)를 선 둘과 사이 틈으로 셋으로 나눈 것
+    const pt = m[2] === 'double' ? (mm * 2.4) / PT_MM / 3 : mm / PT_MM;
+    const sz = Math.max(2, Math.min(96, Math.round(pt * 8)));
+    const space = pb.sp ? pb.sp[i] : (pb.o?.[i] || 0) * 0.75;
+    x += `<w:${tag} w:val="${VAL[m[2] as keyof typeof VAL]}" w:sz="${sz}" w:space="${Math.max(0, Math.min(31, Math.round(space)))}" w:color="${m[3].toUpperCase()}"/>`;
+  }
+  return x ? `<w:pBdr>${x}</w:pBdr>` : '';
 }
 
 /** 탭 채움 값 → Word 의 leader 속성 (없으면 빈 글) */

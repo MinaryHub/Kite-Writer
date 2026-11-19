@@ -680,7 +680,15 @@ export interface ParaBorder {
   t?: string;
   b?: string;
   o?: number[];
-  c?: boolean;
+  /** 이어진 문단과 한 상자로 (2: 바로 앞 묶음과 다른 묶음 — 이웃한 두 묶음이 서로 이어지지 않게 번갈아 단다) */
+  c?: boolean | 2;
+  /**
+   * Word 의 테두리: 위·아래 선이 문단 간격 안쪽에서 차지하는 자리 [위, 아래] (px, 글에서 선 바깥까지).
+   * 있으면 위·아래 선을 문단 간격 안(간격 - 이 값)에 그린다. 음수: 상자가 문단 간격까지 덮는다
+   */
+  a?: number[];
+  /** Word 의 테두리 선과 글 사이 간격 [왼, 오른, 위, 아래] (pt). DOCX 로 다시 쓸 때 쓴다 */
+  sp?: number[];
 }
 
 const PB_SIDE = /^([\d.]+)mm (solid|dashed|dotted|double) (#[0-9A-Fa-f]{6})$/;
@@ -698,7 +706,9 @@ export function cleanParaBorder(v: any): ParaBorder | null {
     const o = v.o.map((x: any) => Math.max(-50, Math.min(200, Math.round(+x * 100) / 100)));
     if (o.some((x: number) => x)) out.o = o;
   }
-  if (v.c) out.c = true;
+  if (v.c) out.c = v.c === 2 ? 2 : true;
+  if (Array.isArray(v.a) && v.a.length === 2 && v.a.every((x: any) => Number.isFinite(+x))) out.a = v.a.map((x: any) => (+x < 0 ? -1 : Math.min(200, Math.round(+x * 100) / 100)));
+  if (Array.isArray(v.sp) && v.sp.length === 4 && v.sp.every((x: any) => Number.isFinite(+x))) out.sp = v.sp.map((x: any) => Math.max(0, Math.min(31, Math.round(+x * 100) / 100)));
   return out;
 }
 

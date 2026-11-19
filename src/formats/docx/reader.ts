@@ -85,6 +85,8 @@ interface PProps {
   keepLines?: boolean;
   /** 탭 자리: 자리(twips) → [맞춤(l·c·r·d), 채움]. 스타일에서 내려오며 쌓이고 clear 로 지운다 */
   tabs?: Map<number, [string, number]>;
+  /** 문단 테두리 (w:pBdr): 변마다 선 (null 은 없앰). 스타일에서 내려오며 변마다 덮어쓴다 */
+  bdr?: { top?: WordSide | null; bottom?: WordSide | null; left?: WordSide | null; right?: WordSide | null; between?: WordSide | null };
 }
 
 /** 번호 매기기의 한 수준: 번호 모양, 번호 글(%1 … %9 가 수준마다의 번호), 시작 번호, 수준의 문단·글자 모양, 번호 뒤(탭·빈칸·없음) */
@@ -141,6 +143,66 @@ const BODY_X = '__bodyX';
 /** 글이 든 블록이 있는가 (빈 문단만 있는 글상자는 글 없는 도형으로) */
 const hasBodyText = (blocks: JNode[]) => blocks.some((n) => n.type !== 'paragraph' || (n.content || []).some((c) => c.type !== 'text' || !!(c.text || '').trim()));
 
+/** Word 의 선 종류(ST_Border) → CSS 선 종류. 그림 테두리(apples·mapleMuffins …)처럼 그릴 수 없는 것은 없다 */
+const WORD_LINE: Record<string, 'solid' | 'double' | 'dotted' | 'dashed'> = {
+  single: 'solid',
+  thick: 'solid',
+  double: 'double',
+  dotted: 'dotted',
+  dashed: 'dashed',
+  dashSmallGap: 'dashed',
+  dotDash: 'dashed',
+  dotDotDash: 'dashed',
+  dashDotStroked: 'dashed',
+  triple: 'double',
+  thinThickSmallGap: 'double',
+  thickThinSmallGap: 'double',
+  thinThickMediumGap: 'double',
+  thickThinMediumGap: 'double',
+  thinThickLargeGap: 'double',
+  thickThinLargeGap: 'double',
+  thinThickThinSmallGap: 'double',
+  thinThickThinMediumGap: 'double',
+  thinThickThinLargeGap: 'double',
+  threeDEmboss: 'solid',
+  threeDEngrave: 'solid',
+  outset: 'solid',
+  inset: 'solid',
+  wave: 'solid',
+  doubleWave: 'double',
+};
+
+/** Word 문단 테두리의 한 변: 선 종류, 그려지는 굵기(pt — 이중선은 두 선과 사이 틈을 합친 것), 색, 글과의 간격(pt) */
+interface WordSide {
+  s: 'solid' | 'double' | 'dotted' | 'dashed';
+  w: number;
+  c: string;
+  sp: number;
+}
+
+/** w:top·w:left … (val·sz(1/8 pt)·space(pt)·color) → 한 변. 없음(none·nil)이거나 그릴 수 없는 선이면 null */
+function wordSide(e: Element | null): WordSide | null {
+  const s = WORD_LINE[attr(e, 'val') || ''];
+  if (!e || !s) return null;
+  const sz = parseFloat(attr(e, 'sz') || '4');
+  const one = Math.max(0.25, Math.min(12, (Number.isFinite(sz) ? sz : 4) / 8));
+  const c = attr(e, 'color');
+  const sp = parseFloat(attr(e, 'space') || '0');
+  return {
+    s,
+    w: round(s === 'double' ? one * 3 : one, 3),
+    c: c && /^[0-9A-Fa-f]{6}$/.test(c) ? '#' + c.toUpperCase() : '#000000',
+    sp: Math.max(0, Math.min(31, Number.isFinite(sp) ? sp : 0)),
+  };
+}
+
+/** 문단의 Word 테두리 (테두리 묶음을 가르는 열쇠, 변들, 내어쓰기 pt) */
+interface ParaBdr {
+  key: string;
+  b: NonNullable<PProps['bdr']>;
+  hang: number;
+}
+
 const SYMBOL_MAP: Record<number, string> = {
   0xf0b7: '•',
   0xf0a7: '▪',
@@ -183,6 +245,8 @@ class DocxReader {
   showBackground = false;
   /** 자동 간격(위 b·아래 a)인 문단 (표 칸의 첫 문단 위·마지막 문단 아래의 자동 간격은 Word 가 두지 않는다) */
   private autoSpaced = new WeakMap<JNode, { b: boolean; a: boolean; list: boolean }>();
+  /** Word 테두리가 있는 문단 (본문을 다 읽은 뒤 이웃 문단끼리 묶어 테두리를 단다: applyParaBorders) */
+  private pBdr = new WeakMap<JNode, ParaBdr>();
   /** 본문의 구역 설정들 (문서 순서: 문단 안의 것들과 본문 끝의 것). 구역이 둘 이상이면 구역 사이에 쪽 나누기를 넣는다 */
   sections: Element[] = [];
   /** 본문 요소 (구역 나누기는 본문의 문단에만 있다) */
@@ -567,6 +631,14 @@ class DocxReader {
           p.bg = f && f !== '#FFFFFF' ? f : null;
           break;
         }
+        case 'pBdr': {
+          const b = (p.bdr = { ...p.bdr });
+          for (const [k, alt] of [['top', 'top'], ['bottom', 'bottom'], ['left', 'start'], ['right', 'end'], ['between', 'between']] as const) {
+            const e = kid(c, k) || kid(c, alt);
+            if (e) b[k] = wordSide(e);
+          }
+          break;
+        }
         case 'pageBreakBefore':
           p.pageBreakBefore = onOff(c);
           break;
@@ -823,7 +895,77 @@ class DocxReader {
       }
     };
     walk(kids(container));
+    this.applyParaBorders(out);
     return out;
+  }
+
+  /** 문단의 Word 테두리 (그릴 변이 없으면 null). 테두리와 들여쓰기가 같은 이웃 문단은 한 상자다 */
+  private borderInfo(p: PProps): ParaBdr | null {
+    const b = p.bdr;
+    if (!b || !(b.top || b.bottom || b.left || b.right || b.between)) return null;
+    const hang = Math.max(0, p.hanging || 0);
+    return { key: JSON.stringify([b.top, b.bottom, b.left, b.right, b.between, p.left || 0, p.right || 0, hang]), b, hang: twipToPt(hang) };
+  }
+
+  /**
+   * Word 의 문단 테두리를 단다. 테두리와 들여쓰기가 같은 이웃 문단들은 한 상자다:
+   * 위 선은 첫 문단 위, 아래 선은 끝 문단 아래, 사이 선(between)은 문단 사이에. 쪽이 바뀌면 그 자리에서 상자를 닫는다.
+   * 위·아래 선은 줄 배치에 자리를 차지한다 (선 굵기 + 글과의 간격만큼 첫 문단 위·끝 문단 아래가 벌어진다). 문단 간격은 상자 바깥이다.
+   * 왼쪽·오른쪽 선은 글(내어쓰기면 첫 줄) 바깥으로 간격만큼 떨어진 자리에 그린다 (본문 여백으로 나갈 수 있다)
+   */
+  private applyParaBorders(blocks: JNode[]) {
+    const PX = 96 / 72;
+    const sideOf = (s: WordSide) => `${round((s.w * 25.4) / 72 / (s.s === 'double' ? 2.4 : 1), 3)}mm ${s.s} ${s.c}`;
+    /** 이웃한 두 묶음이 서로 이어지지 않게 묶음마다 번갈아 1·2 */
+    let parity = 0;
+    for (let i = 0; i < blocks.length; ) {
+      const info = blocks[i].type === 'paragraph' ? this.pBdr.get(blocks[i]) : undefined;
+      if (!info) {
+        i++;
+        continue;
+      }
+      let j = i + 1;
+      while (j < blocks.length && blocks[j].type === 'paragraph' && this.pBdr.get(blocks[j])?.key === info.key) j++;
+      const { b, hang } = info;
+      // 사이 선이 없으면 한 상자로 잇는다 (편집기 CSS 가 안쪽 위·아래 선을 지운다)
+      const join = j - i > 1 && !b.between;
+      if (join) parity = parity === 1 ? 2 : 1;
+      const ol = b.left ? round((b.left.sp + b.left.w + hang) * PX, 2) : 0;
+      const or = b.right ? round((b.right.sp + b.right.w) * PX, 2) : 0;
+      const sp = [b.left?.sp || 0, b.right?.sp || 0, b.top?.sp || 0, b.bottom?.sp || 0];
+      for (let k = i; k < j; k++) {
+        const first = k === i;
+        const last = k === j - 1;
+        const a: Record<string, any> = { ...blocks[k].attrs };
+        const pb: Record<string, any> = {};
+        if (b.left) pb.l = sideOf(b.left);
+        if (b.right) pb.r = sideOf(b.right);
+        // 선이 차지하는 자리 (px, 글에서 선 바깥까지). 음수: 상자가 문단 간격까지 덮는다 (사이 선이 있는 묶음의 안쪽 끝)
+        let at = 0;
+        let ab = 0;
+        if (b.top && (first || join)) pb.t = sideOf(b.top);
+        if (first && b.top) {
+          at = b.top.sp + b.top.w;
+          a.spaceBefore = round((+a.spaceBefore || 0) + at, 2);
+        }
+        if (!first && b.between) at = -1;
+        if (!last && b.between) {
+          pb.b = sideOf(b.between);
+          ab = -1;
+        } else if (b.bottom && (last || join)) pb.b = sideOf(b.bottom);
+        if (last && b.bottom) {
+          ab = b.bottom.sp + b.bottom.w;
+          a.spaceAfter = round((+a.spaceAfter || 0) + ab, 2);
+        }
+        pb.o = [ol, or, 0, 0];
+        pb.a = [at > 0 ? round(at * PX, 2) : at, ab > 0 ? round(ab * PX, 2) : ab];
+        pb.sp = sp;
+        if (join) pb.c = parity;
+        a.paraBorder = pb;
+        blocks[k].attrs = a;
+      }
+      i = j;
+    }
   }
 
   convertP(pEl: Element): { blocks: { node: JNode }[]; after: JNode[]; style: string | null; contextual: boolean } {
@@ -908,11 +1050,13 @@ class DocxReader {
       const stops = [...(p.tabs || new Map<number, [string, number]>()).entries()].sort((x, y) => x[0] - y[0]).map(([pos, [al, leader]]) => [round(twipToPt(pos), 2), al, leader]);
       pAttrs.tabs = { d: this.defaultTab, ...(stops.length ? { s: stops } : {}) };
     }
+    const bd = this.borderInfo(p);
     segments.forEach((seg, i) => {
       if (i > 0) blocks.push({ node: { type: colBreak[i] ? 'columnBreak' : 'pageBreak' } });
       if (i > 0 && !seg.length) return;
       const node = paragraph(pAttrs, seg);
       if (p.beforeAuto || p.afterAuto) this.autoSpaced.set(node, { b: !!p.beforeAuto, a: !!p.afterAuto, list: !!p.numId && p.numId !== '0' });
+      if (bd) this.pBdr.set(node, bd);
       blocks.push({ node });
     });
     return { blocks, after, style: styleId, contextual: !!p.contextual };
@@ -1916,7 +2060,7 @@ class DocxReader {
     // 쪽 테두리 (w:pgBorders): 선으로 된 것만 (그림 테두리 — mapleMuffins 같은 — 는 그릴 수 없어 뺀다)
     const pgb = kid(sectPr, 'pgBorders');
     if (pgb) {
-      const LINE: Record<string, PageBorderSide['s']> = { single: 'solid', thick: 'solid', double: 'double', dotted: 'dotted', dashed: 'dashed', dashSmallGap: 'dashed', dotDash: 'dashed', dotDotDash: 'dashed', triple: 'double', thinThickSmallGap: 'double', thickThinSmallGap: 'double', thinThickMediumGap: 'double', thickThinMediumGap: 'double', thinThickLargeGap: 'double', thickThinLargeGap: 'double', thinThickThinSmallGap: 'double', thinThickThinMediumGap: 'double', thinThickThinLargeGap: 'double', threeDEmboss: 'solid', threeDEngrave: 'solid', outset: 'solid', inset: 'solid', wave: 'solid', doubleWave: 'double', dashDotStroked: 'dashed' };
+      const LINE: Record<string, PageBorderSide['s']> = WORD_LINE;
       const PT_MM = 25.4 / 72;
       const sides: NonNullable<PageBorder['sides']> = {};
       const offset = [0, 0, 0, 0];
