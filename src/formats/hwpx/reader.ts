@@ -31,6 +31,7 @@ import {
   paragraph,
   parseXml,
   placeholderImage,
+  cleanPageHide,
   round,
   textNode,
   NumberingCounter,
@@ -615,6 +616,8 @@ export class HwpxConverter {
   counter = new NumberingCounter();
   private linkHref: string | null = null;
   private markpen: string | null = null;
+  /** 이 문단에서 읽은 감추기 (첫 블록에 단다) */
+  private pageHide: string | null = null;
   /** 지금 읽는 변경 추적 구간 (hp:insertBegin~insertEnd, deleteBegin~deleteEnd) */
   private change: { type: 'insertion' | 'deletion'; id: string; author: string; time: number; color: string | null } | null = null;
   /** 한글이 배치해 둔 직전 문단 첫 줄의 세로 위치. 되돌아가면 한글이 새 쪽에 놓은 문단이다 */
@@ -1140,6 +1143,11 @@ export class HwpxConverter {
       }
       for (const [t, top] of tableTops) if (top > -1) t.attrs = { ...t.attrs, hwpTop: r2(Math.max(0, top)) };
       const group = placeCaptions([...blocks.filter(isBreak), ...before, ...paras, ...after], captions);
+      if (this.pageHide) {
+        const first = group.find((b) => !isBreak(b));
+        if (first) first.attrs = { ...first.attrs, pageHide: cleanPageHide(this.pageHide) };
+        this.pageHide = null;
+      }
       for (const b of group) {
         if (isBreak(b)) continue;
         b.attrs = { ...b.attrs, hwpSeq: ++this.seq };
@@ -1330,7 +1338,13 @@ export class HwpxConverter {
           break;
         }
         case 'pageHiding': {
-          // 감추기: 이 문단이 있는 쪽에서만 머리말·꼬리말·쪽 번호를 감춘다. 첫 쪽(표지)의 것만 따른다
+          // 감추기: 이 문단이 있는 쪽에서만 머리말·꼬리말·바탕쪽·쪽 테두리·배경·쪽 번호를 감춘다.
+          // 문단의 첫 블록에 표시를 달고(pageHide), 쪽 나누기가 끝난 뒤 그 블록이 놓인 쪽에서 감춘다
+          const flags = [['hideHeader', 'h'], ['hideFooter', 'f'], ['hideMasterPage', 'm'], ['hideBorder', 'b'], ['hideFill', 'x'], ['hidePageNum', 'n']]
+            .filter(([k]) => attr(c, k) === '1')
+            .map(([, f]) => f)
+            .join('');
+          if (flags) this.pageHide = (this.pageHide || '') + flags;
           if (this.pageNo === 0) {
             const h = { header: attr(c, 'hideHeader') === '1', footer: attr(c, 'hideFooter') === '1', pageNum: attr(c, 'hidePageNum') === '1' };
             if (h.header || h.footer || h.pageNum) this.settings.hideFirst = { ...this.settings.hideFirst, ...Object.fromEntries(Object.entries(h).filter(([, v]) => v)) };

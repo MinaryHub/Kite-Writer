@@ -2,7 +2,7 @@ import { Extension } from '@tiptap/core';
 import type { EditorState } from '@tiptap/pm/state';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { cssToPt, normLineHeight, r2 } from '../cssUnits';
-import { cleanParaBorder, normColor } from '../../formats/common';
+import { cleanPageHide, cleanParaBorder, normColor } from '../../formats/common';
 import { cleanTabs } from '../tabLayout';
 
 declare module '@tiptap/core' {
@@ -249,6 +249,17 @@ export const ParagraphFormat = Extension.create({
               return pt ? r2(pt) : null;
             },
             renderHTML: (attrs: Record<string, any>) => (attrs.fontSize ? { style: `font-size: ${attrs.fontSize}pt` } : {}),
+          },
+        },
+      },
+      {
+        // 한글의 '감추기': 이 블록이 놓인 쪽에서 감출 것 (h 머리말, f 꼬리말, m 바탕쪽, b 쪽 테두리, x 쪽 배경, n 쪽 번호)
+        types: [...PARA_TYPES, 'table', 'textBox'],
+        attributes: {
+          pageHide: {
+            default: null,
+            parseHTML: (el: HTMLElement) => cleanPageHide(el.getAttribute('data-page-hide')),
+            renderHTML: (attrs: Record<string, any>) => (cleanPageHide(attrs.pageHide) ? { 'data-page-hide': cleanPageHide(attrs.pageHide) } : {}),
           },
         },
       },

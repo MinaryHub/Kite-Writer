@@ -907,12 +907,22 @@ class BodyWriter {
     return bt;
   }
 
+  /** 감추기 (본문 문단만): 이 문단이 놓인 쪽에서 감출 것. 속성 비트는 머리말·꼬리말·바탕쪽·테두리·배경·쪽 번호 차례 */
+  private pageHideCtrl(pb: ParaBuild, hide: string | null | undefined, level: number) {
+    if (!hide || level !== 0) return;
+    const attr = ['h', 'f', 'm', 'b', 'x', 'n'].reduce((a, c, i) => (hide.includes(c) ? a | (1 << i) : a), 0);
+    if (!attr) return;
+    this.ctrlChars(pb, 21, 'pghd');
+    pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('pghd')).u32(attr).out()));
+  }
+
   para(p: FlatPara, level: number, last: boolean, first = false) {
     const pb = this.beginPara();
     pb.maxSize = p.baseChar.size;
     this.setShape(pb, this.reg.char(p.baseChar));
     if (first) this.sectionCtrls(pb);
     const bt = this.breakOf(pb, p, level, first);
+    this.pageHideCtrl(pb, p.pageHide, level);
     this.inlines(pb, p.inlines, level, (p.style.indentLeft + Math.max(0, -p.style.textIndent)) * PT2PX, p.style.spaceBefore * PT2PX);
     this.emitPara(pb, this.reg.para(p.style), level, last, bt);
   }
@@ -923,6 +933,7 @@ class BodyWriter {
     // 문서가 표로 시작하면 구역 정의를 표가 든 문단에 함께 둔다 (따로 빈 문단을 두면 그 줄만큼 본문이 내려간다)
     if (first) this.sectionCtrls(pb);
     const bt = this.breakOf(pb, t, level, first);
+    this.pageHideCtrl(pb, t.pageHide, level);
     this.ctrlChars(pb, 11, 'tbl ');
     pb.ctrls.push((w, lv) => this.tableCtrl(w, lv, t));
     const pp = defaultPara();

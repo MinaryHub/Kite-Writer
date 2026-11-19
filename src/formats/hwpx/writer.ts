@@ -517,9 +517,12 @@ class SectionWriter {
     let xml = '';
     let pending = '';
     let begun = false;
+    // 떠 있는 블록에 달린 감추기는 뒤따르는 문단으로 넘긴다
+    let pendingHide = '';
     for (const b of blocks) {
       if (b.kind === 'box' && b.float) {
         pending += this.floatRun(b);
+        pendingHide += b.pageHide || '';
         continue;
       }
       const isFirst = first && !begun;
@@ -529,6 +532,13 @@ class SectionWriter {
       if (!sub && !isFirst && b.columnsBefore && colKey(b.columnsBefore) !== this.curCols) {
         this.curCols = colKey(b.columnsBefore);
         colRun = `<hp:run charPrIDRef="0"><hp:ctrl>${colPrXml(b.columnsBefore)}</hp:ctrl></hp:run>`;
+      }
+      // 감추기: 이 문단이 놓인 쪽에서 감출 것
+      const hide = (b.pageHide || '') + pendingHide;
+      pendingHide = '';
+      if (hide && !sub) {
+        const on = (c: string) => (hide.includes(c) ? 1 : 0);
+        colRun += `<hp:run charPrIDRef="0"><hp:ctrl><hp:pageHiding hideHeader="${on('h')}" hideFooter="${on('f')}" hideMasterPage="${on('m')}" hideBorder="${on('b')}" hideFill="${on('x')}" hidePageNum="${on('n')}"/></hp:ctrl></hp:run>`;
       }
       let bx: string;
       if (b.kind === 'para') bx = this.paragraph(b, { sub, first: isFirst, extraRuns: colRun + pending });

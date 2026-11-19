@@ -1,7 +1,7 @@
 import { cleanLook, type PicLook } from './picLook';
 import { latexToHwp } from '../math/hwpEq';
 import { cleanTabs, type TabDefs } from '../editor/tabLayout';
-import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type JMark, type JNode, type ParaBorder, cleanColumns, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
+import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type JMark, type JNode, type ParaBorder, cleanColumns, cleanPageHide, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
 import type { Columns } from '../types';
 import { cleanShape, type ShapeData } from './shape';
 import type { FloatHw } from './hwpLayout';
@@ -135,6 +135,8 @@ export type FlatInline =
 export interface FlatColumnBreak {
   columnBreakBefore?: boolean;
   columnsBefore?: Columns | null;
+  /** 한글의 감추기: 이 블록이 놓인 쪽에서 감출 것 (h 머리말, f 꼬리말, m 바탕쪽, b 쪽 테두리, x 쪽 배경, n 쪽 번호) */
+  pageHide?: string | null;
 }
 
 export interface FlatPara extends FlatColumnBreak {
@@ -211,14 +213,27 @@ export type FlatBlock = FlatPara | FlatTable | FlatBox;
 /** 글상자를 지원하지 않는 형식을 위해 상자를 풀어 안의 블록만 남긴다 (표 안까지) */
 export function unwrapBoxes(blocks: FlatBlock[]): FlatBlock[] {
   const out: FlatBlock[] = [];
+  // 상자에 달린 감추기는 안의 첫 블록으로 (빈 상자면 다음 블록으로)
+  let carry = '';
   for (const b of blocks) {
     if (b.kind === 'box') {
       const inner = unwrapBoxes(b.blocks);
       if (inner.length && b.pageBreakBefore) inner[0].pageBreakBefore = true;
       if (inner.length && b.columnBreakBefore) inner[0].columnBreakBefore = true;
       if (inner.length && b.columnsBefore) inner[0].columnsBefore = b.columnsBefore;
+      const hide = (b.pageHide || '') + carry;
+      if (inner.length) {
+        if (hide) inner[0].pageHide = (inner[0].pageHide || '') + hide;
+        carry = '';
+      } else carry = hide;
       out.push(...inner);
-    } else if (b.kind === 'table') {
+      continue;
+    }
+    if (carry) {
+      b.pageHide = (b.pageHide || '') + carry;
+      carry = '';
+    }
+    if (b.kind === 'table') {
       for (const row of b.cells) for (const c of row) c.blocks = unwrapBoxes(c.blocks);
       out.push(b);
     } else out.push(b);
@@ -453,6 +468,16 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
     out.push(b);
   };
   for (const n of nodes) {
+    // 감추기 표시는 이 노드에서 나온 첫 블록에 단다
+    const hide = cleanPageHide(n.attrs?.pageHide);
+    const at = out.length;
+    flattenOne(n);
+    if (hide && out.length > at) out[at].pageHide = hide;
+  }
+  if (pendingBreak || pendingCol || pendingCols) push(flattenPara({ type: 'paragraph' }, ctx, 0));
+  return out;
+
+  function flattenOne(n: JNode) {
     switch (n.type) {
       case 'pageBreak':
         pendingBreak = true;
@@ -522,8 +547,6 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
         if (n.content) for (const b of flattenBlocks(n.content, ctx)) push(b);
     }
   }
-  if (pendingBreak || pendingCol || pendingCols) push(flattenPara({ type: 'paragraph' }, ctx, 0));
-  return out;
 }
 
 function codeContent(n: JNode): JNode[] {

@@ -187,7 +187,37 @@ const SAFE_GRADIENT = /^(linear|radial|conic)-gradient\([\w\s%.,#()-]{1,400}\)$/
  * k 번째 쪽의 바탕 그림 HTML: 쪽 테두리/배경과 바탕쪽. 종이의 왼쪽 위를 (0,0) 으로 하는 종이 크기의 층이며 본문 뒤에 깔린다.
  * 화면(PageView)의 용지와 쪽 경계 가리개, 인쇄용 쪽이 같은 것을 쓴다. 그릴 것이 없으면 빈 문자열
  */
-export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number): string {
+const hideCache = new WeakMap<object, Map<number, string>>();
+
+/**
+ * 쪽마다 감출 것 (한글의 '감추기'): 블록의 pageHide 표시를 그 블록이 시작하는 쪽에 모은다.
+ * 값은 h 머리말, f 꼬리말, m 바탕쪽, b 쪽 테두리, x 쪽 배경, n 쪽 번호 글자들. 쪽 나누기 결과가 바뀔 때마다 다시 셈한다
+ */
+export function pageHidesOf(tab: DocTab): Map<number, string> {
+  let m = hideCache.get(tab.layout);
+  if (m) return m;
+  const out = new Map<number, string>();
+  const starts = tab.layout.pageStarts?.length ? tab.layout.pageStarts : [0];
+  tab.editor.state.doc.forEach((node, offset) => {
+    const h = node.attrs?.pageHide;
+    if (typeof h !== 'string' || !h) return;
+    // 블록이 시작하는 쪽: 시작 자리가 블록 자리 이하인 마지막 쪽
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    out.set(lo, (out.get(lo) || '') + h);
+  });
+  m = out;
+  hideCache.set(tab.layout, m);
+  return m;
+}
+
+/** 쪽 테두리/배경·바탕쪽. hide: 이 쪽에서 감출 것 (pageHidesOf 의 b·x·m) */
+export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number, hide = ''): string {
   const pb = s.pageBorder;
   const first = k === 0;
   let html = '';
@@ -203,7 +233,7 @@ export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number): string {
     const bg = color(pb.bg);
     const grad = typeof pb.gradient === 'string' && SAFE_GRADIENT.test(pb.gradient) && !/url|var|expression/i.test(pb.gradient) ? pb.gradient : null;
     const img = typeof pb.image === 'string' && SAFE_IMG.test(pb.image) ? pb.image : null;
-    if ((bg || grad || img) && on(pb.fillOn)) {
+    if ((bg || grad || img) && on(pb.fillOn) && !hide.includes('x')) {
       const area = pb.fillArea === 'border' ? bx : pb.fillArea === 'page' ? { x0: g.ml, x1: g.W - g.mr, y0: g.mt, y1: g.H - g.mb } : { x0: 0, x1: g.W, y0: 0, y1: g.H };
       const st = [`position:absolute`, `left:${area.x0}px`, `top:${area.y0}px`, `width:${Math.max(0, area.x1 - area.x0)}px`, `height:${Math.max(0, area.y1 - area.y0)}px`];
       if (bg) st.push(`background-color:${bg}`);
@@ -218,7 +248,7 @@ export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number): string {
       html += `<div class="pg-fill" style="${st.join(';')}"></div>`;
     }
     const sides = pb.sides || {};
-    if (on(pb.borderOn) && (sides.l || sides.r || sides.t || sides.b)) {
+    if (on(pb.borderOn) && (sides.l || sides.r || sides.t || sides.b) && !hide.includes('b')) {
       const names = { l: 'left', r: 'right', t: 'top', b: 'bottom' } as const;
       const st = [`position:absolute`, `box-sizing:border-box`, `left:${bx.x0}px`, `top:${bx.y0}px`, `width:${Math.max(0, bx.x1 - bx.x0)}px`, `height:${Math.max(0, bx.y1 - bx.y0)}px`];
       for (const k2 of ['l', 'r', 't', 'b'] as const) {
@@ -235,7 +265,7 @@ export function pagePaintHtml(s: DocSettings, g: PageGeom, k: number): string {
   }
   // 바탕쪽: 본문 영역의 왼쪽 위를 기준으로 그린다 (개체는 종이·쪽 기준 자리에 놓여 있다)
   const mps = Array.isArray(s.masterPages) ? s.masterPages : [];
-  if (mps.length && !(first && s.hideFirst?.masterPage)) {
+  if (mps.length && !(first && s.hideFirst?.masterPage) && !hide.includes('m')) {
     const even = pageNumAt(s, k) % 2 === 0;
     for (const mp of mps) {
       if (!mp || (mp.type === 'even' && !even) || (mp.type === 'odd' && even)) continue;
@@ -320,12 +350,13 @@ export function pageChromeHtml(tab: DocTab, g: PageGeom, k: number, pageCount: n
     return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;align-items:${valign};justify-content:${def.align === 'left' ? 'flex-start' : def.align === 'right' ? 'flex-end' : 'center'};font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:9pt;white-space:pre;overflow:hidden">${xmlEscape(hfText(def.text, num, total, s.pageNumber.format))}</div>`;
   };
   html += repeatHeadsHtml(tab, g, k);
-  // 이 쪽의 머리말·꼬리말 (짝수 쪽, 시작 쪽, 첫 쪽 감추기)
-  const hd = hfAt(s, 'header', k);
-  const ft = hfAt(s, 'footer', k);
+  // 이 쪽의 머리말·꼬리말 (짝수 쪽, 시작 쪽, 첫 쪽 감추기, 이 쪽의 감추기)
+  const hide = pageHidesOf(tab).get(k) || '';
+  const hd = hide.includes('h') ? null : hfAt(s, 'header', k);
+  const ft = hide.includes('f') ? null : hfAt(s, 'footer', k);
   if (hd) html += zone(hd, z.header.top, z.header.height, 'flex-start');
   if (ft) html += zone(ft, z.footer.top, z.footer.height, 'flex-end');
-  if (pageNumShown(s, k)) {
+  if (pageNumShown(s, k) && !hide.includes('n')) {
     const [v, h] = s.pageNumber.pos.split('-');
     const zz = v === 'top' ? z.header : z.footer;
     html += `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${zz.top}px;height:${zz.height}px;display:flex;align-items:${v === 'top' ? 'flex-start' : 'flex-end'};justify-content:${h === 'left' ? 'flex-start' : h === 'right' ? 'flex-end' : 'center'};font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:9pt">${xmlEscape(formatPageNumber(num, s.pageNumber.format))}</div>`;
@@ -400,7 +431,7 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
   const bg = pageBackgroundStyle(tab.settings, k);
   if (bg) Object.assign(page.style, bg);
   // 쪽 테두리/배경·바탕쪽 (본문 뒤에)
-  const paint = pagePaintHtml(plan.settings, g, k);
+  const paint = pagePaintHtml(plan.settings, g, k, pageHidesOf(tab).get(k) || '');
   if (paint) {
     const holder = document.createElement('div');
     holder.innerHTML = paint;

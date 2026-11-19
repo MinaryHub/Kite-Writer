@@ -118,6 +118,13 @@ export function extFromMime(mime: string): string {
 }
 
 /** 브라우저가 표시할 수 없는 그림(WMF/EMF 등)을 대신할 자리표시 SVG */
+/** 한글의 '감추기' 표시 검사: 이 블록이 놓인 쪽에서 감출 것 — h 머리말, f 꼬리말, m 바탕쪽, b 쪽 테두리, x 쪽 배경, n 쪽 번호 (없으면 null) */
+export function cleanPageHide(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const out = ['h', 'f', 'm', 'b', 'x', 'n'].filter((c) => v.includes(c)).join('');
+  return out || null;
+}
+
 export function placeholderImage(label: string, w = 160, h = 90): string {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect x="0.5" y="0.5" width="${w - 1}" height="${h - 1}" fill="#f4f4f4" stroke="#999" stroke-dasharray="4 3"/><text x="50%" y="50%" font-size="12" fill="#666" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif">${xmlEscape(label)}</text></svg>`;
   return 'data:image/svg+xml;base64,' + bytesToBase64(new TextEncoder().encode(svg));

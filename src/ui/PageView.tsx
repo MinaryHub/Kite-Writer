@@ -4,7 +4,7 @@ import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
 import type { PageSetup } from '../types';
 import { useApp } from '../app/hooks';
-import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, pagePaintHtml, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
+import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, pageHidesOf, pagePaintHtml, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
 import { sectionsKey } from '../editor/extensions/sections';
 import { formatPageNumber, splitExt } from '../formats/common';
 import { applyFormatPainter, insertImagesFromFiles } from '../app/commands';
@@ -190,6 +190,8 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
   const lineMarks = s.lineNumbers ? lineMarksOf(tab) : [];
   // 변경 막대: 변경 내용(넣음·지움)이 있는 줄의 왼쪽 여백
   const bars = changeBarsOf(tab);
+  // 쪽마다 감출 것 (한글의 감추기)
+  const hides = pageHidesOf(tab);
   for (let k = 0; k < pageCount; k++) {
     const pl = plans[k];
     const g = pl.g;
@@ -197,9 +199,10 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     const left = pl.left;
     const z = hfZones(pl.settings, g);
     // 쪽 테두리/배경·바탕쪽: 용지와, 용지를 덮는 쪽 경계 가리개에 같은 그림을 깐다
-    const paint = pagePaintHtml(pl.settings, g, k);
+    const hide = hides.get(k) || '';
+    const paint = pagePaintHtml(pl.settings, g, k, hide);
     const next = plans[k + 1];
-    const nextPaint = next ? pagePaintHtml(next.settings, next.g, k + 1) : '';
+    const nextPaint = next ? pagePaintHtml(next.settings, next.g, k + 1, hides.get(k + 1) || '') : '';
     pages.push(
       <div key={k} className="paper" style={{ top, left, width: g.W, height: g.H, ...(pageBackgroundStyle(s, k) || {}) }}>
         {paint && <div className="pg-paint-host" dangerouslySetInnerHTML={{ __html: paint }} />}
@@ -230,8 +233,8 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     // 표·그림이 든 머리말/꼬리말은 한글처럼 영역 위쪽부터 모양 그대로 그린다
     // 첫 쪽 감추기 (표지): 영역은 그대로 두고(두 번 눌러 편집) 내용만 그리지 않는다
     // 이 쪽의 머리말·꼬리말 (짝수 쪽, 시작 쪽, 첫 쪽 감추기). 없는 쪽도 영역은 둔다 (두 번 눌러 편집)
-    const hd = hfAt(s, 'header', k);
-    const ft = hfAt(s, 'footer', k);
+    const hd = hide.includes('h') ? null : hfAt(s, 'header', k);
+    const ft = hide.includes('f') ? null : hfAt(s, 'footer', k);
     const hRich = hd ? hfRichHtml(hd) : null;
     const fRich = ft ? hfRichHtml(ft) : null;
     const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: layoutTabsHtml(hfText(html, num, total, s.pageNumber.format), g.contentW) }} />;
@@ -255,7 +258,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
         {fRich ? rich(fRich) : ft?.text ? hfText(ft.text, num, total, s.pageNumber.format) : ''}
       </div>,
     );
-    if (pageNumShown(s, k)) {
+    if (pageNumShown(s, k) && !hide.includes('n')) {
       const [v, h] = s.pageNumber.pos.split('-');
       const zz = v === 'top' ? z.header : z.footer;
       chrome.push(

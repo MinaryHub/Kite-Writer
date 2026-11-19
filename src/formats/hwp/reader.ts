@@ -20,6 +20,7 @@ import {
   NumberingCounter,
   paragraph,
   placeholderImage,
+  cleanPageHide,
   round,
   textNode,
   HWP_NUM_FORMATS,
@@ -397,6 +398,8 @@ class HwpConverter {
   /** 지금 읽는 구역의 편집 용지 (구역 정의에서 처음 읽은 것) */
   sectionPage: PageSetup | null = null;
   private linkHref: string | null = null;
+  /** 이 문단에서 읽은 감추기 (첫 블록에 단다) */
+  private pageHide: string | null = null;
   /** 지금 읽는 문단이 놓인 쪽 (0 부터; 쪽 나누기와 줄 정보로 센다) */
   private page = 0;
   private lastVpos = 0;
@@ -700,6 +703,11 @@ class HwpConverter {
     const seq0 = this.layState.seq;
     const done = lay.finish(blocks, lines, floating);
     const out = placeCaptions(done.blocks, captions);
+    if (!inSub && this.pageHide) {
+      const first = out.find((b) => !isBreakBlock(b));
+      if (first) first.attrs = { ...first.attrs, pageHide: cleanPageHide(this.pageHide) };
+      this.pageHide = null;
+    }
     if (!inSub) {
       // 캡션 문단도 본문 블록이다: 차례가 끊기지 않게 캡션까지 넣어 다시 매긴다
       this.layState.seq = seq0;
@@ -761,6 +769,13 @@ class HwpConverter {
       case 'en  ':
         inline.push({ type: 'footnote', attrs: { text: this.subText(ctrl, false) } });
         return [];
+      case 'pghd': {
+        // 감추기: 이 문단이 놓인 쪽에서 감출 것 (속성 비트: 머리말, 꼬리말, 바탕쪽, 테두리, 배경, 쪽 번호). 문단의 첫 블록에 단다
+        const a = u32(ctrl, 4);
+        const flags = ['h', 'f', 'm', 'b', 'x', 'n'].filter((_, i) => a & (1 << i)).join('');
+        if (flags) this.pageHide = (this.pageHide || '') + flags;
+        return [];
+      }
       case 'pgnp': {
         const a = u32(ctrl, 4);
         const fmt = a & 0xff;
