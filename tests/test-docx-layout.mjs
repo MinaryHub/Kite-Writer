@@ -184,6 +184,31 @@ const text = (n) => (n.type === 'text' ? n.text : (n.content || []).map(text).jo
   ok((dx.match(/<w:tblHeader\/>/g) || []).length === 2 && /<w:tblCellSpacing w:w="15" w:type="dxa"\/>/.test(dx), 'DOCX 로 쓰기: 제목 줄 두 줄과 셀 간격', String((dx.match(/<w:tblHeader\/>/g) || []).length));
 }
 
+// ---- 6b. 자동 문단 간격 (HTML 문단): 14pt, 표 칸의 처음·끝과 목록 항목 사이에는 두지 않는다 ----
+{
+  const styles =
+    '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
+    '<w:style w:type="paragraph" w:styleId="Web"><w:name w:val="Normal (Web)"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:before="100" w:beforeAutospacing="1" w:after="100" w:afterAutospacing="1"/></w:pPr></w:style>';
+  const web = (s, extra = '') => p(t(s), `<w:pStyle w:val="Web"/>${extra}`);
+  const li = (s) => p(t(s), '<w:pStyle w:val="Web"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>');
+  const body =
+    web('웹 문단') +
+    web('자동 끔', '<w:spacing w:beforeAutospacing="0" w:afterAutospacing="0"/>') +
+    li('항목 1') + li('항목 2') + li('항목 3') +
+    `<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>${web('칸 처음')}${web('칸 끝')}</w:tc></w:tr></w:tbl>` +
+    p('');
+  const doc = await m.readDocx(await makeDocx({ body, styles }));
+  const ps = doc.content.content;
+  const sp = (n) => [n.attrs?.spaceBefore ?? 0, n.attrs?.spaceAfter ?? 0];
+  ok(JSON.stringify(sp(ps[0])) === '[14,14]', '자동 간격은 14pt', JSON.stringify(sp(ps[0])));
+  // 끄면 스타일에 적힌 값(100 twip = 5pt)으로. 앞 문단 아래 14pt 와 겹치는 위 간격은 빠진다
+  ok(sp(ps[1])[1] === 5, '자동을 끄면 적힌 값', JSON.stringify(sp(ps[1])));
+  const items = ps.slice(2, 5).map(sp);
+  ok(items[0][1] === 0 && items[1][0] === 0 && items[1][1] === 0 && items[2][0] === 0 && items[2][1] === 14, '목록 항목 사이에는 자동 간격을 두지 않는다 (목록 끝 아래는 둔다)', JSON.stringify(items));
+  const cell = ps.find((n) => n.type === 'table').content[0].content[0].content.map(sp);
+  ok(cell[0][0] === 0 && cell[1][1] === 0 && cell[0][1] === 14, '표 칸의 첫 문단 위·마지막 문단 아래 자동 간격은 없다', JSON.stringify(cell));
+}
+
 // ---- 7. 구역 나누기: 새 쪽에서 시작하는 구역은 그 구역의 용지를 담은 쪽 나누기 ----
 {
   const sect = (w, h, extra = '') => `<w:sectPr>${extra}<w:pgSz w:w="${w}" w:h="${h}"${w > h ? ' w:orient="landscape"' : ''}/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>`;

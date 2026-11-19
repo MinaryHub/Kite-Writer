@@ -63,6 +63,9 @@ interface PProps {
   hanging?: number;
   before?: number;
   after?: number;
+  /** 자동 간격 (HTML 문단의 위·아래 간격 14pt). 켜져 있으면 before·after 값 대신 쓴다 */
+  beforeAuto?: boolean;
+  afterAuto?: boolean;
   line?: number;
   lineRule?: string;
   /** 줄 격자에 맞춤 (기본 켬) */
@@ -129,6 +132,8 @@ const onOff = (el: Element | null): boolean | undefined => {
 };
 
 const twipToPt = (v: number) => v / 20;
+/** Word 의 자동 문단 간격 (HTML 문단의 위·아래 간격): 14pt */
+const AUTO_SPACE_TW = 280;
 /** 떠 있는 그림·도형의 x 가 아직 본문 왼쪽 기준이라는 표시 (문단 속성을 안 뒤 문단 상자 기준으로 고치고 지운다) */
 const BODY_X = '__bodyX';
 /** 글이 든 블록이 있는가 (빈 문단만 있는 글상자는 글 없는 도형으로) */
@@ -174,6 +179,8 @@ class DocxReader {
   hdrTop = 48;
   /** 쪽 배경을 보인다 (settings 의 displayBackgroundShape) */
   showBackground = false;
+  /** 자동 간격(위 b·아래 a)인 문단 (표 칸의 첫 문단 위·마지막 문단 아래의 자동 간격은 Word 가 두지 않는다) */
+  private autoSpaced = new WeakMap<JNode, { b: boolean; a: boolean; list: boolean }>();
   /** 본문의 구역 설정들 (문서 순서: 문단 안의 것들과 본문 끝의 것). 구역이 둘 이상이면 구역 사이에 쪽 나누기를 넣는다 */
   sections: Element[] = [];
   /** 본문 요소 (구역 나누기는 본문의 문단에만 있다) */
@@ -531,8 +538,13 @@ class DocxReader {
           const b = attr(c, 'before');
           const a = attr(c, 'after');
           const l = attr(c, 'line');
-          if (b != null && attr(c, 'beforeAutospacing') !== '1') p.before = parseFloat(b);
-          if (a != null && attr(c, 'afterAutospacing') !== '1') p.after = parseFloat(a);
+          if (b != null) p.before = parseFloat(b);
+          if (a != null) p.after = parseFloat(a);
+          // 자동 간격: 적힌 쪽(스타일·문단)의 것이 이긴다. 끄면 그 층까지의 before·after 값으로 돌아간다
+          const ba = attr(c, 'beforeAutospacing');
+          const aa = attr(c, 'afterAutospacing');
+          if (ba != null) p.beforeAuto = ba === '1' || ba === 'true' || ba === 'on';
+          if (aa != null) p.afterAuto = aa === '1' || aa === 'true' || aa === 'on';
           if (l != null) {
             p.line = parseFloat(l);
             p.lineRule = attr(c, 'lineRule') || 'auto';
@@ -714,8 +726,11 @@ class DocxReader {
     }
     if (a.indentLeft !== undefined && a.indentLeft <= 0) delete a.indentLeft;
     if (p.right) a.indentRight = round(twipToPt(p.right));
-    if (p.before) a.spaceBefore = round(twipToPt(p.before));
-    if (p.after) a.spaceAfter = round(twipToPt(p.after));
+    // Word 의 자동 간격(HTML 문단)은 위·아래 14pt (표 칸의 첫 문단 위·마지막 문단 아래는 두지 않는다: convertTable)
+    const before = p.beforeAuto ? AUTO_SPACE_TW : p.before;
+    const after = p.afterAuto ? AUTO_SPACE_TW : p.after;
+    if (before) a.spaceBefore = round(twipToPt(before));
+    if (after) a.spaceAfter = round(twipToPt(after));
     const ratio = naturalLineRatio(font || 'Times New Roman');
     const pt = size || 10;
     const natural = ratio * pt;
@@ -753,6 +768,13 @@ class DocxReader {
           if (prev && first && prev.style === res.style) {
             if (prev.contextual && prev.node.attrs) delete prev.node.attrs.spaceAfter;
             if (res.contextual && first.attrs) delete first.attrs.spaceBefore;
+          }
+          // 목록 항목끼리는 자동 간격을 두지 않는다 (Word 의 HTML 문단 간격: 목록의 처음 위와 끝 아래에만)
+          const fa = first ? this.autoSpaced.get(first) : undefined;
+          const pa = prev ? this.autoSpaced.get(prev.node) : undefined;
+          if (prev && first && fa?.list && pa?.list) {
+            if (fa.b && first.attrs) delete first.attrs.spaceBefore;
+            if (pa.a && prev.node.attrs) delete prev.node.attrs.spaceAfter;
           }
           // 문단 사이 간격은 앞 문단의 아래 간격과 이 문단의 위 간격 가운데 큰 쪽: 위 간격에서 앞 문단의 아래 간격만큼 뺀다
           if (prev && first && !this.addSpacing) {
@@ -884,7 +906,9 @@ class DocxReader {
     segments.forEach((seg, i) => {
       if (i > 0) blocks.push({ node: { type: colBreak[i] ? 'columnBreak' : 'pageBreak' } });
       if (i > 0 && !seg.length) return;
-      blocks.push({ node: paragraph(pAttrs, seg) });
+      const node = paragraph(pAttrs, seg);
+      if (p.beforeAuto || p.afterAuto) this.autoSpaced.set(node, { b: !!p.beforeAuto, a: !!p.afterAuto, list: !!p.numId && p.numId !== '0' });
+      blocks.push({ node });
     });
     return { blocks, after, style: styleId, contextual: !!p.contextual };
   }
@@ -1416,6 +1440,11 @@ class DocxReader {
         }
         let content = this.convertBody(tcEl).filter((n) => n.type !== 'pageBreak');
         if (!content.length) content = [paragraph()];
+        // 자동 간격은 칸의 첫 문단 위와 마지막 문단 아래에는 두지 않는다 (Word 의 HTML 문단 간격)
+        const head = content[0];
+        const foot = content[content.length - 1];
+        if (head.type === 'paragraph' && this.autoSpaced.get(head)?.b && head.attrs) delete head.attrs.spaceBefore;
+        if (foot.type === 'paragraph' && this.autoSpaced.get(foot)?.a && foot.attrs) delete foot.attrs.spaceAfter;
         // 안쪽 표 바로 뒤의 마지막 빈 문단: 칸이 문단으로 끝나야 해서 있는 것으로, Word 는 그리지 않는다 (커서가 들어가면 나타난다 — editor.css)
         const tail = content[content.length - 1];
         if (content.length > 1 && content[content.length - 2].type === 'table' && tail.type === 'paragraph' && (tail.content || []).every((c) => c.type === 'text' && !c.text)) {
