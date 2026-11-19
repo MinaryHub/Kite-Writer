@@ -618,6 +618,11 @@ export class HwpxConverter {
   private markpen: string | null = null;
   /** 이 문단에서 읽은 감추기 (첫 블록에 단다) */
   private pageHide: string | null = null;
+  /** 필드 시작 id → 종류 (필드 끝이 어느 필드를 닫는지 알려고) */
+  private fieldTypes = new Map<string, string>();
+  /** 메모 필드 시작 id → 메모 id, 지금 글에 걸린 메모들 */
+  private memoIds = new Map<string, string>();
+  private activeMemos: string[] = [];
   /** 지금 읽는 변경 추적 구간 (hp:insertBegin~insertEnd, deleteBegin~deleteEnd) */
   private change: { type: 'insertion' | 'deletion'; id: string; author: string; time: number; color: string | null } | null = null;
   /** 한글이 배치해 둔 직전 문단 첫 줄의 세로 위치. 되돌아가면 한글이 새 쪽에 놓은 문단이다 */
@@ -1198,6 +1203,7 @@ export class HwpxConverter {
   private textMarks(cp: CharPr | undefined): JMark[] {
     const marks = charMarks(cp, this.linkHref, this.markpen);
     if (this.change) marks.push({ type: this.change.type, attrs: { id: this.change.id, author: this.change.author, time: this.change.time, color: this.change.color } });
+    for (const id of this.activeMemos) marks.push({ type: 'comment', attrs: { id } });
     return marks;
   }
 
@@ -1265,10 +1271,34 @@ export class HwpxConverter {
 
   private handleField(el: Element) {
     if (localName(el) === 'fieldEnd') {
+      const ref = attr(el, 'beginIDRef') || '';
+      const type = this.fieldTypes.get(ref);
+      // 메모의 끝: 그 메모 표시만 닫는다
+      if (type === 'MEMO') {
+        const mid = this.memoIds.get(ref);
+        this.activeMemos = this.activeMemos.filter((x) => x !== mid);
+        return;
+      }
       this.linkHref = null;
       return;
     }
-    if (attr(el, 'type') !== 'HYPERLINK') return;
+    const ftype = attr(el, 'type') || '';
+    this.fieldTypes.set(attr(el, 'id') || '', ftype);
+    if (ftype === 'MEMO') {
+      // 메모: 쓴 사람·시각과 메모 글(subList 의 문단들). 메모가 걸린 글에 메모 표시를 단다 (Kite 의 메모·검토 창)
+      const param = (name: string) => descendants(el, 'stringParam').find((sp) => attr(sp, 'name') === name)?.textContent || '';
+      const text = kids(kid(el, 'subList'), 'p')
+        .map((p) => descendants(p, 't').map((t) => t.textContent || '').join(''))
+        .join('\n')
+        .trim();
+      const id = `h${param('ID') || attr(el, 'id') || this.memoIds.size + 1}`;
+      const time = Date.parse(param('CreateDateTime'));
+      this.settings.comments = { ...(this.settings.comments || {}), [id]: { author: param('Author'), time: Number.isFinite(time) ? time : 0, text, replies: [] } };
+      this.memoIds.set(attr(el, 'id') || '', id);
+      this.activeMemos.push(id);
+      return;
+    }
+    if (ftype !== 'HYPERLINK') return;
     let href: string | null = null;
     for (const sp of descendants(el, 'stringParam')) {
       const nm = attr(sp, 'name');
