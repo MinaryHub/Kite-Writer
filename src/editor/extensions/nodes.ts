@@ -14,6 +14,7 @@ import type { Columns } from '../../types';
 import { cleanMargins } from '../../formats/flatten';
 import { cleanColumns, normColor, parseBorderCss } from '../../formats/common';
 import { cleanLook, lookCss, lookStyle } from '../../formats/picLook';
+import { viewSrc } from '../imageUrls';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -321,7 +322,9 @@ export const KImage = Image.extend({
         }
       };
       const apply = (n: typeof node) => {
-        if (img.getAttribute('src') !== n.attrs.src) img.src = n.attrs.src;
+        // 큰 그림은 한 번만 푼 짧은 주소로 (imageUrls)
+        const want = viewSrc(n.attrs.src);
+        if (img.getAttribute('src') !== want) img.src = want;
         if (n.attrs.alt) img.alt = n.attrs.alt;
         layout(n.attrs.width, n.attrs.height, cropOf(n.attrs.crop));
         const fl = floatOf(n.attrs.float);

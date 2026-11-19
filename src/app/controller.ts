@@ -471,15 +471,18 @@ export class AppController {
   }
 
   private async writeTo(tab: DocTab, path: string, format: SaveFormatId): Promise<boolean> {
-    // 변경 내용·메모는 DOCX 만 저장한다: 다른 형식이면 알리고 고르게 한다
+    // 변경 내용은 DOCX·HWPX, 메모는 DOCX 만 저장한다: 저장하지 못하는 것이 있으면 알리고 고르게 한다
     if (format !== 'docx') {
-      const { hasReviewMarks } = await import('../formats/review');
+      const { hasReviewMarks, keepsChanges, keepsComments } = await import('../formats/review');
       const r = hasReviewMarks(tab.editor.getJSON());
-      if (r.changes || r.comments) {
-        const what = [r.changes ? '변경 내용 기록' : '', r.comments ? '메모' : ''].filter(Boolean).join('과 ');
+      const lostChanges = r.changes && !keepsChanges(format);
+      const lostComments = r.comments && !keepsComments(format);
+      if (lostChanges || lostComments) {
+        const what = [lostChanges ? '변경 내용 기록' : '', lostComments ? '메모' : ''].filter(Boolean).join('과 ');
+        const how = lostChanges ? '변경은 모두 반영하고 메모는 뺀 상태로 저장합니다.' : '메모는 뺀 상태로 저장합니다 (변경 내용 기록은 그대로 저장합니다).';
         const pick = await this.confirm(
           '검토 내용 저장',
-          `${format.toUpperCase()} 형식에는 ${what}을(를) 저장할 수 없습니다.\n변경은 모두 반영하고 메모는 뺀 상태로 저장합니다. (편집 중인 문서는 그대로 남습니다)\n\n검토 내용을 그대로 두려면 Word(DOCX)로 저장하세요.`,
+          `${format.toUpperCase()} 형식에는 ${what}을(를) 저장할 수 없습니다.\n${how} (편집 중인 문서는 그대로 남습니다)\n\n검토 내용을 그대로 두려면 Word(DOCX)로 저장하세요.`,
           [
             { id: 'save', label: '반영하여 저장', primary: true },
             { id: 'docx', label: 'Word(DOCX)로 저장' },

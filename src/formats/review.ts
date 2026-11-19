@@ -16,6 +16,26 @@ export function acceptAllJson(doc: any): any {
   return walk(doc);
 }
 
+/** 저장용: 메모 표시만 뺀 문서 JSON (변경 기록은 저장하지만 메모는 저장하지 못하는 형식: HWPX) */
+export function stripCommentsJson(doc: any): any {
+  const walk = (n: any): any => {
+    if (!n || typeof n !== 'object') return n;
+    if (n.type === 'text') {
+      if (!(n.marks || []).some((m: any) => m.type === 'comment')) return n;
+      const marks = n.marks.filter((m: any) => m.type !== 'comment');
+      return marks.length ? { ...n, marks } : { type: 'text', text: n.text };
+    }
+    if (!n.content) return n;
+    return { ...n, content: n.content.map(walk) };
+  };
+  return walk(doc);
+}
+
+/** 형식이 변경 기록(넣음·지움)을 저장하는가 */
+export const keepsChanges = (format: string) => format === 'docx' || format === 'hwpx';
+/** 형식이 메모를 저장하는가 */
+export const keepsComments = (format: string) => format === 'docx';
+
 /** 문서에 변경 표시나 메모가 있는가 (JSON) */
 export function hasReviewMarks(doc: any): { changes: boolean; comments: boolean } {
   let changes = false;

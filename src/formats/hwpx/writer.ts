@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import type { Columns, HeaderFooter, KDocument } from '../../types';
 import { type JNode, mmToHwp, pxToHwp, ptToHwp, xmlEscape, parseBorderCss, paraBorderToFill, normColor, safeIsoDate, cleanColumns, FIXED_SPACE } from '../common';
+import type { PicLook } from '../picLook';
 import { type CharStyle, type FlatBlock, type FlatFloat, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, type FlatBox } from '../flatten';
 import { prepareImage } from '../imageUtil';
 import { shapeImageSrcs, shapeXml } from './shapeWriter';
@@ -312,7 +313,7 @@ class SectionWriter {
         const info = this.images.get(it.src);
         ensureRun(this.reg.char(it.style), null);
         closeT();
-        if (info) xml += this.pic(info, it.width, it.height, it.crop, it.float ? this.place(it.float, (p.style.indentLeft + Math.max(0, -p.style.textIndent)) * PT2PX, p.style.spaceBefore * PT2PX) : null, it.rotate || 0);
+        if (info) xml += this.pic(info, it.width, it.height, it.crop, it.float ? this.place(it.float, (p.style.indentLeft + Math.max(0, -p.style.textIndent)) * PT2PX, p.style.spaceBefore * PT2PX) : null, it.rotate || 0, it.look || null);
       } else if (it.type === 'shape') {
         ensureRun(this.reg.char(it.style), null);
         closeT();
@@ -331,7 +332,7 @@ class SectionWriter {
     return xml;
   }
 
-  private pic(info: { id: string; w: number; h: number }, wPx: number | null, hPx: number | null, crop: { t: number; r: number; b: number; l: number } | null = null, pl: { wrap: string; tail: string } | null = null, rotate = 0): string {
+  private pic(info: { id: string; w: number; h: number }, wPx: number | null, hPx: number | null, crop: { t: number; r: number; b: number; l: number } | null = null, pl: { wrap: string; tail: string } | null = null, rotate = 0, look: PicLook | null = null): string {
     let w = wPx ? pxToHwp(wPx) : pxToHwp(info.w);
     let h = hPx ? pxToHwp(hPx) : pxToHwp(info.h);
     if (!hPx && wPx) h = Math.round((w * info.h) / Math.max(1, info.w));
@@ -362,7 +363,7 @@ class SectionWriter {
       `<hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="${sx}" e2="0" e3="0" e4="0" e5="${sy}" e6="0"/><hc:rotMatrix ${rot}/></hp:renderingInfo>` +
       `<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${ow}" y="0"/><hc:pt2 x="${ow}" y="${oh}"/><hc:pt3 x="0" y="${oh}"/></hp:imgRect>` +
       `<hp:imgClip ${clip}/><hp:inMargin left="0" right="0" top="0" bottom="0"/>` +
-      `<hp:imgDim dimwidth="${ow}" dimheight="${oh}"/><hc:img binaryItemIDRef="${info.id}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:effects/>` +
+      `<hp:imgDim dimwidth="${ow}" dimheight="${oh}"/><hc:img binaryItemIDRef="${info.id}" bright="${Math.round(look?.bright || 0)}" contrast="${Math.round(look?.contrast || 0)}" effect="${look?.gray === 1 ? 'GRAY_SCALE' : look?.gray === 2 ? 'BLACK_WHITE' : 'REAL_PIC'}" alpha="${look?.alpha ? Math.round(look.alpha * 255) : 0}"/><hp:effects/>` +
       `<hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}" heightRelTo="ABSOLUTE" protect="0"/>` +
       `${place.tail}</hp:pic>`
     );

@@ -1,3 +1,4 @@
+import { cleanLook, type PicLook } from './picLook';
 import { latexToHwp } from '../math/hwpEq';
 import { cleanTabs, type TabDefs } from '../editor/tabLayout';
 import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type JMark, type JNode, type ParaBorder, cleanColumns, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
@@ -126,7 +127,7 @@ export interface ReviewInfo {
 export type FlatInline =
   | { type: 'text'; text: string; style: CharStyle; link: string | null; tab?: TabInfo | null; review?: ReviewInfo; math?: { latex: string; hwp: string }; ruby?: { text: string; pos: string } | null; compose?: string | null }
   | { type: 'break' }
-  | { type: 'image'; src: string; width: number | null; height: number | null; style: CharStyle; crop: { t: number; r: number; b: number; l: number } | null; float?: FlatFloat | null; rotate?: number | null }
+  | { type: 'image'; src: string; width: number | null; height: number | null; style: CharStyle; crop: { t: number; r: number; b: number; l: number } | null; float?: FlatFloat | null; rotate?: number | null; look?: PicLook | null }
   | { type: 'shape'; width: number; height: number; d: ShapeData; float: FlatFloat | null; style: CharStyle }
   | { type: 'footnote'; text: string; style: CharStyle };
 
@@ -575,7 +576,7 @@ function flattenPara(n: JNode, ctx: Ctx, level: number): FlatPara {
     else if (c.type === 'image') {
       const { style: cs } = applyMarks(base, c.marks);
       const rot = Number(c.attrs?.rotate);
-      inlines.push({ type: 'image', src: c.attrs?.src, width: c.attrs?.width || null, height: c.attrs?.height || null, style: cs, crop: c.attrs?.crop || null, float: flatFloatOf(c.attrs?.float), rotate: Number.isFinite(rot) && rot % 360 ? rot : null });
+      inlines.push({ type: 'image', src: c.attrs?.src, width: c.attrs?.width || null, height: c.attrs?.height || null, style: cs, crop: c.attrs?.crop || null, float: flatFloatOf(c.attrs?.float), rotate: Number.isFinite(rot) && rot % 360 ? rot : null, look: cleanLook(c.attrs?.look) });
     } else if (c.type === 'shape') {
       const d = cleanShape(c.attrs?.d);
       if (d) inlines.push({ type: 'shape', width: +c.attrs?.width || 1, height: +c.attrs?.height || 1, d, float: flatFloatOf(c.attrs?.float), style: applyMarks(base, c.marks).style });

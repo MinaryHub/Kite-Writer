@@ -1,4 +1,4 @@
-// 변경 내용·메모: DOCX 로 저장했다가 다시 열면 그대로, 다른 형식은 변경을 반영한 글만
+// 변경 내용·메모: DOCX 로 저장했다가 다시 열면 그대로, HWPX 는 변경 기록만 그대로, 다른 형식은 변경을 반영한 글만
 import { load } from './harness.mjs';
 const m = await load('tests/formats.entry.ts');
 const { defaultSettings } = await load('src/formats/common.ts');
@@ -27,7 +27,16 @@ const cid = comB[0]?.attrs?.id;
 ok(cid && back.settings.comments?.[cid]?.text.includes('확인 바랍니다'), 'DOCX 메모 유지 ' + JSON.stringify(back.settings.comments));
 ok(back.settings.comments?.[cid]?.text.includes('확인함'), 'DOCX 메모 답글 유지');
 
-for (const [name, r] of [['hwpx', m.readHwpx], ['hwp', m.readHwp]]) {
+// HWPX: 변경 기록(넣음·지움)은 그대로, 메모는 뺀다 (한글의 변경 추적)
+{
+  const b = await m.readHwpx(await m.exportDocument('hwpx', doc));
+  const insX = marksIn(b.content, 'insertion');
+  const delX = marksIn(b.content, 'deletion');
+  ok(insX.length === 1 && insX[0].text === '화요일' && insX[0].attrs.author === '김검토', 'hwpx: 넣음 유지 ' + JSON.stringify(insX.map((x) => [x.text, x.attrs.author])));
+  ok(delX.length === 1 && delX[0].text === '월요일', 'hwpx: 지움 유지 ' + JSON.stringify(delX.map((x) => x.text)));
+  ok(!marksIn(b.content, 'comment').length, 'hwpx: 메모는 빠짐');
+}
+for (const [name, r] of [['hwp', m.readHwp]]) {
   const b = await r(await m.exportDocument(name, doc));
   const t = txt(b.content);
   ok(t.includes('화요일에 합니다') && !t.includes('월요일') && !marksIn(b.content, 'insertion').length, `${name}: 변경 반영된 글만 "${t.trim()}"`);
