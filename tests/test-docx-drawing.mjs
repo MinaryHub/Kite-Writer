@@ -203,5 +203,35 @@ const shapes = (doc) => find(doc.content.content, (n) => n.type === 'shape');
   ok(JSON.stringify(sh?.attrs.d.items.find((x) => x.k === 'text')?.content || []).includes('도형 안 글'), '다시 읽기: 도형 안 글', '');
 }
 
+// ---- 7. 예전 방식(VML) 그리기 개체와 양식 확인란 ----
+{
+  const V = 'xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w10="urn:schemas-microsoft-com:office:word"';
+  const pict = (inner) => `<w:r><w:pict ${V}>${inner}</w:pict></w:r>`;
+  const body =
+    // 문단 기준 선 (form 의 밑줄 선)
+    p(pict('<v:line style="position:absolute;z-index:1;mso-position-horizontal-relative:text;mso-position-vertical-relative:text" from="252pt,10pt" to="525.6pt,10pt" strokecolor="#ff0000"/>') + t('선')) +
+    // 떠 있는 글상자 (위아래 배치)
+    p(pict('<v:shape type="#_x0000_t202" style="position:absolute;margin-left:36pt;margin-top:6pt;width:144pt;height:72pt;z-index:2" fillcolor="#ffffcc" strokecolor="blue"><v:textbox inset="3pt,2pt,3pt,2pt"><w:txbxContent>' + p(t('VML 상자')) + '</w:txbxContent></v:textbox><w10:wrap type="topAndBottom"/></v:shape>') + t('뒤 글')) +
+    // 경로 도형 (비운 값은 0) 과 워드아트, 묶음
+    p(pict('<v:shape style="width:72pt;height:72pt" coordsize="21600,21600" path="m,l,21600r21600,l21600,xe" fillcolor="#00ff00"/>') + pict('<v:shape type="#_x0000_t136" style="width:150pt;height:30pt" fillcolor="#9400ed"><v:textpath style="font-family:&quot;Arial Black&quot;" string="Word Art"/></v:shape>')) +
+    p(pict('<v:group style="width:100pt;height:50pt" coordorigin="0,0" coordsize="1000,500"><v:rect style="position:absolute;left:0;top:0;width:500;height:500" fillcolor="red"/><v:oval style="position:absolute;left:500;top:0;width:500;height:500" fillcolor="blue" stroked="f"/></v:group>')) +
+    // 양식 확인란
+    p('<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:checkBox><w:sizeAuto/><w:default w:val="1"/></w:checkBox></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMCHECKBOX </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>' + t(' 켜짐') + '<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:checkBox><w:default w:val="0"/></w:checkBox></w:ffData></w:fldChar></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>' + t(' 꺼짐'));
+  const doc = await m.readDocx(await makeDocx({ body }));
+  const shs = shapes(doc);
+  const ln = shs.find((s) => s.attrs.d.items[0].k === 'line');
+  ok(ln && ln.attrs.float && Math.abs(ln.attrs.width - 364.8) < 0.5 && ln.attrs.d.items[0].sc === '#FF0000', 'VML 선: 문단 기준 자리·길이·색', JSON.stringify(ln?.attrs));
+  const vb = boxes(doc)[0];
+  ok(vb && vb.attrs.float && Math.abs(vb.attrs.float.x - 48) < 0.5 && Math.abs(vb.attrs.float.y - 8) < 0.5 && vb.attrs.float.wrap?.s === 'tb' && vb.attrs.bg === '#FFFFCC' && vb.attrs.borderColor === '#0000FF', 'VML 글상자: 자리·위아래 배치·바탕·테두리', JSON.stringify(vb?.attrs));
+  const poly = shs.find((s) => s.attrs.d.items[0].k === 'poly');
+  ok(poly && JSON.stringify(poly.attrs.d.items[0].p) === '[0,0,0,96,96,96,96,0]' && poly.attrs.d.items[0].z, 'VML 경로: 비운 값은 0 (사각형)', JSON.stringify(poly?.attrs.d.items[0]));
+  const art = shs.find((s) => s.attrs.d.items[0].k === 'art');
+  ok(art && art.attrs.d.items[0].text === 'Word Art' && art.attrs.d.items[0].font === 'Arial Black', 'VML 워드아트: 글자·글꼴', JSON.stringify(art?.attrs.d.items[0]));
+  const grp = shs.find((s) => s.attrs.d.group);
+  ok(grp && grp.attrs.d.items.map((i) => i.k).join(',') === 'rect,ellipse' && Math.abs(grp.attrs.d.items[1].m[4] - 66.67) < 0.1 && grp.attrs.d.items[1].sc === null, 'VML 묶음: 좌표계 대응·조각', JSON.stringify(grp?.attrs.d.items.map((i) => [i.k, i.m, i.w, i.sc])));
+  const texts = doc.content.content.map((n) => (n.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('')).join('|');
+  ok(/☒ 켜짐☐ 꺼짐/.test(texts), '양식 확인란: 켜짐 ☒ · 꺼짐 ☐', texts);
+}
+
 console.log(failed ? `${failed}개 실패` : '모두 통과');
 process.exit(failed ? 1 : 0);

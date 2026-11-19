@@ -29,6 +29,7 @@ import {
 } from '../common';
 import { assembleTable } from '../hwp/reader';
 import { anchorPlace, adjustValues, arrowOfEnd, colorOf, customGeometry, dashOf, emuPx, presetGeometry, themeColors, type AnchorPlace, type PageGeo } from './drawing';
+import { isVmlShape, vmlArrow, vmlColor, vmlDash, vmlLen, vmlOff, vmlPair, vmlPath, vmlStyle, vmlWrap } from './vml';
 import type { Mat, ShapeItem } from '../shape';
 import { isMetafileExt, metafileToSvg } from '../metafile';
 import { naturalLineRatio } from '../fontMetrics';
@@ -1051,6 +1052,8 @@ class DocxReader {
           break;
         case 'pict':
         case 'object': {
+          // 예전 방식(VML)의 그리기 개체: 선·도형·묶음, 떠 있는 그림·글상자, 워드아트를 자리째
+          if (name === 'pict' && this.vmlDrawing(c, out, after)) break;
           const imd = descendant(c, 'imagedata');
           const rid = attr(imd, 'id');
           const shape = descendant(c, 'shape');
@@ -1075,6 +1078,13 @@ class DocxReader {
         case 'fldChar': {
           const t = attr(c, 'fldCharType');
           if (t === 'begin') {
+            // 양식 확인란(FORMCHECKBOX): 상자 글자로 (켜져 있으면 ☒)
+            const cb = kid(kid(c, 'ffData'), 'checkBox');
+            if (cb) {
+              const on = kid(cb, 'checked') ? onOff(kid(cb, 'checked')) !== false : attr(kid(cb, 'default'), 'val') === '1';
+              const n = textNode(on ? '☒' : '☐', marks());
+              if (n) out.push(n);
+            }
             this.fieldStage = 'instr';
             this.fieldInstr = '';
           } else if (t === 'separate') {
@@ -1107,6 +1117,7 @@ class DocxReader {
             for (const cc of kids(target)) {
               if (localName(cc) === 'drawing') this.convertDrawing(cc, out, after);
               else if (localName(cc) === 'pict') {
+                if (this.vmlDrawing(cc, out, after)) continue;
                 const imd = descendant(cc, 'imagedata');
                 const rid = attr(imd, 'id');
                 if (rid && this.images.get(rid)) out.push({ type: 'image', attrs: { src: this.images.get(rid) } });
@@ -1183,6 +1194,242 @@ class DocxReader {
     }
     const txbx = descendant(d, 'txbxContent');
     if (txbx) after.push(...this.convertBody(txbx));
+  }
+
+  /**
+   * VML 그리기 개체(w:pict 안의 v:shape·v:rect·v:roundrect·v:oval·v:line·v:group). 다룬 것이 있으면 true.
+   * 글상자는 고칠 수 있는 글상자로, 그림은 그림으로, 그 밖의 모양은 그린 도형으로. 떠 있으면(position:absolute) 그 자리에
+   */
+  private vmlDrawing(pict: Element, out: JNode[], after: JNode[]): boolean {
+    const shapes = kids(pict).filter(isVmlShape);
+    if (!shapes.length) return false;
+    let done = false;
+    for (const el of shapes) {
+      const st = vmlStyle(el);
+      if (st.get('visibility') === 'hidden') continue;
+      const name = localName(el);
+      // 크기·자리 (선은 시작·끝 점에서)
+      let left = vmlLen(st.get('margin-left') ?? st.get('left'));
+      let top = vmlLen(st.get('margin-top') ?? st.get('top'));
+      let w = vmlLen(st.get('width'));
+      let h = vmlLen(st.get('height'));
+      let line: number[] | null = null;
+      if (name === 'line') {
+        const [x1, y1] = (attr(el, 'from') || '0,0').split(',').map((v) => vmlLen(v));
+        const [x2, y2] = (attr(el, 'to') || '0,0').split(',').map((v) => vmlLen(v));
+        left = Math.min(x1, x2);
+        top = Math.min(y1, y2);
+        w = Math.abs(x2 - x1);
+        h = Math.abs(y2 - y1);
+        line = [x1 - left, y1 - top, x2 - left, y2 - top];
+      }
+      if (!(w > 0.01 || h > 0.01)) continue;
+      const place = st.get('position') === 'absolute' ? this.vmlPlace(el, st, left, top, w, h) : null;
+      const floatOf = (bodyX: boolean) => {
+        if (!place) return null;
+        const wrap = this.wrapOf(place);
+        return { x: place.x, y: place.y, ...(place.py != null ? { py: place.py } : {}), ...(place.behind ? { behind: true } : {}), ...(wrap ? { wrap } : {}), ...(bodyX ? { [BODY_X]: true } : {}) };
+      };
+      // 그림
+      const imd = kid(el, 'imagedata');
+      const src = imd ? this.images.get(attr(imd, 'id') || '') : undefined;
+      if (src) {
+        out.push({ type: 'image', attrs: { src, width: Math.round(w) || null, height: Math.round(h) || null, ...(place ? { float: floatOf(true) } : {}) } });
+        done = true;
+        continue;
+      }
+      const fill = this.vmlFill(el);
+      const stroke = this.vmlStroke(el);
+      // 글상자
+      const tb = kid(el, 'textbox');
+      const txbx = tb ? kid(tb, 'txbxContent') : null;
+      if (txbx && (name === 'shape' || name === 'rect' || name === 'roundrect' || name === 'oval')) {
+        const content = this.convertBody(txbx);
+        const ins = (attr(tb, 'inset') || '').split(',');
+        const pad = [vmlLen(ins[1], 4.8), vmlLen(ins[2], 9.6), vmlLen(ins[3], 4.8), vmlLen(ins[0], 9.6)].map((v) => round(v, 2));
+        const attrs: Record<string, any> = { width: Math.round(w), height: Math.round(h), padding: pad };
+        if (fill.c && fill.a >= 0.5) attrs.bg = fill.c;
+        if (stroke.c) {
+          attrs.borderColor = stroke.c;
+          attrs.borderWidth = round(stroke.w, 2);
+          if (stroke.d) attrs.borderDash = stroke.d;
+        }
+        if (name === 'oval') attrs.radius = '50%';
+        const node: JNode = { type: 'textBox', attrs, content: content.length ? content : [paragraph()] };
+        if (place) {
+          node.attrs = { ...node.attrs, float: floatOf(false) };
+          out.push({ type: '__floatbox', attrs: { node } });
+        } else after.push(node);
+        done = true;
+        continue;
+      }
+      // 그린 도형 (선·사각형·타원·경로·워드아트·묶음)
+      const items = this.vmlItems(el, { x: 0, y: 0, w, h }, line, 0);
+      if (!items.length) continue;
+      const node: JNode = { type: 'shape', attrs: { width: Math.round(w * 100) / 100, height: Math.round(h * 100) / 100, d: { items, ...(items.length > 1 ? { group: true } : {}) } } };
+      if (place) node.attrs = { ...node.attrs, float: floatOf(true) };
+      out.push(node);
+      done = true;
+    }
+    return done;
+  }
+
+  /** VML 의 떠 있는 자리 → AnchorPlace (DrawingML 과 같은 기준 상자) */
+  private vmlPlace(el: Element, st: Map<string, string>, left: number, top: number, w: number, h: number): AnchorPlace {
+    const g = this.geo;
+    const bodyW = Math.max(1, g.W - g.ml - g.mr);
+    const bodyH = Math.max(1, g.H - g.mt - g.mb);
+    const hRel = st.get('mso-position-horizontal-relative') || 'text';
+    const hBox: Record<string, [number, number]> = { page: [-g.ml, g.W], margin: [0, bodyW], text: [0, bodyW], char: [0, bodyW], 'left-margin-area': [-g.ml, g.ml], 'right-margin-area': [bodyW, g.mr] };
+    const [hx, hw] = hBox[hRel] || hBox.text;
+    const ha = st.get('mso-position-horizontal') || 'absolute';
+    const x = ha === 'center' ? hx + (hw - w) / 2 : ha === 'right' || ha === 'outside' ? hx + hw - w : ha === 'left' || ha === 'inside' ? hx : hx + left;
+    const vRel = st.get('mso-position-vertical-relative') || 'text';
+    const va = st.get('mso-position-vertical') || 'absolute';
+    let y = 0;
+    let py: number | null = null;
+    if (vRel === 'text' || vRel === 'line') y = top;
+    else {
+      const vBox: Record<string, [number, number]> = { page: [-g.mt, g.H], margin: [0, bodyH], 'top-margin-area': [-g.mt, g.mt], 'bottom-margin-area': [bodyH, g.mb] };
+      const [vy, vh] = vBox[vRel] || vBox.margin;
+      py = va === 'center' ? vy + (vh - h) / 2 : va === 'bottom' || va === 'outside' ? vy + vh - h : va === 'top' || va === 'inside' ? vy : vy + top;
+    }
+    // 머리말·꼬리말 안: 종이·여백 기준 세로 자리를 그 영역 위쪽 기준으로
+    if (py != null && this.headerMode) {
+      const zoneTop = this.hfKind === 'footer' ? g.H - g.mb : this.hdrTop;
+      y = py + g.mt - zoneTop;
+      py = null;
+    }
+    const wt = vmlWrap(el);
+    const wrap = wt === 'square' ? 'square' : wt === 'tight' ? 'tight' : wt === 'through' ? 'through' : wt === 'topAndBottom' ? 'topBottom' : 'none';
+    const z = parseFloat(st.get('z-index') || '0');
+    const dl = vmlLen(st.get('mso-wrap-distance-left'), 12);
+    const dr = vmlLen(st.get('mso-wrap-distance-right'), 12);
+    const dt = vmlLen(st.get('mso-wrap-distance-top'), 0);
+    const db = vmlLen(st.get('mso-wrap-distance-bottom'), 0);
+    const r2 = (v: number) => Math.round(v * 100) / 100;
+    return { x: r2(x), y: r2(y), py: py == null ? null : r2(py), behind: z < 0, wrap, w: r2(w), h: r2(h), side: 'bothSides', dist: [r2(dt), r2(dr), r2(db), r2(dl)] };
+  }
+
+  /** VML 채우기 (fillcolor·filled·v:fill) */
+  private vmlFill(el: Element): { c: string | null; a: number; c2: string | null } {
+    const f = kid(el, 'fill');
+    if (vmlOff(attr(el, 'filled')) || vmlOff(attr(f, 'on'))) return { c: null, a: 1, c2: null };
+    const c = vmlColor(attr(f, 'color')) || vmlColor(attr(el, 'fillcolor')) || '#FFFFFF';
+    const op = parseFloat(attr(f, 'opacity') || '1');
+    const t = attr(f, 'type') || '';
+    return { c, a: Number.isFinite(op) ? Math.max(0, Math.min(1, op > 1 ? op / 65536 : op)) : 1, c2: /gradient/.test(t) ? vmlColor(attr(f, 'color2')) : null };
+  }
+
+  /** VML 선 (strokecolor·strokeweight·stroked·v:stroke) */
+  private vmlStroke(el: Element): { c: string | null; w: number; d: string | null; head: string | null; tail: string | null } {
+    const s = kid(el, 'stroke');
+    if (vmlOff(attr(el, 'stroked')) || vmlOff(attr(s, 'on'))) return { c: null, w: 0, d: null, head: null, tail: null };
+    return {
+      c: vmlColor(attr(s, 'color')) || vmlColor(attr(el, 'strokecolor')) || '#000000',
+      w: Math.max(0.5, vmlLen(attr(s, 'weight') || attr(el, 'strokeweight') || '0.75pt', 1)),
+      d: vmlDash(attr(s, 'dashstyle')),
+      head: vmlArrow(attr(s, 'startarrow')),
+      tail: vmlArrow(attr(s, 'endarrow')),
+    };
+  }
+
+  /** VML 개체 하나(묶음이면 안의 것들까지) → 도형 조각들. frame: 틀 안 자리 px */
+  private vmlItems(el: Element, frame: { x: number; y: number; w: number; h: number }, line: number[] | null, depth: number): ShapeItem[] {
+    if (depth > 6) return [];
+    const name = localName(el);
+    const m: Mat = [1, 0, 0, 1, frame.x, frame.y];
+    const fill = this.vmlFill(el);
+    const stroke = this.vmlStroke(el);
+    const look = (closed: boolean): Partial<ShapeItem> => ({
+      fc: closed ? fill.c : null,
+      ...(closed && fill.c && fill.a < 1 ? { al: Math.round((1 - fill.a) * 100) / 100 } : {}),
+      ...(closed && fill.c && fill.c2 ? { fg: { t: 'LINEAR', a: 0, cx: 50, cy: 50, c: [fill.c, fill.c2] } } : {}),
+      sc: stroke.c,
+      ...(stroke.c ? { sw: Math.round(stroke.w * 100) / 100 } : {}),
+      ...(stroke.d ? { sd: stroke.d } : {}),
+      ...(stroke.head ? { hs: stroke.head, hf: true } : {}),
+      ...(stroke.tail ? { ts: stroke.tail, tf: true } : {}),
+    });
+    const { w, h } = frame;
+    if (name === 'line' && line) return [{ k: 'line', m, w: Math.max(w, 0.01), h: Math.max(h, 0.01), p: line, ...look(false) } as ShapeItem];
+    if (name === 'rect') return [{ k: 'rect', m, w, h, ...look(true) } as ShapeItem];
+    if (name === 'roundrect') {
+      const a = parseFloat(attr(el, 'arcsize') || '0.2');
+      const frac = /f$/i.test(attr(el, 'arcsize') || '') ? a / 65536 : a;
+      return [{ k: 'rect', m, w, h, r: Math.round(Math.max(0, Math.min(0.5, frac)) * 100), ...look(true) } as ShapeItem];
+    }
+    if (name === 'oval') return [{ k: 'ellipse', m, w, h, ...look(true) } as ShapeItem];
+    if (name === 'group') {
+      // 묶음: 자식의 left·top·width·height 는 coordorigin·coordsize 좌표
+      const [ox, oy] = vmlPair(attr(el, 'coordorigin'), [0, 0]);
+      const [cw, ch] = vmlPair(attr(el, 'coordsize'), [1000, 1000]);
+      const sx = cw ? w / cw : 1;
+      const sy = ch ? h / ch : 1;
+      const out: ShapeItem[] = [];
+      for (const c of kids(el).filter(isVmlShape)) {
+        const cs = vmlStyle(c);
+        const num = (k: string) => parseFloat(cs.get(k) || '0') || 0;
+        let cl = num('left');
+        let ct = num('top');
+        let cww = num('width');
+        let chh = num('height');
+        let ln: number[] | null = null;
+        if (localName(c) === 'line') {
+          const [x1, y1] = (attr(c, 'from') || '0,0').split(',').map((v) => parseFloat(v) || 0);
+          const [x2, y2] = (attr(c, 'to') || '0,0').split(',').map((v) => parseFloat(v) || 0);
+          cl = Math.min(x1, x2);
+          ct = Math.min(y1, y2);
+          cww = Math.abs(x2 - x1);
+          chh = Math.abs(y2 - y1);
+          ln = [(x1 - cl) * sx, (y1 - ct) * sy, (x2 - cl) * sx, (y2 - ct) * sy];
+        }
+        const box = { x: frame.x + (cl - ox) * sx, y: frame.y + (ct - oy) * sy, w: cww * sx, h: chh * sy };
+        // 묶음 안의 그림·글상자
+        const imd = kid(c, 'imagedata');
+        const src = imd ? this.images.get(attr(imd, 'id') || '') : undefined;
+        if (src) {
+          out.push({ k: 'img', m: [1, 0, 0, 1, box.x, box.y], w: box.w, h: box.h, src } as ShapeItem);
+          continue;
+        }
+        out.push(...this.vmlItems(c, box, ln, depth + 1));
+        const tb = kid(c, 'textbox');
+        const tx = tb ? kid(tb, 'txbxContent') : null;
+        if (tx) {
+          const content = this.convertBody(tx);
+          if (hasBodyText(content)) out.push({ k: 'text', m: [1, 0, 0, 1, box.x, box.y], w: box.w, h: box.h, content, pad: [4.8, 9.6, 4.8, 9.6] } as ShapeItem);
+        }
+      }
+      return out;
+    }
+    if (name === 'shape' || name === 'polyline') {
+      // 워드아트: 글자를 틀에 맞춰 늘인다 (흰색에서 시작하는 그러데이션은 끝 색으로: 흰 바탕에 보이게)
+      const tp = kid(el, 'textpath');
+      if (tp && attr(tp, 'string')) {
+        const ts = vmlStyle(tp);
+        const fc = fill.c2 && fill.c === '#FFFFFF' ? fill.c2 : fill.c || '#000000';
+        return [{ k: 'art', m, w, h, text: (attr(tp, 'string') || '').trim(), font: (ts.get('font-family') || '').replace(/["']/g, '') || undefined, fc, sc: stroke.c } as ShapeItem];
+      }
+      // 그림 틀(t75)에 그림이 없으면 그리기 판의 바탕일 뿐이다
+      if (/_x0000_t75$/.test(attr(el, 'type') || '') && !kid(el, 'imagedata')) return [];
+      // 경로: 도형 자신의 것, 없으면 가리키는 모양 틀(v:shapetype)의 것
+      let path = attr(el, 'path') || attr(el, 'points');
+      let coord = attr(el, 'coordsize');
+      const type = (attr(el, 'type') || '').replace(/^#/, '');
+      if (!path && type) {
+        const tdef = descendants(el.ownerDocument.documentElement, 'shapetype').find((t) => attr(t, 'id') === type);
+        path = attr(tdef, 'path');
+        coord = coord || attr(tdef, 'coordsize');
+      }
+      if (!path) return [];
+      const [cw, ch] = vmlPair(coord, [21600, 21600]);
+      const sx = cw ? w / cw : 1;
+      const sy = ch ? h / ch : 1;
+      // polyline 의 points 는 "x1,y1 x2,y2 …" (길이 단위)
+      const subs = name === 'polyline' ? [{ p: path.split(/[\s,]+/).filter(Boolean).map((v) => vmlLen(v)), z: false }] : vmlPath(path).map((s) => ({ p: s.p.map((v, i) => v * (i % 2 ? sy : sx)), z: s.z }));
+      return subs.filter((s) => s.p.length >= 4).map((s) => ({ k: 'poly', m, w, h, p: s.p.map((v) => Math.round(v * 100) / 100), z: s.z, ...look(true) }) as ShapeItem);
+    }
+    return [];
   }
 
   /**
