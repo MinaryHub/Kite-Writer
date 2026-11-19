@@ -132,6 +132,8 @@ export function cleanPageHide(v: unknown): string | null {
 export interface FloatWrap {
   s: 'l' | 'r' | 'tb';
   d: [number, number, number, number];
+  /** Word 에 적혀 있던 글 흐름 쪽 (화면은 한쪽으로만 흐르게 하지만 Word 로 저장할 때 되돌린다) */
+  o?: 'bothSides' | 'left' | 'right' | 'largest';
 }
 
 /** float.wrap 값 검사 (이상하면 null) */
@@ -140,7 +142,8 @@ export function cleanFloatWrap(v: unknown): FloatWrap | null {
   const o = v as { s?: unknown; d?: unknown };
   if (o.s !== 'l' && o.s !== 'r' && o.s !== 'tb') return null;
   const d = Array.isArray(o.d) && o.d.length === 4 ? o.d.map((n) => Math.max(0, Math.min(500, Number(n) || 0))) : [0, 0, 0, 0];
-  return { s: o.s, d: d as FloatWrap['d'] };
+  const side = (o as { o?: unknown }).o;
+  return { s: o.s, d: d as FloatWrap['d'], ...(side === 'bothSides' || side === 'left' || side === 'right' || side === 'largest' ? { o: side } : {}) };
 }
 
 export function placeholderImage(label: string, w = 160, h = 90): string {

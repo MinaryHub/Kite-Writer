@@ -130,5 +130,78 @@ const shapes = (doc) => find(doc.content.content, (n) => n.type === 'shape');
   ok(!hidden.settings.pageBorder?.bg, 'displayBackgroundShape 가 없으면 쪽 배경을 보이지 않는다', JSON.stringify(hidden.settings.pageBorder));
 }
 
+// ---- 5. DOCX 로 다시 쓰기: 떠 있는 그림·글상자, 구역마다 용지, 쪽 배경·테두리 ----
+{
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  const para = (content, attrs = {}) => ({ type: 'paragraph', attrs, content });
+  const tx = (s) => ({ type: 'text', text: s });
+  const doc = {
+    type: 'doc',
+    content: [
+      para([{ type: 'image', attrs: { src: png, width: 120, height: 80, float: { x: 30, y: 12, wrap: { s: 'r', d: [0, 12, 0, 12], o: 'bothSides' } } } }, tx('그림 옆 글')], { indentLeft: 18 }),
+      { type: 'textBox', attrs: { width: 200, height: 90, padding: [4, 8, 4, 8], bg: '#FFEECC', borderColor: '#336699', borderWidth: 1.5, valign: 'middle', float: { x: 300, y: 5, wrap: { s: 'tb', d: [6, 0, 6, 0] } } }, content: [para([tx('상자 안 글')])] },
+      para([tx('상자 뒤 문단')]),
+      { type: 'pageBreak', attrs: { sectionPage: { width: 210, height: 297, landscape: true, marginTop: 10, marginBottom: 10, marginLeft: 20, marginRight: 20, marginHeader: 10, marginFooter: 10, gutter: 0 } } },
+      para([tx('가로 구역')]),
+    ],
+  };
+  const settings = (await m.readDocx(await makeDocx({ body: p(t('x')) }))).settings;
+  settings.pageBorder = { body: false, offset: [8.5, 8.5, 8.5, 8.5], bg: '#FFFFCC', fillArea: 'paper', sides: { t: { s: 'solid', w: 0.5, c: '#FF0000' }, b: { s: 'double', w: 0.5, c: '#0000FF' } } };
+  const out = await m.writeDocx({ content: doc, settings, meta: {} });
+  const zip = await JSZip.loadAsync(out);
+  const dx = await zip.file('word/document.xml').async('string');
+  const st = await zip.file('word/settings.xml').async('string');
+  ok(/<wp:anchor [^>]*behindDoc="0"[^>]*><wp:simplePos x="0" y="0"\/><wp:positionH relativeFrom="column"><wp:posOffset>(\d+)<\/wp:posOffset><\/wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>114300<\/wp:posOffset>/.test(dx), '떠 있는 그림: wp:anchor (문단 기준 자리)', dx.slice(dx.indexOf('<wp:anchor'), dx.indexOf('<wp:anchor') + 400));
+  ok(/<wp:wrapSquare wrapText="bothSides"/.test(dx), '둘레 글 흐름: Word 에 적혀 있던 쪽(양쪽)을 되돌린다');
+  ok(/<wps:wsp><wps:cNvSpPr txBox="1"\/>.*<a:srgbClr val="FFEECC"\/>.*<w:txbxContent><w:p>.*상자 안 글.*<\/w:txbxContent>.*anchor="ctr"/.test(dx) && /<wp:wrapTopAndBottom/.test(dx), '떠 있는 글상자: wps 글상자(바탕·테두리·세로 맞춤·위아래 배치)', '');
+  // 글상자는 뒤 문단(상자 뒤 문단)에 매단다 (글상자 안의 문단은 빼고 본다)
+  const flat = dx.replace(/<w:txbxContent>.*?<\/w:txbxContent>/g, '');
+  ok(/<w:p><w:pPr>(?:(?!<\/w:p>).)*<\/w:pPr><w:r><w:drawing><wp:anchor(?:(?!<\/w:p>).)*상자 뒤 문단/.test(flat), '글상자는 뒤 문단의 맨 앞에 매단다');
+  // 첫 구역은 시험 문서의 용지(편지지 세로)
+  ok(/<w:sectPr>(?:(?!<\/w:sectPr>).)*<w:pgSz w:w="12240" w:h="15840"\/>(?:(?!<\/w:sectPr>).)*<\/w:sectPr><\/w:pPr>(?:(?!<\/w:p>).)*상자 뒤 문단/.test(flat), '구역 나누기: 앞 구역의 설정을 그 구역의 마지막 문단에', '');
+  ok(/<w:body>.*<w:sectPr>(?:(?!<\/w:sectPr>).)*<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"\/>.*<\/w:body>/.test(dx), '끝 구역: 가로 용지', '');
+  ok(!/<w:pageBreakBefore\/>|w:type="page"/.test(dx), '새 구역 앞에 쪽 나누기를 따로 두지 않는다 (빈 쪽이 생기지 않게)');
+  ok(/<w:background w:color="FFFFCC"/.test(dx) && /<w:displayBackgroundShape\/>/.test(st), '쪽 배경색과 배경 표시 설정');
+  ok(/<w:pgBorders w:offsetFrom="page"><w:top w:val="single" w:sz="11" w:space="24" w:color="FF0000"\/><w:bottom w:val="double"/.test(dx), '쪽 테두리 (종이 기준, 굵기 1/8pt, 간격 pt)', (dx.match(/<w:pgBorders.*?<\/w:pgBorders>/) || [''])[0]);
+  // 다시 읽기
+  const back = await m.readDocx(out);
+  const img = find(back.content.content, (n) => n.type === 'image')[0];
+  ok(img && img.attrs.float && Math.abs(img.attrs.float.x - 30) < 1 && Math.abs(img.attrs.float.y - 12) < 1 && img.attrs.float.wrap?.o === 'bothSides', '다시 읽기: 그림 자리·글 흐름', JSON.stringify(img?.attrs.float));
+  const box = boxes(back)[0];
+  ok(box && Math.abs(box.attrs.float.x - 300) < 1 && box.attrs.float.wrap?.s === 'tb' && box.attrs.bg === '#FFEECC', '다시 읽기: 글상자 자리·바탕·배치', JSON.stringify(box?.attrs));
+  const kinds = back.content.content.map((n) => n.type + (n.type === 'pageBreak' && n.attrs?.sectionPage?.landscape ? '(가로)' : ''));
+  ok(kinds.includes('pageBreak(가로)'), '다시 읽기: 가로 구역', JSON.stringify(kinds));
+  ok(back.settings.pageBorder?.bg === '#FFFFCC' && back.settings.pageBorder?.sides?.t?.c === '#FF0000', '다시 읽기: 쪽 배경·테두리', JSON.stringify(back.settings.pageBorder));
+}
+
+// ---- 6. 그리기 개체: DOCX 로 쓰고(묶음·사용자 경로·글·그림) 다시 읽기 ----
+{
+  const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  const I = [1, 0, 0, 1, 0, 0];
+  const items = [
+    { k: 'rect', m: [1, 0, 0, 1, 10, 10], w: 100, h: 50, r: 20, fc: '#336699', sc: '#000000', sw: 1 },
+    { k: 'ellipse', m: [1, 0, 0, 1, 130, 10], w: 60, h: 40, fc: '#FFCC00', sc: null },
+    { k: 'poly', m: I, w: 200, h: 120, p: [10, 110, 60, 70, 110, 110], z: true, fc: '#CC0000', sc: '#000000', sw: 2 },
+    { k: 'line', m: I, w: 200, h: 120, p: [120, 100, 190, 80], sc: '#0000FF', sw: 1.5, ts: 'ARROW', tf: true },
+    { k: 'text', m: [1, 0, 0, 1, 10, 10], w: 100, h: 50, content: [{ type: 'paragraph', content: [{ type: 'text', text: '도형 안 글' }] }], pad: [2, 4, 2, 4], va: 'middle' },
+    { k: 'img', m: [1, 0, 0, 1, 150, 60], w: 40, h: 40, src: png },
+  ];
+  const doc = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'shape', attrs: { width: 200, height: 120, d: { items, group: true }, float: { x: 20, y: 0, wrap: { s: 'tb', d: [0, 0, 0, 0] } } } }, { type: 'text', text: '뒤 글' }] }] };
+  const settings = (await m.readDocx(await makeDocx({ body: p(t('x')) }))).settings;
+  const out = await m.writeDocx({ content: doc, settings, meta: {} });
+  const dx = await (await JSZip.loadAsync(out)).file('word/document.xml').async('string');
+  ok(/<wp:anchor [^>]*>.*<wpg:wgp>.*<\/wpg:wgp>.*<\/wp:anchor>/.test(dx), '그리기 개체: 떠 있는 묶음(wpg:wgp)으로', dx.slice(0, 300));
+  ok((dx.match(/<wps:wsp>/g) || []).length === 5 && /<pic:pic>/.test(dx), '조각마다 도형(wps)·글상자·그림(pic)', String((dx.match(/<wps:wsp>/g) || []).length));
+  ok(/<a:custGeom>.*<a:cubicBezTo>/.test(dx) && /<a:tailEnd type="triangle"/.test(dx) && /<a:srgbClr val="CC0000"/.test(dx), '사용자 경로(둥근 모서리·타원은 베지어)·화살표·채우기', '');
+  ok(/<w:txbxContent>.*도형 안 글.*<\/w:txbxContent>/.test(dx), '도형 안 글은 글상자로');
+  const back = await m.readDocx(out);
+  const sh = find(back.content.content, (n) => n.type === 'shape')[0];
+  const kinds = sh ? sh.attrs.d.items.map((x) => x.k).join(',') : '';
+  ok(sh && sh.attrs.d.group && /poly/.test(kinds) && /text/.test(kinds) && /img/.test(kinds), '다시 읽기: 묶음의 조각들 (사용자 경로는 다각형으로)', kinds);
+  const poly = sh?.attrs.d.items.find((x) => x.k === 'poly' && x.fc === '#CC0000');
+  ok(poly && poly.p.length === 6 && Math.abs(poly.p[2] - 60) < 1 && Math.abs(poly.p[3] - 70) < 1, '다시 읽기: 다각형 점 자리', JSON.stringify(poly?.p));
+  ok(JSON.stringify(sh?.attrs.d.items.find((x) => x.k === 'text')?.content || []).includes('도형 안 글'), '다시 읽기: 도형 안 글', '');
+}
+
 console.log(failed ? `${failed}개 실패` : '모두 통과');
 process.exit(failed ? 1 : 0);

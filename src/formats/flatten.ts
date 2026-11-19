@@ -2,7 +2,7 @@ import { cleanLook, type PicLook } from './picLook';
 import { latexToHwp } from '../math/hwpEq';
 import { cleanTabs, type TabDefs } from '../editor/tabLayout';
 import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type FloatWrap, type JMark, type JNode, type ParaBorder, cleanColumns, cleanFloatWrap, cleanPageHide, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
-import type { Columns } from '../types';
+import type { Columns, PageSetup } from '../types';
 import { cleanShape, type ShapeData } from './shape';
 import type { FloatHw } from './hwpLayout';
 
@@ -10,6 +10,8 @@ import type { FloatHw } from './hwpLayout';
 export interface FlatFloat {
   x: number;
   y: number;
+  /** 쪽 본문 맨 위 기준 세로 자리 (종이·여백 기준으로 놓인 개체) */
+  py?: number | null;
   behind?: boolean;
   hw?: FloatHw | null;
   /** 둘레 글 흐름 (Word 문서에서 읽은 것) */
@@ -23,6 +25,7 @@ export function flatFloatOf(v: any): FlatFloat | null {
   const y = Number(v.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   const out: FlatFloat = { x, y };
+  if (v.py != null && Number.isFinite(+v.py)) out.py = +v.py;
   if (v.behind === true) out.behind = true;
   const wrap = cleanFloatWrap(v.wrap);
   if (wrap) out.wrap = wrap;
@@ -139,6 +142,8 @@ export type FlatInline =
 export interface FlatColumnBreak {
   columnBreakBefore?: boolean;
   columnsBefore?: Columns | null;
+  /** 이 블록에서 새 구역이 시작한다: 그 구역의 용지 (구역 나누기의 sectionPage) */
+  sectionPageBefore?: PageSetup | null;
   /** 한글의 감추기: 이 블록이 놓인 쪽에서 감출 것 (h 머리말, f 꼬리말, m 바탕쪽, b 쪽 테두리, x 쪽 배경, n 쪽 번호) */
   pageHide?: string | null;
 }
@@ -458,10 +463,15 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
   let pendingBreak = false;
   let pendingCol = false;
   let pendingCols: Columns | null = null;
+  let pendingSection: PageSetup | null = null;
   const push = (b: FlatBlock) => {
     if (pendingBreak) {
       b.pageBreakBefore = true;
       pendingBreak = false;
+    }
+    if (pendingSection) {
+      b.sectionPageBefore = pendingSection;
+      pendingSection = null;
     }
     if (pendingCol) {
       b.columnBreakBefore = true;
@@ -488,7 +498,10 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
       case 'pageBreak':
         pendingBreak = true;
         // 구역 나누기: 그 구역의 다단으로 바꾼다 (쓰는 쪽이 앞 다단과 같으면 건너뛴다)
-        if (n.attrs?.sectionPage) pendingCols = cleanColumns(n.attrs.sectionPage.columns) || { count: 1, gap: 0 };
+        if (n.attrs?.sectionPage) {
+          pendingCols = cleanColumns(n.attrs.sectionPage.columns) || { count: 1, gap: 0 };
+          pendingSection = n.attrs.sectionPage as PageSetup;
+        }
         break;
       case 'columnBreak':
         if (n.attrs?.columns) pendingCols = cleanColumns(n.attrs.columns) || pendingCols;

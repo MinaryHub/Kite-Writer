@@ -28,7 +28,7 @@ import {
   readZipEntry,
 } from '../common';
 import { assembleTable } from '../hwp/reader';
-import { anchorPlace, adjustValues, arrowOfEnd, colorOf, dashOf, emuPx, presetGeometry, themeColors, type AnchorPlace, type PageGeo } from './drawing';
+import { anchorPlace, adjustValues, arrowOfEnd, colorOf, customGeometry, dashOf, emuPx, presetGeometry, themeColors, type AnchorPlace, type PageGeo } from './drawing';
 import type { Mat, ShapeItem } from '../shape';
 import { isMetafileExt, metafileToSvg } from '../metafile';
 import { naturalLineRatio } from '../fontMetrics';
@@ -1194,15 +1194,16 @@ class DocxReader {
     if (this.headerMode || pl.behind || pl.py != null || pl.wrap === 'none') return null;
     const d = pl.dist;
     if (pl.wrap === 'topBottom') return { s: 'tb', d };
+    const o = pl.side;
     const bodyW = this.geo.W - this.geo.ml - this.geo.mr;
     const roomL = pl.x - d[3];
     const roomR = bodyW - (pl.x + pl.w + d[1]);
     // 이보다 좁은 틈에는 글을 넣지 않는다 (0.5 인치)
     const MIN = 48;
-    if (pl.side === 'left') return { s: roomL >= MIN ? 'l' : 'tb', d };
-    if (pl.side === 'right') return { s: roomR >= MIN ? 'r' : 'tb', d };
-    if (Math.max(roomL, roomR) < MIN) return { s: 'tb', d };
-    return { s: roomR >= roomL ? 'r' : 'l', d };
+    if (pl.side === 'left') return { s: roomL >= MIN ? 'l' : 'tb', d, o };
+    if (pl.side === 'right') return { s: roomR >= MIN ? 'r' : 'tb', d, o };
+    if (Math.max(roomL, roomR) < MIN) return { s: 'tb', d, o };
+    return { s: roomR >= roomL ? 'r' : 'l', d, o };
   }
 
   /** 그리기 개체(wps:wsp 도형, wpg:wgp 묶음, 크기 w×h px) → 글상자(글이 든 돌리지 않은 사각형·타원) 또는 도형 노드 */
@@ -1273,12 +1274,14 @@ class DocxReader {
     const pad = [ins('tIns', 4.8), ins('rIns', 9.6), ins('bIns', 4.8), ins('lIns', 9.6)].map((v) => Math.round(v * 100) / 100);
     const anc = attr(bp, 'anchor');
     const va: 'middle' | 'bottom' | null = anc === 'ctr' ? 'middle' : anc === 'b' ? 'bottom' : null;
-    return { rot, flipH, flipV, prst, av, fill, line, pad, va };
+    return { rot, flipH, flipV, prst, av, fill, line, pad, va, cust: kid(spPr, 'custGeom') };
   }
 
   /** 도형 하나 → 도형 조각들 (꼴 + 안의 글). (fx, fy, fw, fh): 틀 안 자리 px */
   private wspItems(sp: ReturnType<DocxReader['wspParts']>, fx: number, fy: number, fw: number, fh: number, content: JNode[]): ShapeItem[] {
-    const geom = presetGeometry(sp.prst === 'custom' ? 'rect' : sp.prst, fw, fh, sp.av);
+    // 사용자 지정 도형: 경로마다 다각형 조각으로 (곡선·호는 펴서)
+    const cust = sp.prst === 'custom' && sp.cust ? customGeometry(sp.cust, fw, fh) : [];
+    const geom = cust.length ? { k: 'poly' as const, p: cust[0].p, z: cust[0].z } : presetGeometry(sp.prst === 'custom' ? 'rect' : sp.prst, fw, fh, sp.av);
     // 가운데를 축으로 돌리고 뒤집은 뒤 틀 안 자리로
     const t = (sp.rot * Math.PI) / 180;
     const cos = Math.cos(t);
@@ -1302,6 +1305,12 @@ class DocxReader {
       if (sp.line.tail) Object.assign(it, { ts: sp.line.tail, tf: true });
     }
     const out: ShapeItem[] = [it];
+    // 경로가 여럿이면 같은 자리·모양으로 조각을 더한다 (열린 경로는 칠하지 않는다)
+    if (cust.length) {
+      if (!cust[0].fill) it.fc = null;
+      if (!cust[0].stroke) it.sc = null;
+      for (const c of cust.slice(1)) out.push({ ...it, p: c.p, z: c.z, fc: c.fill ? it.fc ?? sp.fill?.c ?? null : null, sc: c.stroke ? sp.line?.c ?? null : null });
+    }
     if (hasBodyText(content)) out.push({ k: 'text', m: [1, 0, 0, 1, r4(fx), r4(fy)], w: fw, h: fh, content, pad: sp.pad, ...(sp.va ? { va: sp.va } : {}) });
     return out;
   }

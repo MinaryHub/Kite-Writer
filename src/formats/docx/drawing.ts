@@ -265,6 +265,95 @@ export function anchorPlace(anchor: Element, geo: PageGeo): AnchorPlace {
 
 // ---------------- 기본 도형 ----------------
 
+/**
+ * 사용자 지정 도형(a:custGeom)의 경로들 → 점 목록 (px, 도형 크기 w×h 안). 곡선(3차·2차 베지어)과 호는 짧은 선분으로 편다.
+ * 경로 좌표는 path 의 w·h 단위(없으면 EMU)이다. 숫자가 아닌 좌표(수식 이름)는 조정 값·안내값의 상수만 풀고, 못 풀면 그 경로를 뺀다
+ */
+export function customGeometry(cust: Element, w: number, h: number): { p: number[]; z: boolean; fill: boolean; stroke: boolean }[] {
+  const out: { p: number[]; z: boolean; fill: boolean; stroke: boolean }[] = [];
+  // 상수 안내값 ("val N")
+  const guides = new Map<string, number>();
+  for (const gd of [...kids(kid(cust, 'avLst'), 'gd'), ...kids(kid(cust, 'gdLst'), 'gd')]) {
+    const m = /^val\s+(-?\d+(?:\.\d+)?)$/.exec((attr(gd, 'fmla') || '').trim());
+    const name = attr(gd, 'name');
+    if (m && name) guides.set(name, parseFloat(m[1]));
+  }
+  let total = 0;
+  for (const path of kids(kid(cust, 'pathLst'), 'path')) {
+    const pw = parseFloat(attr(path, 'w') || '0');
+    const ph = parseFloat(attr(path, 'h') || '0');
+    const sx = pw > 0 ? w / pw : 1 / EMU_PER_PX;
+    const sy = ph > 0 ? h / ph : 1 / EMU_PER_PX;
+    const fill = attr(path, 'fill') !== 'none';
+    const stroke = attr(path, 'stroke') !== '0' && attr(path, 'stroke') !== 'false';
+    let bad = false;
+    const num = (v: string | null): number => {
+      if (v == null) return 0;
+      const n = parseFloat(v);
+      if (Number.isFinite(n) && /^-?\d/.test(v.trim())) return n;
+      const g = guides.get(v);
+      if (g == null) bad = true;
+      return g ?? 0;
+    };
+    const ptOf = (e: Element | null): [number, number] => [num(attr(e, 'x')) * sx, num(attr(e, 'y')) * sy];
+    let cur: [number, number] = [0, 0];
+    let pts: number[] = [];
+    const flush = (z: boolean) => {
+      if (pts.length >= 4 && !bad) out.push({ p: pts.map((v) => Math.round(v * 100) / 100), z, fill, stroke });
+      pts = [];
+    };
+    for (const c of kids(path)) {
+      if (total > 20000) break;
+      const n = localName(c);
+      if (n === 'moveTo') {
+        flush(false);
+        cur = ptOf(kid(c, 'pt'));
+        pts = [cur[0], cur[1]];
+      } else if (n === 'lnTo') {
+        cur = ptOf(kid(c, 'pt'));
+        pts.push(cur[0], cur[1]);
+      } else if (n === 'cubicBezTo' || n === 'quadBezTo') {
+        const cps = kids(c, 'pt').map(ptOf);
+        if (cps.length < (n === 'cubicBezTo' ? 3 : 2)) continue;
+        const [x0, y0] = cur;
+        const steps = 12;
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps;
+          const u = 1 - t;
+          let x: number;
+          let y: number;
+          if (n === 'cubicBezTo') {
+            x = u * u * u * x0 + 3 * u * u * t * cps[0][0] + 3 * u * t * t * cps[1][0] + t * t * t * cps[2][0];
+            y = u * u * u * y0 + 3 * u * u * t * cps[0][1] + 3 * u * t * t * cps[1][1] + t * t * t * cps[2][1];
+          } else {
+            x = u * u * x0 + 2 * u * t * cps[0][0] + t * t * cps[1][0];
+            y = u * u * y0 + 2 * u * t * cps[0][1] + t * t * cps[1][1];
+          }
+          pts.push(x, y);
+        }
+        cur = cps[cps.length - 1];
+      } else if (n === 'arcTo') {
+        // 지금 점이 타원(반지름 wR·hR)의 stAng 자리: 그 타원을 swAng 만큼 돈다 (각은 1/60000 도)
+        const wr = num(attr(c, 'wR')) * sx;
+        const hr = num(attr(c, 'hR')) * sy;
+        const st = (num(attr(c, 'stAng')) / 60000) * (Math.PI / 180);
+        const sw = (num(attr(c, 'swAng')) / 60000) * (Math.PI / 180);
+        const cx = cur[0] - wr * Math.cos(st);
+        const cy = cur[1] - hr * Math.sin(st);
+        const steps = Math.max(2, Math.min(64, Math.ceil(Math.abs(sw) / (Math.PI / 16))));
+        for (let i = 1; i <= steps; i++) {
+          const a = st + (sw * i) / steps;
+          pts.push(cx + wr * Math.cos(a), cy + hr * Math.sin(a));
+        }
+        cur = [pts[pts.length - 2], pts[pts.length - 1]];
+      } else if (n === 'close') flush(true);
+      total += 1;
+    }
+    flush(false);
+  }
+  return out;
+}
+
 /** 도형 조정 값(a:avLst 의 gd: "val 50000") */
 export function adjustValues(prstGeom: Element | null): Map<string, number> {
   const out = new Map<string, number>();

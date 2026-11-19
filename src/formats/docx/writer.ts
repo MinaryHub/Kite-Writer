@@ -1,14 +1,15 @@
 import JSZip from 'jszip';
-import type { Columns, HeaderFooter, KDocument, LineNumbering } from '../../types';
+import type { Columns, HeaderFooter, KDocument, LineNumbering, PageBorder, PageSetup } from '../../types';
 import { type JNode, mmToTwip, xmlEscape, parseBorderCss, normColor, safeIsoDate, cleanColumns } from '../common';
-import { type CharStyle, type FlatBlock, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, flattenContent, flattenDoc } from '../flatten';
+import { type CharStyle, type FlatBlock, type FlatBox, type FlatFloat, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, flattenContent, flattenDoc } from '../flatten';
 import { prepareImage } from '../imageUtil';
+import { pathOf, type ShapeItem } from '../shape';
 import { naturalLineRatio } from '../fontMetrics';
 
 /** DOCX 쓰기 (Word 2010 이상 호환) */
 
 const W_NS =
-  'xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
+  'xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"';
 const DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
 /** 색 값을 RRGGBB 로 (색이 아니면 auto) */
 const hex = (c: string) => {
@@ -32,6 +33,10 @@ class Ctx {
   commentOpen = new Set<string>();
   /** 메모마다 마지막으로 달린 글자 (그 뒤에서 범위를 닫는다) */
   commentLast = new Map<string, FlatInline>();
+  /** 다음 문단에 매달 떠 있는 글상자들 (글상자는 뒤 문단 기준 자리) */
+  anchors: string[] = [];
+  /** 떠 있는 개체의 겹침 차례 */
+  relHeight = 251658240;
 
   addRel(type: string, target: string, external = false): string {
     const id = `rId${++this.relNo}`;
@@ -170,6 +175,17 @@ function collectComments(ctx: Ctx, blocks: FlatBlock[], known: Record<string, un
   }
 }
 
+const emu = (px: number) => Math.round((Number.isFinite(px) ? px : 0) * 9525);
+
+/** 그림의 그래픽 부분 (글줄 안·떠 있는 그림 공통) */
+function picGraphic(id: number, info: { rid: string; name: string }, cx: number, cy: number, crop: { t: number; r: number; b: number; l: number } | null): string {
+  return (
+    `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${id}" name="${info.name}"/><pic:cNvPicPr/></pic:nvPicPr>` +
+    `<pic:blipFill><a:blip r:embed="${info.rid}"/>${crop ? `<a:srcRect l="${Math.round(crop.l * 100000)}" t="${Math.round(crop.t * 100000)}" r="${Math.round(crop.r * 100000)}" b="${Math.round(crop.b * 100000)}"/>` : ''}<a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+    `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic>`
+  );
+}
+
 function drawing(ctx: Ctx, info: { rid: string; w: number; h: number; name: string }, wPx: number | null, hPx: number | null, crop: { t: number; r: number; b: number; l: number } | null = null): string {
   let w = wPx || info.w;
   let h = hPx || (wPx ? Math.round((wPx * info.h) / Math.max(1, info.w)) : info.h);
@@ -184,9 +200,287 @@ function drawing(ctx: Ctx, info: { rid: string; w: number; h: number; name: stri
   return (
     `<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
     `<wp:docPr id="${id}" name="그림 ${id}"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>` +
-    `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="${id}" name="${info.name}"/><pic:cNvPicPr/></pic:nvPicPr>` +
-    `<pic:blipFill><a:blip r:embed="${info.rid}"/>${crop ? `<a:srcRect l="${Math.round(crop.l * 100000)}" t="${Math.round(crop.t * 100000)}" r="${Math.round(crop.r * 100000)}" b="${Math.round(crop.b * 100000)}"/>` : ''}<a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
-    `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>`
+    picGraphic(id, info, cx, cy, crop) +
+    `</wp:inline></w:drawing>`
+  );
+}
+
+/**
+ * 떠 있는 개체의 wp:anchor 앞부분 (자리·크기·글 흐름). x: 단 왼쪽 기준 px, 세로는 문단 기준(y) 또는 쪽 기준(py: 여백 위쪽 기준).
+ * 둘레 글 흐름은 Word 에 적혀 있던 쪽(o)을 되돌린다
+ */
+function anchorHead(ctx: Ctx, fl: FlatFloat, cx: number, cy: number, xPx: number, id: number, name: string): string {
+  const d = fl.wrap?.d || [0, 0, 0, 0];
+  const dist = `distT="${emu(d[0])}" distB="${emu(d[2])}" distL="${emu(d[3])}" distR="${emu(d[1])}"`;
+  let wrap = '<wp:wrapNone/>';
+  if (fl.wrap && !fl.behind) {
+    if (fl.wrap.s === 'tb') wrap = `<wp:wrapTopAndBottom distT="${emu(d[0])}" distB="${emu(d[2])}"/>`;
+    else wrap = `<wp:wrapSquare wrapText="${fl.wrap.o || (fl.wrap.s === 'l' ? 'left' : 'right')}" ${dist}/>`;
+  }
+  const v = fl.py != null ? `<wp:positionV relativeFrom="margin"><wp:posOffset>${emu(fl.py)}</wp:posOffset></wp:positionV>` : `<wp:positionV relativeFrom="paragraph"><wp:posOffset>${emu(fl.y)}</wp:posOffset></wp:positionV>`;
+  return (
+    `<wp:anchor ${dist} simplePos="0" relativeHeight="${ctx.relHeight++}" behindDoc="${fl.behind ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>` +
+    `<wp:positionH relativeFrom="column"><wp:posOffset>${emu(xPx)}</wp:posOffset></wp:positionH>${v}<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>${wrap}` +
+    `<wp:docPr id="${id}" name="${xmlEscape(name)}"/><wp:cNvGraphicFramePr/>`
+  );
+}
+
+/** 떠 있는 그림 (x 는 문단 상자 기준이라 문단 왼쪽(paraLeft px)을 더해 단 기준으로) */
+function anchoredPicture(ctx: Ctx, info: { rid: string; w: number; h: number; name: string }, it: Extract<FlatInline, { type: 'image' }>, paraLeft: number): string {
+  const w = it.width || info.w;
+  const h = it.height || (it.width ? Math.round((it.width * info.h) / Math.max(1, info.w)) : info.h);
+  const cx = emu(w);
+  const cy = emu(h);
+  const id = ctx.docPrId++;
+  return `<w:drawing>${anchorHead(ctx, it.float!, cx, cy, it.float!.x + paraLeft, id, `그림 ${id}`)}${picGraphic(id, info, cx, cy, it.crop)}</wp:anchor></w:drawing>`;
+}
+
+// ---------------- 그리기 개체 → DrawingML 묶음 (wpg:wgp) ----------------
+
+/**
+ * SVG 경로(절대 좌표의 M·L·H·V·C·A·Z) → DrawingML 경로 명령. 호(A)는 3차 베지어로 바꾼다.
+ * 좌표는 EMU (경로 w·h 를 개체 크기의 EMU 로 두어 그대로 맞는다)
+ */
+function svgPathToDml(d: string): string {
+  const tok = d.match(/[MLHVCAZ]|-?\d*\.?\d+(?:e-?\d+)?/gi) || [];
+  let i = 0;
+  const num = () => parseFloat(tok[i++] || '0') || 0;
+  let out = '';
+  let cx = 0;
+  let cy = 0;
+  let sx = 0;
+  let sy = 0;
+  const pt = (x: number, y: number) => `<a:pt x="${emu(x)}" y="${emu(y)}"/>`;
+  let cmd = '';
+  let guard = 0;
+  while (i < tok.length && guard++ < 200000) {
+    if (/^[MLHVCAZ]$/i.test(tok[i])) cmd = tok[i++].toUpperCase();
+    if (cmd === 'M') {
+      cx = num();
+      cy = num();
+      sx = cx;
+      sy = cy;
+      out += `<a:moveTo>${pt(cx, cy)}</a:moveTo>`;
+      cmd = 'L';
+    } else if (cmd === 'L') {
+      cx = num();
+      cy = num();
+      out += `<a:lnTo>${pt(cx, cy)}</a:lnTo>`;
+    } else if (cmd === 'H') {
+      cx = num();
+      out += `<a:lnTo>${pt(cx, cy)}</a:lnTo>`;
+    } else if (cmd === 'V') {
+      cy = num();
+      out += `<a:lnTo>${pt(cx, cy)}</a:lnTo>`;
+    } else if (cmd === 'C') {
+      const x1 = num(), y1 = num(), x2 = num(), y2 = num();
+      cx = num();
+      cy = num();
+      out += `<a:cubicBezTo>${pt(x1, y1)}${pt(x2, y2)}${pt(cx, cy)}</a:cubicBezTo>`;
+    } else if (cmd === 'A') {
+      const rx = num(), ry = num(), rot = num(), large = num(), sweep = num(), x = num(), y = num();
+      out += arcToBeziers(cx, cy, rx, ry, rot, !!large, !!sweep, x, y).map((c) => `<a:cubicBezTo>${pt(c[0], c[1])}${pt(c[2], c[3])}${pt(c[4], c[5])}</a:cubicBezTo>`).join('');
+      cx = x;
+      cy = y;
+    } else if (cmd === 'Z') {
+      out += '<a:close/>';
+      cx = sx;
+      cy = sy;
+      cmd = '';
+    } else i++;
+  }
+  return out;
+}
+
+/** SVG 의 타원 호 → 3차 베지어들 (SVG 명세의 끝점 → 중심 바꾸기) */
+function arcToBeziers(x1: number, y1: number, rx: number, ry: number, rotDeg: number, large: boolean, sweep: boolean, x2: number, y2: number): number[][] {
+  if (!(rx > 0 && ry > 0) || (x1 === x2 && y1 === y2)) return [[x1, y1, x2, y2, x2, y2]];
+  const phi = (rotDeg * Math.PI) / 180;
+  const cos = Math.cos(phi);
+  const sin = Math.sin(phi);
+  const dx = (x1 - x2) / 2;
+  const dy = (y1 - y2) / 2;
+  const xp = cos * dx + sin * dy;
+  const yp = -sin * dx + cos * dy;
+  const lam = (xp * xp) / (rx * rx) + (yp * yp) / (ry * ry);
+  if (lam > 1) {
+    rx *= Math.sqrt(lam);
+    ry *= Math.sqrt(lam);
+  }
+  const sign = large === sweep ? -1 : 1;
+  const num = rx * rx * ry * ry - rx * rx * yp * yp - ry * ry * xp * xp;
+  const co = sign * Math.sqrt(Math.max(0, num / (rx * rx * yp * yp + ry * ry * xp * xp)));
+  const cxp = (co * rx * yp) / ry;
+  const cyp = (-co * ry * xp) / rx;
+  const cxx = cos * cxp - sin * cyp + (x1 + x2) / 2;
+  const cyy = sin * cxp + cos * cyp + (y1 + y2) / 2;
+  const ang = (ux: number, uy: number, vx: number, vy: number) => Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+  const t1 = ang(1, 0, (xp - cxp) / rx, (yp - cyp) / ry);
+  let dt = ang((xp - cxp) / rx, (yp - cyp) / ry, (-xp - cxp) / rx, (-yp - cyp) / ry);
+  if (!sweep && dt > 0) dt -= 2 * Math.PI;
+  else if (sweep && dt < 0) dt += 2 * Math.PI;
+  const n = Math.max(1, Math.ceil(Math.abs(dt) / (Math.PI / 2)));
+  const step = dt / n;
+  const k = (4 / 3) * Math.tan(step / 4);
+  const P = (t: number) => [cxx + rx * Math.cos(t) * cos - ry * Math.sin(t) * sin, cyy + rx * Math.cos(t) * sin + ry * Math.sin(t) * cos];
+  const D = (t: number) => [-rx * Math.sin(t) * cos - ry * Math.cos(t) * sin, -rx * Math.sin(t) * sin + ry * Math.cos(t) * cos];
+  const out: number[][] = [];
+  for (let s = 0; s < n; s++) {
+    const a = t1 + s * step;
+    const b = a + step;
+    const [p0x, p0y] = P(a);
+    const [d0x, d0y] = D(a);
+    const [p3x, p3y] = P(b);
+    const [d3x, d3y] = D(b);
+    out.push([p0x + k * d0x, p0y + k * d0y, p3x - k * d3x, p3y - k * d3y, p3x, p3y]);
+  }
+  return out;
+}
+
+/** 조각의 행렬 → 상자(틀 좌표 px)·돌림(도)·뒤집기. 기울임은 버린다 */
+function itemBox(it: ShapeItem) {
+  const [a, b, c, d, e, f] = it.m;
+  const sx = Math.hypot(a, b) || 1;
+  const sy = Math.hypot(c, d) || 1;
+  const flip = a * d - b * c < 0;
+  const rot = (Math.atan2(b, a) * 180) / Math.PI;
+  const w = it.w * sx;
+  const h = it.h * sy;
+  const cx = a * (it.w / 2) + c * (it.h / 2) + e;
+  const cy = b * (it.w / 2) + d * (it.h / 2) + f;
+  return { x: cx - w / 2, y: cy - h / 2, w, h, rot: ((rot % 360) + 360) % 360, flipV: flip };
+}
+
+const DML_DASH: Record<string, string> = { DASH: 'dash', DOT: 'sysDot', DASH_DOT: 'dashDot', DASH_DOT_DOT: 'lgDashDotDot', LONG_DASH: 'lgDash', CIRCLE: 'sysDot' };
+const DML_ARROW = (s: string | undefined, filled: boolean | undefined): string | null =>
+  !s ? null : s === 'ARROW' ? (filled === false ? 'arrow' : 'triangle') : s === 'SPEAR' || s === 'CONCAVE_ARROW' ? 'stealth' : s === 'DIAMOND' ? 'diamond' : s === 'CIRCLE' ? 'oval' : 'triangle';
+const arrowSize = (z: [number, number] | undefined, k: 0 | 1) => ['sm', 'med', 'lg'][Math.max(0, Math.min(2, Math.round(z ? z[k] : 1)))];
+
+/** 조각의 채우기(그림·그러데이션·단색)·선 */
+function itemLook(ctx: Ctx, it: ShapeItem, filled: boolean): string {
+  let fill = '<a:noFill/>';
+  const fc = normColor(it.fc || '');
+  const pic = filled && it.fi ? ctx.images.get(it.fi) : null;
+  if (pic) fill = `<a:blipFill><a:blip r:embed="${pic.rid}"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>`;
+  else if (filled && it.fg && Array.isArray(it.fg.c) && it.fg.c.length >= 2) {
+    const cs = it.fg.c.map((c) => normColor(c)).filter((c): c is string => !!c);
+    const stops = cs.map((c, i) => `<a:gs pos="${Math.round((i / Math.max(1, cs.length - 1)) * 100000)}"><a:srgbClr val="${c.slice(1)}"/></a:gs>`).join('');
+    const ang = ((((90 - (+it.fg.a || 0)) % 360) + 360) % 360) * 60000;
+    fill = `<a:gradFill rotWithShape="1"><a:gsLst>${stops}</a:gsLst>${it.fg.t === 'LINEAR' ? `<a:lin ang="${ang}" scaled="0"/>` : '<a:path path="circle"><a:fillToRect l="50000" t="50000" r="50000" b="50000"/></a:path>'}</a:gradFill>`;
+  } else if (filled && fc) {
+    const alpha = it.al && it.al > 0 ? `<a:alpha val="${Math.round(Math.max(0, 1 - it.al) * 100000)}"/>` : '';
+    fill = `<a:solidFill><a:srgbClr val="${fc.slice(1)}">${alpha}</a:srgbClr></a:solidFill>`;
+  }
+  const sc = normColor(it.sc || '');
+  let ln = '<a:ln><a:noFill/></a:ln>';
+  if (sc) {
+    const dash = it.sd && DML_DASH[it.sd] ? `<a:prstDash val="${DML_DASH[it.sd]}"/>` : '';
+    const head = DML_ARROW(it.hs, it.hf);
+    const tail = DML_ARROW(it.ts, it.tf);
+    ln =
+      `<a:ln w="${emu(Math.max(0.25, it.sw || 1))}"><a:solidFill><a:srgbClr val="${sc.slice(1)}"/></a:solidFill>${dash}` +
+      `${head ? `<a:headEnd type="${head}" w="${arrowSize(it.hz, 0)}" len="${arrowSize(it.hz, 1)}"/>` : ''}${tail ? `<a:tailEnd type="${tail}" w="${arrowSize(it.tz, 0)}" len="${arrowSize(it.tz, 1)}"/>` : ''}</a:ln>`;
+  }
+  return fill + ln;
+}
+
+/** 묶음 안의 조각 하나 → wps:wsp (도형·글) 또는 pic:pic (그림). 쓸 수 없으면 '' */
+function itemXml(ctx: Ctx, it: ShapeItem): string {
+  const box = itemBox(it);
+  if (!(box.w > 0.01 || box.h > 0.01)) return '';
+  const id = ctx.docPrId++;
+  const xfrm = `<a:xfrm${box.rot > 0.01 ? ` rot="${Math.round(box.rot * 60000)}"` : ''}${box.flipV ? ' flipV="1"' : ''}><a:off x="${emu(box.x)}" y="${emu(box.y)}"/><a:ext cx="${emu(Math.max(0.01, box.w))}" cy="${emu(Math.max(0.01, box.h))}"/></a:xfrm>`;
+  if (it.k === 'img') {
+    const info = it.src ? ctx.images.get(it.src) : null;
+    if (!info) return '';
+    const c = it.crop;
+    return (
+      `<pic:pic><pic:nvPicPr><pic:cNvPr id="${id}" name="${info.name}"/><pic:cNvPicPr/></pic:nvPicPr>` +
+      `<pic:blipFill><a:blip r:embed="${info.rid}"/>${c ? `<a:srcRect l="${Math.round(c.l * 100000)}" t="${Math.round(c.t * 100000)}" r="${Math.round(c.r * 100000)}" b="${Math.round(c.b * 100000)}"/>` : ''}<a:stretch><a:fillRect/></a:stretch></pic:blipFill>` +
+      `<pic:spPr>${xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>`
+    );
+  }
+  if (it.k === 'text' || it.k === 'art') {
+    // 도형 안의 글: 안 보이는 글상자. 글맵시는 그 글자를 글상자로
+    const blocks = it.k === 'text' ? flattenContent(it.content || []) : flattenContent([{ type: 'paragraph', attrs: { textAlign: 'center' }, content: it.text ? [{ type: 'text', text: it.text }] : [] }]);
+    const waiting = ctx.anchors;
+    ctx.anchors = [];
+    const inner = blocksXml(ctx, blocks) || '<w:p/>';
+    ctx.anchors = waiting;
+    const pad = it.pad && it.pad.length === 4 ? it.pad : [0, 0, 0, 0];
+    const anchor = it.va === 'middle' ? 'ctr' : it.va === 'bottom' ? 'b' : 't';
+    return (
+      `<wps:wsp><wps:cNvPr id="${id}" name="글 ${id}"/><wps:cNvSpPr txBox="1"/><wps:spPr>${xfrm}<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr>` +
+      `<wps:txbx><w:txbxContent>${inner}</w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz" wrap="square" lIns="${emu(pad[3])}" tIns="${emu(pad[0])}" rIns="${emu(pad[1])}" bIns="${emu(pad[2])}" anchor="${anchor}" anchorCtr="0"><a:noAutofit/></wps:bodyPr></wps:wsp>`
+    );
+  }
+  // 도형: 개체 좌표의 경로를 그대로 (경로 크기 = 개체 크기). 화면(SVG)처럼 닫히지 않은 다각형·곡선·호도 칠한다 (선만 칠하지 않는다)
+  const d = pathOf(it);
+  if (!d) return '';
+  const filled = it.k !== 'line';
+  const geom = `<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="r" b="b"/><a:pathLst><a:path w="${emu(Math.max(0.01, it.w))}" h="${emu(Math.max(0.01, it.h))}"${filled ? '' : ' fill="none"'}>${svgPathToDml(d)}</a:path></a:pathLst></a:custGeom>`;
+  // 개체 상자 크기로 경로를 맞추므로 상자는 개체 크기에 행렬의 배율을 곱한 것 (itemBox)
+  return `<wps:wsp><wps:cNvPr id="${id}" name="도형 ${id}"/><wps:cNvSpPr/><wps:spPr>${xfrm}${geom}${itemLook(ctx, it, filled)}</wps:spPr><wps:bodyPr/></wps:wsp>`;
+}
+
+/** 그리기 개체 → 묶음 그래픽 (a:graphic). 조각이 없으면 '' */
+function shapeGraphic(ctx: Ctx, it: Extract<FlatInline, { type: 'shape' }>): string {
+  const cx = emu(it.width);
+  const cy = emu(it.height);
+  const kids = it.d.items.map((x) => itemXml(ctx, x)).join('');
+  if (!kids) return '';
+  return (
+    `<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:cNvGrpSpPr/>` +
+    `<wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/><a:chOff x="0" y="0"/><a:chExt cx="${cx}" cy="${cy}"/></a:xfrm></wpg:grpSpPr>${kids}</wpg:wgp></a:graphicData></a:graphic>`
+  );
+}
+
+/** 그리기 개체 하나 (떠 있으면 wp:anchor, 아니면 글줄 안 wp:inline) */
+function shapeDrawing(ctx: Ctx, it: Extract<FlatInline, { type: 'shape' }>, paraLeft: number): string {
+  const cx = emu(Math.max(1, it.width));
+  const cy = emu(Math.max(1, it.height));
+  const id = ctx.docPrId++;
+  const g = shapeGraphic(ctx, it);
+  if (!g) return '';
+  if (it.float) return `<w:drawing>${anchorHead(ctx, it.float, cx, cy, it.float.x + paraLeft, id, `그리기 ${id}`)}${g}</wp:anchor></w:drawing>`;
+  return `<w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="${id}" name="그리기 ${id}"/><wp:cNvGraphicFramePr/>${g}</wp:inline></w:drawing>`;
+}
+
+/** 떠 있는 글상자 → 글상자 도형(wps:wsp) 을 담은 글자 묶음 (뒤 문단에 매단다) */
+function textBoxRun(ctx: Ctx, b: FlatBox): string {
+  const fl = b.float!;
+  const w = b.width && b.width > 0 ? b.width : 200;
+  const h = b.height && b.height > 0 ? b.height : 100;
+  const cx = emu(w);
+  const cy = emu(h);
+  const id = ctx.docPrId++;
+  // 안의 문단은 따로 쓴다 (그 안에서 기다리는 글상자와 섞이지 않게)
+  const waiting = ctx.anchors;
+  ctx.anchors = [];
+  const inner = blocksXml(ctx, b.blocks) || '<w:p/>';
+  ctx.anchors = waiting;
+  const r = String(b.radius || '');
+  const geom = r === '50%' ? 'ellipse' : /px$/.test(r) && parseFloat(r) > 0 ? 'roundRect' : 'rect';
+  const av = geom === 'roundRect' ? `<a:gd name="adj" fmla="val ${Math.min(50000, Math.round((parseFloat(r) / Math.max(1, Math.min(w, h))) * 100000))}"/>` : '';
+  const bg = normColor(b.bg || '');
+  const fill = bg ? `<a:solidFill><a:srgbClr val="${bg.slice(1)}"/></a:solidFill>` : '<a:noFill/>';
+  const bc = normColor(b.borderColor || '');
+  const dash = b.borderDash && /DASH|DOT/i.test(b.borderDash) ? `<a:prstDash val="${/DOT/i.test(b.borderDash) && !/DASH/i.test(b.borderDash) ? 'sysDot' : 'dash'}"/>` : '';
+  const ln = bc ? `<a:ln w="${emu(b.borderWidth || 1)}"><a:solidFill><a:srgbClr val="${bc.slice(1)}"/></a:solidFill>${dash}</a:ln>` : '<a:ln><a:noFill/></a:ln>';
+  let pad = b.padding && b.padding.length === 4 ? b.padding : [4.8, 9.6, 4.8, 9.6];
+  // 타원: Word 는 글 영역을 타원 안에 든 사각형으로 줄이므로, 그만큼(읽을 때 더한 몫)을 뺀다
+  if (geom === 'ellipse') {
+    const k = (1 - Math.SQRT1_2) / 2;
+    pad = [pad[0] - h * k, pad[1] - w * k, pad[2] - h * k, pad[3] - w * k].map((v) => Math.max(0, Math.round(v * 100) / 100));
+  }
+  const anchor = b.valign === 'middle' ? 'ctr' : b.valign === 'bottom' ? 'b' : 't';
+  return (
+    `<w:r><w:drawing>${anchorHead(ctx, fl, cx, cy, fl.x, id, `글상자 ${id}`)}` +
+    `<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/>` +
+    `<wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="${geom}"><a:avLst>${av}</a:avLst></a:prstGeom>${fill}${ln}</wps:spPr>` +
+    `<wps:txbx><w:txbxContent>${inner}</w:txbxContent></wps:txbx>` +
+    `<wps:bodyPr rot="0" vert="horz" wrap="square" lIns="${emu(pad[3])}" tIns="${emu(pad[0])}" rIns="${emu(pad[1])}" bIns="${emu(pad[2])}" anchor="${anchor}" anchorCtr="0"><a:noAutofit/></wps:bodyPr>` +
+    `</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`
   );
 }
 
@@ -195,6 +489,10 @@ function paragraphXml(ctx: Ctx, p: FlatPara): string {
   let x = '<w:p>' + pPr(p.style, p.pageBreakBefore, p.inlines.length ? undefined : p.baseChar, (firstText && firstText.type === 'text' ? firstText.style.font : '') || p.baseChar.font);
   // 단 나누기
   if (p.columnBreakBefore) x += '<w:r><w:br w:type="column"/></w:r>';
+  // 이 문단 앞에 놓였던 떠 있는 글상자들 (자리는 이 문단 기준)
+  if (ctx.anchors.length) x += ctx.anchors.splice(0).join('');
+  /** 문단 상자 왼쪽 (단 왼쪽 기준 px): 떠 있는 그림의 x 는 이것을 기준으로 적혀 있다 */
+  const paraLeft = ((p.style.indentLeft || 0) + Math.max(0, -(p.style.textIndent || 0))) * (96 / 72);
   let linkOpen: string | null = null;
   const closeLink = () => {
     if (linkOpen) {
@@ -216,7 +514,11 @@ function paragraphXml(ctx: Ctx, p: FlatPara): string {
     else if (it.type === 'break') x += '<w:r><w:br/></w:r>';
     else if (it.type === 'image') {
       const info = ctx.images.get(it.src);
-      if (info) x += `<w:r>${rPr(it.style)}${drawing(ctx, info, it.width, it.height, it.crop)}</w:r>`;
+      if (info) x += `<w:r>${rPr(it.style)}${it.float ? anchoredPicture(ctx, info, it, paraLeft) : drawing(ctx, info, it.width, it.height, it.crop)}</w:r>`;
+    } else if (it.type === 'shape') {
+      // 그리기 개체: DrawingML 묶음 (도형 경로·채우기·선·화살표, 안의 글, 그림)
+      const dr = shapeDrawing(ctx, it, paraLeft);
+      if (dr) x += `<w:r>${rPr(it.style)}${dr}</w:r>`;
     } else if (it.type === 'footnote') {
       ctx.footnotes.push(it.text);
       const id = ctx.footnotes.length + 1;
@@ -270,7 +572,7 @@ function tableXml(ctx: Ctx, t: FlatTable): string {
       return p + '</w:tcPr>';
     };
     for (const c of row) {
-      let inner = c.blocks.map((b) => blockXml(ctx, b)).join('');
+      let inner = blocksXml(ctx, c.blocks);
       if (!c.blocks.length || c.blocks[c.blocks.length - 1].kind === 'table') inner += '<w:p/>';
       entries.push({ col: c.col, xml: `<w:tc>${tcPr(c, c.rowspan > 1 ? '<w:vMerge w:val="restart"/>' : '')}${inner}</w:tc>` });
     }
@@ -289,14 +591,37 @@ function tableXml(ctx: Ctx, t: FlatTable): string {
 }
 
 function blockXml(ctx: Ctx, b: FlatBlock): string {
-  if (b.kind === 'box') return b.blocks.map((x) => blockXml(ctx, x)).join('');
+  if (b.kind === 'box') {
+    // 떠 있는 글상자는 뒤 문단에 매단다. 떠 있지 않은 상자는 안의 문단만 (Word 의 글상자는 떠 있는 것뿐)
+    if (b.float) {
+      ctx.anchors.push(textBoxRun(ctx, b));
+      return '';
+    }
+    return blocksXml(ctx, b.blocks);
+  }
   return b.kind === 'para' ? paragraphXml(ctx, b) : tableXml(ctx, b);
+}
+
+/** 블록들. 끝까지 매달 문단이 없던 떠 있는 글상자는 빈 문단에 */
+function blocksXml(ctx: Ctx, blocks: FlatBlock[]): string {
+  let x = blocks.map((b) => blockXml(ctx, b)).join('');
+  if (ctx.anchors.length) x += '<w:p>' + ctx.anchors.splice(0).join('') + '</w:p>';
+  return x;
 }
 
 function collectImages(blocks: FlatBlock[], out: Set<string>) {
   for (const b of blocks) {
     if (b.kind === 'para') {
-      for (const i of b.inlines) if (i.type === 'image' && i.src) out.add(i.src);
+      for (const i of b.inlines) {
+        if (i.type === 'image' && i.src) out.add(i.src);
+        // 그리기 개체 안의 그림과 글 속 그림
+        else if (i.type === 'shape')
+          for (const it of i.d.items) {
+            if (it.k === 'img' && it.src) out.add(it.src);
+            else if (it.k === 'text' && it.content) collectImages(flattenContent(it.content), out);
+            if (it.fi) out.add(it.fi);
+          }
+      }
     } else if (b.kind === 'box') collectImages(b.blocks, out);
     else for (const row of b.cells) for (const c of row) collectImages(c.blocks, out);
   }
@@ -416,7 +741,34 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
 
   const commentData = s.comments || {};
   collectComments(ctx, blocks, commentData);
-  const body = blocks.map((b) => blockXml(ctx, b)).join('');
+  // 본문. 구역 나누기(구역마다 용지)는 앞 구역의 설정을 그 구역의 마지막 문단에 단다 (머리말 참조가 정해진 뒤에: 아래)
+  const parts: { xml: string; para: boolean }[] = [];
+  const sectionAt: { index: number; page: PageSetup }[] = [];
+  for (const b of blocks) {
+    if (b.sectionPageBefore) {
+      sectionAt.push({ index: parts.length, page: b.sectionPageBefore });
+      // 새 구역은 새 쪽에서 시작한다 (쪽 나누기를 따로 두면 빈 쪽이 생긴다)
+      b.pageBreakBefore = false;
+    }
+    parts.push({ xml: blockXml(ctx, b), para: b.kind === 'para' });
+  }
+  if (ctx.anchors.length) parts.push({ xml: '<w:p>' + ctx.anchors.splice(0).join('') + '</w:p>', para: true });
+  // 쪽 배경 (색·그림): Word 는 settings 의 displayBackgroundShape 가 있어야 보인다
+  const pbd = s.pageBorder;
+  const bgColor = pbd ? normColor(pbd.bg || '') : null;
+  let bgRid: string | null = null;
+  if (pbd?.image) {
+    const img = await prepareImage(pbd.image);
+    if (img) {
+      const name = `background.${img.ext}`;
+      ctx.media.push({ path: `word/media/${name}`, bytes: img.bytes, ext: img.ext });
+      bgRid = ctx.addRel('image', `media/${name}`);
+    }
+  }
+  const background =
+    bgColor || bgRid
+      ? `<w:background w:color="${bgColor ? bgColor.slice(1) : 'FFFFFF'}">${bgRid ? `<v:background id="_x0000_s1025" o:bwmode="white" fillcolor="${bgColor || '#ffffff'}"><v:fill r:id="${bgRid}" o:title="" type="${String(pbd?.imageMode || '').startsWith('TILE') ? 'tile' : 'frame'}"/></v:background>` : ''}</w:background>`
+      : '';
 
   // 머리말/꼬리말: 기본(홀수 쪽)·첫 쪽·짝수 쪽. 모양을 갖춘 것(content)은 본문처럼 쓰고, 글자뿐인 것은 한 문단으로 쓴다
   const pfmt = s.pageNumber.format === 'roman' ? ' \\* roman' : s.pageNumber.format === 'ROMAN' ? ' \\* ROMAN' : '';
@@ -442,7 +794,7 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
         const img = ctx.images.get(src);
         hc.images.set(src, img ? { ...img, rid: hc.addRel('image', `media/${img.name}`) } : null);
       }
-      inner = pageFields(rich.map((b) => blockXml(hc, b)).join(''), pfmt);
+      inner = pageFields(blocksXml(hc, rich), pfmt);
     } else if (def?.text.trim()) inner = hfParagraph(def.text, def.align, pfmt, kind);
     if (pageNum) inner += hfParagraph(pageText, numH, pfmt, kind);
     if (!inner) return;
@@ -462,17 +814,37 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
     if (titlePg) hfPart(kind, 'first', def.first || (s.hideFirst?.[kind] ? null : def), num && !s.hideFirst?.pageNum);
     if (evenOdd) hfPart(kind, 'even', def.even || (def.oddOnly ? null : def), num);
   }
-  const top = mmToTwip(pg.marginTop + pg.marginHeader);
-  const bottom = mmToTwip(pg.marginBottom + pg.marginFooter);
-  const sectPr =
-    `<w:sectPr>${sectRefs}<w:pgSz w:w="${mmToTwip(pageW)}" w:h="${mmToTwip(pageH)}"${pg.landscape ? ' w:orient="landscape"' : ''}/>` +
-    `<w:pgMar w:top="${top}" w:right="${mmToTwip(pg.marginRight)}" w:bottom="${bottom}" w:left="${mmToTwip(pg.marginLeft)}" w:header="${mmToTwip(pg.marginTop)}" w:footer="${mmToTwip(pg.marginBottom)}" w:gutter="${mmToTwip(pg.gutter)}"/>` +
-    // sectPr 자식 차례 (스키마): … pgMar, lnNumType, pgNumType, cols, titlePg, docGrid
-    lnNumXml(s.lineNumbers) +
-    (s.pageNumber.start !== 1 ? `<w:pgNumType w:start="${s.pageNumber.start}"/>` : '') +
-    `${colsXml(pg.columns)}${titlePg ? '<w:titlePg/>' : ''}<w:docGrid w:linePitch="360"/></w:sectPr>`;
+  /** 구역 설정 하나. 첫 구역에만 시작 쪽 번호와 '첫 쪽을 다르게'를 둔다 */
+  const sectXml = (p: PageSetup, first: boolean) => {
+    const pw = p.landscape ? Math.max(p.width, p.height) : p.width;
+    const ph = p.landscape ? Math.min(p.width, p.height) : p.height;
+    return (
+      `<w:sectPr>${sectRefs}<w:pgSz w:w="${mmToTwip(pw)}" w:h="${mmToTwip(ph)}"${p.landscape ? ' w:orient="landscape"' : ''}/>` +
+      `<w:pgMar w:top="${mmToTwip(p.marginTop + p.marginHeader)}" w:right="${mmToTwip(p.marginRight)}" w:bottom="${mmToTwip(p.marginBottom + p.marginFooter)}" w:left="${mmToTwip(p.marginLeft)}" w:header="${mmToTwip(p.marginTop)}" w:footer="${mmToTwip(p.marginBottom)}" w:gutter="${mmToTwip(p.gutter)}"/>` +
+      // sectPr 자식 차례 (스키마): … pgMar, pgBorders, lnNumType, pgNumType, cols, titlePg, docGrid
+      pgBordersXml(pbd) +
+      lnNumXml(s.lineNumbers) +
+      (first && s.pageNumber.start !== 1 ? `<w:pgNumType w:start="${s.pageNumber.start}"/>` : '') +
+      `${colsXml(p.columns)}${first && titlePg ? '<w:titlePg/>' : ''}<w:docGrid w:linePitch="360"/></w:sectPr>`
+    );
+  };
+  // 구역마다의 용지: 첫 구역은 문서의 용지, 그 뒤는 구역 나누기에 담긴 것
+  const pages = [pg, ...sectionAt.map((x) => x.page)];
+  for (let k = sectionAt.length - 1; k >= 0; k--) {
+    const at = sectionAt[k].index;
+    const sect = sectXml(pages[k], k === 0);
+    // 앞 구역의 마지막 문단에 단다 (문단 속성의 끝). 바로 앞이 표이거나 문단이 없으면 빈 문단을 넣는다
+    let j = at - 1;
+    while (j >= 0 && !parts[j].xml) j--;
+    const prev = j >= 0 ? parts[j] : null;
+    const close = prev && prev.para ? prev.xml.indexOf('</w:pPr>') : -1;
+    if (prev && close >= 0 && prev.xml.startsWith('<w:p><w:pPr>')) prev.xml = prev.xml.slice(0, close) + sect + prev.xml.slice(close);
+    else parts.splice(at, 0, { xml: `<w:p><w:pPr>${sect}</w:pPr></w:p>`, para: true });
+  }
+  const body = parts.map((x) => x.xml).join('');
+  const sectPr = sectXml(pages[pages.length - 1], pages.length === 1);
 
-  const documentXml = DECL + `<w:document ${W_NS}><w:body>${body}${sectPr}</w:body></w:document>`;
+  const documentXml = DECL + `<w:document ${W_NS}>${background}<w:body>${body}${sectPr}</w:body></w:document>`;
 
   const hasFootnotes = ctx.footnotes.length > 0;
   if (hasFootnotes) {
@@ -517,7 +889,7 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
   const defaultTab = Math.round((tabbed(blocks) || 40) * 20);
   const settingsXml =
     DECL +
-    `<w:settings ${W_NS}><w:zoom w:percent="100"/><w:defaultTabStop w:val="${defaultTab}"/>${evenOdd ? '<w:evenAndOddHeaders/>' : ''}<w:characterSpacingControl w:val="doNotCompress"/>` +
+    `<w:settings ${W_NS}><w:zoom w:percent="100"/>${background ? '<w:displayBackgroundShape/>' : ''}<w:defaultTabStop w:val="${defaultTab}"/>${evenOdd ? '<w:evenAndOddHeaders/>' : ''}<w:characterSpacingControl w:val="doNotCompress"/>` +
     (hasFootnotes ? '<w:footnotePr><w:footnote w:id="0"/><w:footnote w:id="1"/></w:footnotePr>' : '') +
     // Kite 는 문단의 위 간격과 앞 문단의 아래 간격을 더해 그린다: Word 도 그렇게 하도록 적는다 (없으면 큰 쪽만 둔다)
     `<w:compat><w:doNotUseHTMLParagraphAutoSpacing/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>`;
@@ -570,6 +942,27 @@ function lnNumXml(ln: LineNumbering | null | undefined): string {
   if (!ln) return '';
   const restart = ln.restart === 'continue' ? 'continuous' : ln.restart === 'section' ? 'newSection' : 'newPage';
   return `<w:lnNumType w:countBy="${Math.max(1, Math.round(+ln.countBy || 1))}" w:start="${Math.max(0, Math.round(+ln.start || 1) - 1)}" w:distance="${mmToTwip(Math.max(0, +ln.distance || 0))}" w:restart="${restart}"/>`;
+}
+
+/** 쪽 테두리 (선 종류·굵기·색, 본문 또는 종이 기준 간격) */
+function pgBordersXml(pb: PageBorder | null | undefined): string {
+  if (!pb || !pb.sides) return '';
+  const names = { t: 'top', l: 'left', b: 'bottom', r: 'right' } as const;
+  const VAL: Record<string, string> = { solid: 'single', dashed: 'dashed', dotted: 'dotted', double: 'double' };
+  const off = Array.isArray(pb.offset) ? pb.offset : [0, 0, 0, 0];
+  const at = { l: 0, r: 1, t: 2, b: 3 } as const;
+  const PT = 72 / 25.4;
+  let x = '';
+  for (const k of ['t', 'l', 'b', 'r'] as const) {
+    const side = pb.sides[k];
+    if (!side) continue;
+    const sz = Math.max(2, Math.min(96, Math.round((+side.w || 0.12) * PT * 8)));
+    const space = Math.max(0, Math.min(31, Math.round((+off[at[k]] || 0) * PT)));
+    x += `<w:${names[k]} w:val="${VAL[side.s] || 'single'}" w:sz="${sz}" w:space="${space}" w:color="${hex(side.c)}"/>`;
+  }
+  if (!x) return '';
+  const disp = pb.borderOn === 'first' ? ' w:display="firstPage"' : pb.borderOn === 'notFirst' ? ' w:display="notFirstPage"' : '';
+  return `<w:pgBorders w:offsetFrom="${pb.body ? 'text' : 'page'}"${disp}>${x}</w:pgBorders>`;
 }
 
 function colsXml(c: Columns | null | undefined): string {

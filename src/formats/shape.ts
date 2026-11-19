@@ -359,8 +359,8 @@ function fillOf(doc: Document, defs: SVGElement, it: ShapeItem, tf: string | nul
   return it.fc || 'none';
 }
 
-/** 개체 좌표의 도형 경로 */
-function pathOf(it: ShapeItem): string {
+/** 개체 좌표의 도형 경로 (SVG 경로: 절대 좌표의 M·L·H·V·C·A·Z) */
+export function pathOf(it: ShapeItem): string {
   const p = it.p || [];
   switch (it.k) {
     case 'line':
