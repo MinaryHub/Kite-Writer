@@ -811,6 +811,14 @@ p[data-cell-tail]:is(:empty, :has(> br:only-child)):not(.k-caret-here) {
   display: inline-block;
   width: 1px;
 }
+/* Word 의 틀·첫 글자 장식: 높이 없는 자리 표시 안의 CSS float (뒤 문단의 글줄이 옆으로 흐른다) */
+.kdoc-content .k-cfloat {
+  position: relative;
+  z-index: 1;
+}
+.kdoc-content .k-cfloat > .k-textbox {
+  max-width: none;
+}
 /* 떠 있는 글상자: 높이 없는 자리 표시 안에서 제 위치에 뜬다 (뒤따르는 문단 상자의 위쪽이 기준) */
 .kdoc-content .k-float-anchor {
   position: relative;
@@ -846,6 +854,8 @@ p[data-cell-tail]:is(:empty, :has(> br:only-child)):not(.k-caret-here) {
   border-right: var(--pb-r, none);
   border-top: var(--pb-t, none);
   border-bottom: var(--pb-b, none);
+  background: var(--pb-bg, none);
+  z-index: var(--pb-z, auto);
   pointer-events: none;
 }
 /* 이어진 문단의 테두리는 한 상자로: 사이의 위·아래 선을 그리지 않는다 (값이 다른 이웃 묶음끼리는 잇지 않는다) */

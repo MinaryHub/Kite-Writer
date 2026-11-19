@@ -240,6 +240,9 @@ export const ParagraphFormat = Extension.create({
                 ob = pb.a[1] < 0 ? '0px' : `calc(${pb.a[1]}px - ${sa}pt)`;
               }
               st.push(`--pb-ol: ${o[0]}px`, `--pb-or: ${o[1]}px`, `--pb-ot: ${ot}`, `--pb-ob: ${ob}`);
+              // Word 의 테두리 안 바탕: 테두리 상자를 글 뒤에 칠한다 (문단이 제 쌓임 맥락을 가져 글 아래·문단 위에 놓인다)
+              const bg = pb.a ? normColor(attrs.paraBg) : null;
+              if (bg) st.push(`--pb-bg: ${bg}`, '--pb-z: -1', 'isolation: isolate');
               return { 'data-pb': JSON.stringify(pb), ...(pb.c ? { 'data-pb-join': pb.c === 2 ? '2' : '1' } : {}), style: st.join('; ') };
             },
           },
@@ -248,6 +251,8 @@ export const ParagraphFormat = Extension.create({
             parseHTML: (el: HTMLElement) => normColor(el.getAttribute('data-bg')),
             renderHTML: (attrs: Record<string, any>) => {
               const c = normColor(attrs.paraBg);
+              // Word 의 테두리 안 바탕: 문단 간격을 빼고 선 안쪽만 칠한다 (테두리 상자가 칠한다: paraBorder)
+              if (c && cleanParaBorder(attrs.paraBorder)?.a) return { 'data-bg': c };
               return c ? { 'data-bg': c, style: `background-color: ${c}` } : {};
             },
           },

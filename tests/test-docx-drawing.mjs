@@ -233,5 +233,48 @@ const shapes = (doc) => find(doc.content.content, (n) => n.type === 'shape');
   ok(/☒ 켜짐☐ 꺼짐/.test(texts), '양식 확인란: 켜짐 ☒ · 꺼짐 ☐', texts);
 }
 
+// ---- 8. 틀 (w:framePr): 꼬리말의 오른쪽 쪽 번호, 본문 왼쪽 틀(글이 옆으로), 종이 기준 틀, 첫 글자 장식, 저장 ----
+{
+  const pp = (inner, ppr) => `<w:p><w:pPr>${ppr}</w:pPr>${inner}</w:p>`;
+  const page = `<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="18"/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="18"/></w:rPr><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+  const parts = { footer1: pp(page, '<w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="margin" w:xAlign="right" w:y="1"/>') + pp(t('꼬리말 글'), '<w:ind w:right="360"/><w:jc w:val="center"/>') };
+  const frame = '<w:framePr w:hSpace="180" w:wrap="around" w:vAnchor="text" w:hAnchor="text" w:y="1"/>';
+  const body =
+    pp(t('틀 첫 문단'), frame) +
+    pp(t('틀 둘째 문단'), frame) +
+    pp(t('곁 문단'), '<w:ind w:left="720" w:hanging="360"/>') +
+    pp(t('종이 기준 틀'), '<w:framePr w:w="2880" w:h="1440" w:hRule="exact" w:wrap="notBeside" w:vAnchor="page" w:hAnchor="page" w:x="1440" w:y="2880"/>') +
+    p(t('뒤 문단')) +
+    pp('<w:r><w:rPr><w:sz w:val="96"/></w:rPr><w:t>L</w:t></w:r>', '<w:framePr w:dropCap="drop" w:lines="3" w:wrap="around" w:vAnchor="text" w:hAnchor="text"/><w:spacing w:after="0" w:line="827" w:lineRule="exact"/>') +
+    p(t('orem ipsum 첫 글자 장식 뒤 글'));
+  const doc = await m.readDocx(await makeDocx({ body, parts, sect: '<w:footerReference w:type="default" r:id="r_footer1"/>' }));
+  const top = doc.content.content;
+  const kinds = top.map((n) => n.type + (n.type === 'textBox' ? '(' + n.content.length + ')' : ''));
+  ok(JSON.stringify(kinds) === JSON.stringify(['textBox(2)', 'paragraph', 'textBox(1)', 'paragraph', 'textBox(1)', 'paragraph']), '같은 틀 속성의 이웃 문단은 한 틀, 틀은 뒤 문단 앞의 떠 있는 글상자', JSON.stringify(kinds));
+  const f1 = top[0].attrs;
+  ok(f1.float.cf === 'l' && f1.float.y === 0.07 && f1.float.wrap?.s === 'r' && f1.float.wrap.d[1] === 12 && !f1.width && JSON.stringify(f1.padding) === '[0,0,0,0]', '본문 왼쪽 틀: 내용 폭, 글은 오른쪽으로 hSpace 만큼 떨어져 (CSS float)', JSON.stringify(f1));
+  // 곁 문단의 내어쓰기(18pt = 24px)만큼 비킬 자리를 넓힌다 (CSS 는 첫 줄을 틀 쪽으로 당긴다)
+  ok(f1.float.hg === 24, '곁 문단의 내어쓰기만큼 비킬 자리', JSON.stringify(f1.float));
+  const f2 = top[2].attrs;
+  // 종이 기준: x = 1 인치(종이 왼쪽) → 본문 왼쪽 기준 0, y = 2 인치(종이 위) → 본문 맨 위 기준 96px
+  ok(f2.width === 192 && f2.height === 96 && f2.float.x === 0 && f2.float.py === 96 && !f2.float.wrap, '종이 기준 틀: 크기·쪽 기준 자리 (옆을 비우는 notBeside 는 쪽 기준이라 비킴 없음)', JSON.stringify(f2));
+  const f3 = top[4].attrs;
+  ok(f3.float.cf === 'l' && f3.float.x === 0 && f3.float.y === 0 && f3.float.wrap?.s === 'r', '첫 글자 장식: 뒤 문단 맨 앞, 글이 오른쪽으로', JSON.stringify(f3));
+  const foot = doc.settings.footer.content;
+  const fb = foot[0];
+  ok(fb.type === 'textBox' && fb.attrs.float.ax === 'r' && fb.attrs.float.x === 0 && !fb.attrs.width && foot[1].type === 'paragraph', '꼬리말의 쪽 번호 틀: 오른쪽 여백 끝에 붙는 내용 폭 상자, 꼬리말 글은 그대로', JSON.stringify(fb.attrs));
+  const pn = fb.content[0].content[0];
+  ok(pn.text === '{{PAGE}}' && pn.marks?.some((k) => k.type === 'textStyle' && k.attrs.fontSize === 9 && /Arial/.test(k.attrs.fontFamily)), '쪽 번호 자리 글자는 필드 결과 글자의 모양', JSON.stringify(pn));
+
+  // 저장: 오른쪽 맞춤 틀은 오른쪽 맞춤, 크기를 정하지 않은 틀은 글에 맞춰 늘고 준다
+  const out = await m.writeDocx({ content: doc.content, settings: doc.settings, meta: {} });
+  const zip = await JSZip.loadAsync(out);
+  const dx = await zip.file('word/document.xml').async('string');
+  const ftrName = Object.keys(zip.files).find((n) => /^word\/footer\d*\.xml$/.test(n));
+  const fx = ftrName ? await zip.file(ftrName).async('string') : '';
+  ok(/<wp:positionH relativeFrom="margin"><wp:align>right<\/wp:align><\/wp:positionH>/.test(fx) && /wrap="none"[^>]*><a:spAutoFit\/>/.test(fx), '저장: 꼬리말 쪽 번호 틀 → 오른쪽 맞춤, 글에 맞춘 크기', fx.slice(0, 200));
+  ok(/<wps:bodyPr [^>]*wrap="none"[^>]*><a:spAutoFit\/>/.test(dx) && /<wp:wrapSquare wrapText="[a-zA-Z]+"/.test(dx), '저장: 본문 틀 → 글에 맞춘 크기의 글상자, 둘레 글 흐름', '');
+}
+
 console.log(failed ? `${failed}개 실패` : '모두 통과');
 process.exit(failed ? 1 : 0);

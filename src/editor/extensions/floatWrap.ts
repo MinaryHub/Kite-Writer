@@ -27,19 +27,24 @@ interface Zone {
   a: number;
   top: number;
   bottom: number;
+  /** 오른쪽 자리의 폭 (오른쪽 끝에 붙인 상자: 폭을 모르는 Word 의 틀). 있으면 a 대신 쓴다 */
+  rw?: number;
 }
 
 function zoneOf(n: PMNode): Zone | null {
   const fl = floatOf(n.attrs.float);
-  // 쪽 기준 개체(py)는 쪽 나누기 뒤에야 자리가 정해진다: 다루지 않는다
-  if (!fl || !fl.wrap || fl.py != null || fl.behind) return null;
-  const w = +n.attrs.width || 0;
-  const h = +n.attrs.height || 0;
+  // 쪽 기준 개체(py)는 쪽 나누기 뒤에야 자리가 정해진다: 다루지 않는다. CSS float 로 그리는 틀(cf)은 스스로 글을 비킨다
+  if (!fl || !fl.wrap || fl.py != null || fl.behind || fl.cf) return null;
+  const w = +n.attrs.width || fl.zw || 0;
+  const h = +n.attrs.height || fl.zh || 0;
   if (!(w > 0 && h > 0)) return null;
   const [t, r, b, l] = fl.wrap.d;
   const top = Math.max(0, fl.y - t);
   const bottom = fl.y + h + b;
   if (!(bottom > top)) return null;
+  // 오른쪽 끝에서 잰 상자: 글은 왼쪽으로 (옆을 비우는 것은 그대로)
+  if (fl.ax === 'r') return fl.wrap.s === 'tb' ? { f: 'full', a: 0, top, bottom } : { f: 'right', a: 0, rw: Math.max(0, fl.x + w + l), top, bottom };
+  if (fl.ax === 'c') return { f: 'full', a: 0, top, bottom };
   if (fl.wrap.s === 'r') {
     const a = fl.x + w + r;
     return a > 0 ? { f: 'left', a, top, bottom } : null;
@@ -58,6 +63,7 @@ function merge(zs: Zone[]): Zone[] {
       continue;
     }
     o.a = z.f === 'left' ? Math.max(o.a, z.a) : Math.min(o.a, z.a);
+    if (z.rw != null || o.rw != null) o.rw = Math.max(o.rw ?? 0, z.rw ?? 0);
     o.top = Math.min(o.top, z.top);
     o.bottom = Math.max(o.bottom, z.bottom);
   }
@@ -71,7 +77,7 @@ function zoneDom(z: Zone): HTMLElement {
   const el = document.createElement('span');
   el.className = 'k-wrap-x';
   const side = z.f === 'right' ? 'right' : 'left';
-  const width = z.f === 'left' ? `${r2(z.a)}px` : z.f === 'right' ? `calc(100% - ${r2(z.a)}px)` : '100%';
+  const width = z.f === 'left' ? `${r2(z.a)}px` : z.f === 'right' ? (z.rw != null ? `${r2(z.rw)}px` : `calc(100% - ${r2(z.a)}px)`) : '100%';
   el.style.cssText = `float:${side};width:${width};height:${r2(z.bottom)}px;shape-outside:inset(${r2(z.top)}px 0 0 0)`;
   // 인쇄: 뒤 블록의 사본에 이어 둘 때 쓴다 (print.ts)
   el.dataset.f = z.f;
@@ -80,7 +86,7 @@ function zoneDom(z: Zone): HTMLElement {
 }
 
 function widgetAt(pos: number, zones: Zone[]): Decoration {
-  const spec = zones.map((z) => `${z.f}${r2(z.a)},${r2(z.top)},${r2(z.bottom)}`).join('|');
+  const spec = zones.map((z) => `${z.f}${r2(z.a)},${r2(z.top)},${r2(z.bottom)}${z.rw != null ? ',' + r2(z.rw) : ''}`).join('|');
   return Decoration.widget(
     pos,
     () => {

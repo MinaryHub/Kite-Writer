@@ -85,6 +85,8 @@ interface PProps {
   keepLines?: boolean;
   /** 탭 자리: 자리(twips) → [맞춤(l·c·r·d), 채움]. 스타일에서 내려오며 쌓이고 clear 로 지운다 */
   tabs?: Map<number, [string, number]>;
+  /** 틀 (w:framePr): 이 문단은 본문 흐름 밖의 틀 안에 놓인다 (같은 틀 속성의 이웃 문단은 한 틀) */
+  frame?: Element | null;
   /** 문단 테두리 (w:pBdr): 변마다 선 (null 은 없앰). 스타일에서 내려오며 변마다 덮어쓴다 */
   bdr?: { top?: WordSide | null; bottom?: WordSide | null; left?: WordSide | null; right?: WordSide | null; between?: WordSide | null };
 }
@@ -108,6 +110,8 @@ interface StyleDef {
   pPr?: Element | null;
   rPr?: Element | null;
   tblPr?: Element | null;
+  /** 스타일 요소 (표 스타일의 칸 모양 tcPr·조건부 서식 tblStylePr) */
+  el?: Element;
 }
 
 const HIGHLIGHT: Record<string, string> = {
@@ -196,6 +200,33 @@ function wordSide(e: Element | null): WordSide | null {
   };
 }
 
+/** 선 하나 → 칸·문단 선 CSS 값 '굵기mm 종류 색' (이중선은 그려지는 굵기의 1/2.4: 편집기가 2.4 배로 그린다) */
+const sideCss = (s: WordSide) => `${round((s.w * 25.4) / 72 / (s.s === 'double' ? 2.4 : 1), 3)}mm ${s.s} ${s.c}`;
+
+/** 표·칸의 선 (tblBorders·tcBorders): 적힌 변만 (null = 없음) */
+type TblSides = Partial<Record<'top' | 'left' | 'bottom' | 'right' | 'insideH' | 'insideV', WordSide | null>>;
+
+/** tblBorders·tcBorders → 변마다 선 (적힌 변만 into 에 덮어쓴다) */
+function bordersOf(el: Element | null | undefined, into: TblSides = {}): TblSides {
+  if (!el) return into;
+  for (const [k, alt] of [['top', 'top'], ['left', 'start'], ['bottom', 'bottom'], ['right', 'end'], ['insideH', 'insideH'], ['insideV', 'insideV']] as const) {
+    const e = kid(el, k) || kid(el, alt);
+    if (e) into[k] = wordSide(e);
+  }
+  return into;
+}
+
+/** 칸 바탕 (w:shd): 색, 없앰(auto)은 null, 적히지 않았으면 undefined. 무늬가 solid 이면 무늬 색이 바탕이다 */
+function shdOf(tcPr: Element | null | undefined): string | null | undefined {
+  const sh = kid(tcPr, 'shd');
+  if (!sh) return undefined;
+  if (attr(sh, 'val') === 'solid') {
+    const c = normColor(attr(sh, 'color'));
+    if (c) return c;
+  }
+  return normColor(attr(sh, 'fill'));
+}
+
 /** 문단의 Word 테두리 (테두리 묶음을 가르는 열쇠, 변들, 내어쓰기 pt) */
 interface ParaBdr {
   key: string;
@@ -245,6 +276,8 @@ class DocxReader {
   showBackground = false;
   /** 자동 간격(위 b·아래 a)인 문단 (표 칸의 첫 문단 위·마지막 문단 아래의 자동 간격은 Word 가 두지 않는다) */
   private autoSpaced = new WeakMap<JNode, { b: boolean; a: boolean; list: boolean }>();
+  /** 지금 읽는 표 칸에 드는 표 스타일의 조건부 서식 (안쪽 표가 뒤): 칸 안 문단의 글자·문단 모양에 깔린다 */
+  private cellConds: Element[][] = [];
   /** Word 테두리가 있는 문단 (본문을 다 읽은 뒤 이웃 문단끼리 묶어 테두리를 단다: applyParaBorders) */
   private pBdr = new WeakMap<JNode, ParaBdr>();
   /** 본문의 구역 설정들 (문서 순서: 문단 안의 것들과 본문 끝의 것). 구역이 둘 이상이면 구역 사이에 쪽 나누기를 넣는다 */
@@ -284,6 +317,8 @@ class DocxReader {
   private fieldStage: 'none' | 'instr' | 'result' = 'none';
   private fieldLink: string | null = null;
   private fieldIsPage: 0 | 1 | 2 = 0;
+  /** 머리말·꼬리말의 쪽 번호 자리 글자: 필드 결과의 첫 글자 조각 모양을 입힌다 (결과 글자는 버린다) */
+  private pagePh: JNode | null = null;
   private headerMode = false;
   listCounters = new Map<string, number>();
   /** 지금 읽는 변경 내용 (w:ins / w:del 안) */
@@ -364,6 +399,7 @@ class DocxReader {
           pPr: kid(s, 'pPr'),
           rPr: kid(s, 'rPr'),
           tblPr: kid(s, 'tblPr'),
+          el: s,
         });
         if (attr(s, 'type') === 'paragraph' && attr(s, 'default') === '1') this.defaultPStyle = id;
         if (attr(s, 'type') === 'table' && attr(s, 'default') === '1') this.defaultTableStyle = id;
@@ -631,6 +667,9 @@ class DocxReader {
           p.bg = f && f !== '#FFFFFF' ? f : null;
           break;
         }
+        case 'framePr':
+          p.frame = c;
+          break;
         case 'pBdr': {
           const b = (p.bdr = { ...p.bdr });
           for (const [k, alt] of [['top', 'top'], ['bottom', 'bottom'], ['left', 'start'], ['right', 'end'], ['between', 'between']] as const) {
@@ -694,6 +733,13 @@ class DocxReader {
       for (const st of ts) {
         this.applyP(p, st.pPr);
         this.applyR(r, st.rPr);
+      }
+    // 칸에 드는 조건부 서식 (머리 행의 굵은 글자·글자 색 등)
+    const cc = this.cellConds[this.cellConds.length - 1];
+    if (cc)
+      for (const e of cc) {
+        this.applyP(p, kid(e, 'pPr'));
+        this.applyR(r, kid(e, 'rPr'));
       }
     let heading = 0;
     for (const s of this.styleChain(styleId)) {
@@ -835,11 +881,31 @@ class DocxReader {
     const out: JNode[] = [];
     /** 바로 앞 문단 (같은 스타일 사이의 간격을 뺄 때 본다) */
     let prev: { node: JNode; style: string | null; contextual: boolean } | null = null;
+    /** 모으는 중인 틀 (같은 framePr 의 이웃 문단들): 다음 블록 앞에 그 블록 기준으로 떠 있는 글상자로 둔다 */
+    let frame: { key: string; el: Element; nodes: JNode[] } | null = null;
+    const flushFrame = () => {
+      if (!frame) return;
+      this.applyParaBorders(frame.nodes);
+      out.push(this.frameBox(frame.el, frame.nodes));
+      frame = null;
+      prev = null;
+    };
     const walk = (els: Element[]) => {
       for (const el of els) {
         const name = localName(el);
         if (name === 'p') {
           const res = this.convertP(el);
+          // 틀 안의 문단 (표 칸 안의 틀과 구역 끝 문단은 그대로 둔다)
+          const fr = res.frame && !this.tableStyles.length && !kid(kid(el, 'pPr'), 'sectPr') ? res.frame : null;
+          if (fr) {
+            const key = [...Array.from(fr.attributes)].map((a) => `${a.localName}=${a.value}`).sort().join(' ');
+            if (frame && frame.key !== key) flushFrame();
+            if (!frame) frame = { key, el: fr, nodes: [] };
+            for (const b of res.blocks) if (b.node.type !== 'pageBreak' && b.node.type !== 'columnBreak') frame.nodes.push(b.node);
+            frame.nodes.push(...res.after);
+            continue;
+          }
+          flushFrame();
           // '같은 스타일의 문단 사이에 간격 없음': 앞 문단의 아래 간격과 이 문단의 위 간격을 뺀다
           const first = res.blocks.find((b) => b.node.type === 'paragraph')?.node;
           if (prev && first && prev.style === res.style) {
@@ -883,6 +949,7 @@ class DocxReader {
             }
           }
         } else if (name === 'tbl') {
+          flushFrame();
           prev = null;
           out.push(this.convertTable(el));
         } else if (name === 'sdt') {
@@ -895,15 +962,154 @@ class DocxReader {
       }
     };
     walk(kids(container));
+    flushFrame();
+    this.frameHang(out);
     this.applyParaBorders(out);
     return out;
+  }
+
+  /**
+   * 왼쪽 끝에 붙은 틀(CSS float) 곁의 내어쓰기 문단: CSS 는 첫 줄을 내어쓰기만큼 틀 쪽으로 당기지만 Word 는 틀 가장자리에서 시작한다.
+   * 틀 높이 안에 드는 뒤 문단들의 가장 큰 내어쓰기만큼 틀이 비킬 자리를 넓힌다 (hg)
+   */
+  private frameHang(blocks: JNode[]) {
+    for (let i = 0; i < blocks.length; i++) {
+      const fl = blocks[i].type === 'textBox' ? blocks[i].attrs?.float : null;
+      if (!fl || fl.cf !== 'l') continue;
+      const lim = +fl.zh || +blocks[i].attrs?.height || 0;
+      let acc = 0;
+      let hang = 0;
+      for (let j = i + 1; j < blocks.length && acc < lim; j++) {
+        const n = blocks[j];
+        if (n.type !== 'paragraph') break;
+        const a = n.attrs || {};
+        hang = Math.max(hang, -(+a.textIndent || 0) * (96 / 72));
+        const lh = String(a.lineHeight || '');
+        acc += (/pt$/.test(lh) ? parseFloat(lh) : (parseFloat(lh) || 1.15) * (+a.fontSize || 10)) * (96 / 72) + ((+a.spaceBefore || 0) + (+a.spaceAfter || 0)) * (96 / 72);
+      }
+      if (hang > 0.5) blocks[i].attrs = { ...blocks[i].attrs, float: { ...fl, hg: round(hang, 2) } };
+    }
+  }
+
+  /**
+   * Word 의 틀 (w:framePr) → 뒤따르는 블록 기준으로 떠 있는 글상자. 틀의 문단은 본문 흐름에서 빠진다.
+   * 자리: 가로는 단(text)·여백(margin)·종이(page) 기준의 x 또는 맞춤(xAlign), 세로는 뒤 문단(text) 기준 y 또는 여백·종이 기준.
+   * 폭(w)이 없으면 내용 폭이다 (오른쪽·가운데 맞춤은 CSS 로 그 자리에 붙인다). 둘레 글은 hSpace·vSpace 만큼 떨어져 비켜 간다.
+   * 첫 글자 장식(dropCap)은 뒤 문단 맨 앞(drop) 또는 왼쪽 여백(margin)에 놓는다
+   */
+  private frameBox(f: Element, nodes: JNode[]): JNode {
+    const g = this.geo;
+    const tw = (k: string): number | null => {
+      const v = parseFloat(attr(f, k) || '');
+      return Number.isFinite(v) ? Math.max(-31680, Math.min(31680, v)) / 15 : null;
+    };
+    const bodyW = Math.max(1, g.W - g.ml - g.mr);
+    const bodyH = Math.max(1, g.H - g.mt - g.mb);
+    const PX = 96 / 72;
+    // 내용의 어림 크기 (폭: 가장 긴 문단의 글 폭, 높이: 문단마다 한 줄)
+    let estW = 0;
+    let estH = 0;
+    for (const n of nodes) {
+      if (n.type !== 'paragraph') {
+        estW = Math.max(estW, +n.attrs?.width || 0);
+        estH += +n.attrs?.height || 0;
+        continue;
+      }
+      let w = 0;
+      let size = +n.attrs?.fontSize || 10;
+      for (const c of n.content || []) {
+        if (c.type !== 'text') continue;
+        const pt = +c.marks?.find((k) => k.type === 'textStyle')?.attrs?.fontSize || 10;
+        size = Math.max(size, pt);
+        for (const ch of (c.text || '').replace(/\{\{PAGES?\}\}/g, '00')) {
+          const k = /[\u1100-\u11ff\u2e80-\ua4cf\uac00-\ud7af\uf900-\ufaff\uff00-\uffdc]/.test(ch) ? 1 : /\s/.test(ch) ? 0.28 : /[0-9]/.test(ch) ? 0.55 : /[A-Z]/.test(ch) ? 0.68 : 0.5;
+          w += k * pt * PX;
+        }
+      }
+      estW = Math.max(estW, w + ((+n.attrs?.indentLeft || 0) + (+n.attrs?.indentRight || 0)) * PX);
+      const lh = String(n.attrs?.lineHeight || '');
+      const line = /pt$/.test(lh) ? parseFloat(lh) * PX : (parseFloat(lh) || 1.15) * size * PX;
+      estH += line + ((+n.attrs?.spaceBefore || 0) + (+n.attrs?.spaceAfter || 0)) * PX;
+    }
+    const w = tw('w');
+    const wBox = w && w > 0 ? w : null;
+    const hv = tw('h');
+    const hRule = attr(f, 'hRule') || 'auto';
+    const hBox = hv && hv > 0 && hRule === 'exact' ? hv : null;
+    const boxW = wBox ?? Math.max(4, Math.round(estW + 2));
+    const boxH = hBox ?? Math.max(hv && hRule === 'atLeast' ? hv : 0, Math.round(estH));
+    const hSpace = Math.max(0, tw('hSpace') ?? 0);
+    const vSpace = Math.max(0, tw('vSpace') ?? 0);
+    const drop = attr(f, 'dropCap');
+    // 가로 자리 (본문 왼쪽 기준). 폭을 모르는 상자의 오른쪽·가운데 맞춤은 그 끝에서 잰다 (ax)
+    let x = 0;
+    let ax: 'r' | 'c' | null = null;
+    if (drop === 'drop') x = 0;
+    else if (drop === 'margin') x = -(boxW + hSpace);
+    else {
+      const hA = attr(f, 'hAnchor') || 'page';
+      const [ox, ow] = hA === 'page' ? [-g.ml, g.W] : [0, bodyW];
+      const xa = attr(f, 'xAlign');
+      if (xa === 'right' || xa === 'outside') {
+        if (wBox) x = ox + ow - wBox;
+        else {
+          ax = 'r';
+          x = bodyW - (ox + ow);
+        }
+      } else if (xa === 'center') {
+        if (wBox) x = ox + (ow - wBox) / 2;
+        else {
+          ax = 'c';
+          x = ox + ow / 2 - bodyW / 2;
+        }
+      } else x = ox + (xa === 'left' || xa === 'inside' ? 0 : tw('x') ?? 0);
+    }
+    // 세로 자리: 뒤 문단 기준(text) 또는 여백·종이 기준(쪽 나누기 뒤 자리를 잡는다: py)
+    let y = 0;
+    let py: number | null = null;
+    const vA = drop ? 'text' : attr(f, 'vAnchor') || 'page';
+    if (vA === 'text') y = drop ? 0 : tw('y') ?? 0;
+    else {
+      const [oy, oh] = vA === 'page' ? [-g.mt, g.H] : [0, bodyH];
+      const ya = attr(f, 'yAlign');
+      py = ya === 'top' || ya === 'inside' ? oy : ya === 'bottom' || ya === 'outside' ? oy + oh - boxH : ya === 'center' ? oy + (oh - boxH) / 2 : oy + (tw('y') ?? 0);
+      // 머리말·꼬리말 안: 그 영역 위쪽 기준으로 (쪽마다 같은 자리)
+      if (this.headerMode) {
+        const zoneTop = this.hfKind === 'footer' ? g.H - g.mb : this.hdrTop;
+        y = py + g.mt - zoneTop;
+        py = null;
+      }
+    }
+    // 둘레 글 흐름: around·tight·through·auto 는 옆으로, notBeside 는 옆을 비우고, none 은 겹친다
+    const wv = drop ? 'around' : attr(f, 'wrap') || 'auto';
+    const estX = ax === 'r' ? bodyW - x - boxW : ax === 'c' ? (bodyW - boxW) / 2 + x : x;
+    const place: AnchorPlace = { x: estX, y, w: boxW, h: boxH, py, behind: false, wrap: wv === 'none' ? 'none' : wv === 'notBeside' ? 'topBottom' : 'square', side: drop ? 'right' : 'bothSides', dist: [vSpace, hSpace, vSpace, hSpace] };
+    const wrap = drop === 'margin' ? null : this.wrapOf(place);
+    // 본문 왼쪽·오른쪽 끝에 붙고 글이 옆으로 흐르는 틀(첫 글자 장식 포함)은 CSS float 로: 내용 폭이 그대로 비킬 자리가 된다
+    const atLeft = !ax && Math.abs(estX) < 2;
+    const atRight = ax === 'r' || (!ax && !!wBox && Math.abs(estX + wBox - bodyW) < 2);
+    const cf = py == null && !this.headerMode && wrap && Math.abs(y) < 24 && ((wrap.s === 'r' && atLeft) || (wrap.s === 'l' && atRight)) ? (wrap.s === 'r' ? 'l' : 'r') : null;
+    const float: Record<string, any> = cf ? { x: round(cf === 'r' ? bodyW - estX - boxW : estX, 2), y: round(y, 2), cf } : { x: round(x, 2), y: round(y, 2) };
+    if (cf === 'r' && ax === 'r') float.x = round(x, 2);
+    if (py != null) float.py = round(py, 2);
+    if (ax && !cf) float.ax = ax;
+    if (wrap) float.wrap = wrap;
+    if (!wBox) float.zw = round(boxW, 2);
+    if (!hBox) float.zh = round(boxH, 2);
+    const attrs: Record<string, any> = { padding: [0, 0, 0, 0], float };
+    if (wBox) attrs.width = round(wBox, 2);
+    if (hBox) attrs.height = round(hBox, 2);
+    return { type: 'textBox', attrs, content: nodes.length ? nodes : [paragraph()] };
   }
 
   /** 문단의 Word 테두리 (그릴 변이 없으면 null). 테두리와 들여쓰기가 같은 이웃 문단은 한 상자다 */
   private borderInfo(p: PProps): ParaBdr | null {
     const b = p.bdr;
-    if (!b || !(b.top || b.bottom || b.left || b.right || b.between)) return null;
     const hang = Math.max(0, p.hanging || 0);
+    if (!b || !(b.top || b.bottom || b.left || b.right || b.between)) {
+      // 테두리 없이 바탕만 칠한 문단: 같은 바탕의 이웃 문단과 한 덩어리로, 문단 간격은 칠하지 않는다 (Word)
+      return p.bg ? { key: JSON.stringify(['bg', p.bg, p.left || 0, p.right || 0, hang]), b: {}, hang: twipToPt(hang) } : null;
+    }
     return { key: JSON.stringify([b.top, b.bottom, b.left, b.right, b.between, p.left || 0, p.right || 0, hang]), b, hang: twipToPt(hang) };
   }
 
@@ -915,7 +1121,7 @@ class DocxReader {
    */
   private applyParaBorders(blocks: JNode[]) {
     const PX = 96 / 72;
-    const sideOf = (s: WordSide) => `${round((s.w * 25.4) / 72 / (s.s === 'double' ? 2.4 : 1), 3)}mm ${s.s} ${s.c}`;
+    const sideOf = sideCss;
     /** 이웃한 두 묶음이 서로 이어지지 않게 묶음마다 번갈아 1·2 */
     let parity = 0;
     for (let i = 0; i < blocks.length; ) {
@@ -930,7 +1136,7 @@ class DocxReader {
       // 사이 선이 없으면 한 상자로 잇는다 (편집기 CSS 가 안쪽 위·아래 선을 지운다)
       const join = j - i > 1 && !b.between;
       if (join) parity = parity === 1 ? 2 : 1;
-      const ol = b.left ? round((b.left.sp + b.left.w + hang) * PX, 2) : 0;
+      const ol = round(((b.left ? b.left.sp + b.left.w : 0) + hang) * PX, 2);
       const or = b.right ? round((b.right.sp + b.right.w) * PX, 2) : 0;
       const sp = [b.left?.sp || 0, b.right?.sp || 0, b.top?.sp || 0, b.bottom?.sp || 0];
       for (let k = i; k < j; k++) {
@@ -968,7 +1174,7 @@ class DocxReader {
     }
   }
 
-  convertP(pEl: Element): { blocks: { node: JNode }[]; after: JNode[]; style: string | null; contextual: boolean } {
+  convertP(pEl: Element): { blocks: { node: JNode }[]; after: JNode[]; style: string | null; contextual: boolean; frame?: Element | null } {
     const pPr = kid(pEl, 'pPr');
     const { p, r: baseR, mark, heading, styleId } = this.resolveP(pPr);
     const inline: JNode[] = [];
@@ -1059,7 +1265,7 @@ class DocxReader {
       if (bd) this.pBdr.set(node, bd);
       blocks.push({ node });
     });
-    return { blocks, after, style: styleId, contextual: !!p.contextual };
+    return { blocks, after, style: styleId, contextual: !!p.contextual, frame: p.frame };
   }
 
   private collectInline(els: Element[], baseR: RProps, link: string | null, out: JNode[], after: JNode[]) {
@@ -1079,12 +1285,12 @@ class DocxReader {
         case 'fldSimple': {
           const instr = (attr(el, 'instr') || '').trim();
           const m = /^HYPERLINK\s+"([^"]+)"/i.exec(instr);
-          if (/^PAGE\b/i.test(instr) && this.headerMode) {
-            out.push({ type: 'text', text: '{{PAGE}}' });
-            break;
-          }
-          if (/^NUMPAGES\b/i.test(instr) && this.headerMode) {
-            out.push({ type: 'text', text: '{{PAGES}}' });
+          if (/^(PAGE|NUMPAGES)\b/i.test(instr) && this.headerMode) {
+            // 쪽 번호 자리 글자는 필드 결과 글자의 모양으로 (글꼴·크기)
+            const tmp: JNode[] = [];
+            this.collectInline(kids(el), baseR, null, tmp, []);
+            const mk = tmp.find((n) => n.type === 'text')?.marks || this.marksFrom(baseR, null);
+            out.push({ type: 'text', text: /^PAGE\b/i.test(instr) ? '{{PAGE}}' : '{{PAGES}}', ...(mk.length ? { marks: mk } : {}) });
             break;
           }
           this.collectInline(kids(el), baseR, m ? m[1] : link, out, after);
@@ -1155,7 +1361,14 @@ class DocxReader {
       switch (name) {
         case 'delText':
         case 't': {
-          if (this.fieldIsPage === 2) break;
+          if (this.fieldIsPage === 2) {
+            if (this.pagePh) {
+              const mk = marks();
+              if (mk.length) this.pagePh.marks = mk;
+              this.pagePh = null;
+            }
+            break;
+          }
           // '모두 대문자': 보이는 대로 대문자로 옮긴다
           const n = textNode(r.caps ? (c.textContent || '').toUpperCase() : c.textContent || '', marks());
           if (n) out.push(n);
@@ -1237,17 +1450,22 @@ class DocxReader {
             const m = /^HYPERLINK\s+(?:\\l\s+)?"([^"]+)"/i.exec(instr);
             if (m) this.fieldLink = m[1];
             if (this.headerMode && /^(PAGE|NUMPAGES)\b/i.test(instr)) {
-              out.push({ type: 'text', text: /^PAGE/i.test(instr) ? '{{PAGE}}' : '{{PAGES}}' });
+              const mk = marks();
+              const ph: JNode = { type: 'text', text: /^PAGE/i.test(instr) ? '{{PAGE}}' : '{{PAGES}}', ...(mk.length ? { marks: mk } : {}) };
+              out.push(ph);
+              this.pagePh = ph;
               this.fieldIsPage = 2;
             }
           } else if (t === 'end') {
             if (this.fieldStage === 'instr' && this.headerMode && /^\s*(PAGE|NUMPAGES)\b/i.test(this.fieldInstr || '')) {
-              out.push({ type: 'text', text: /^\s*PAGE\b/i.test(this.fieldInstr || '') ? '{{PAGE}}' : '{{PAGES}}' });
+              const mk = marks();
+              out.push({ type: 'text', text: /^\s*PAGE\b/i.test(this.fieldInstr || '') ? '{{PAGE}}' : '{{PAGES}}', ...(mk.length ? { marks: mk } : {}) });
             }
             this.fieldStage = 'none';
             this.fieldInstr = null;
             this.fieldLink = null;
             this.fieldIsPage = 0;
+            this.pagePh = null;
           }
           break;
         }
@@ -1767,19 +1985,41 @@ class DocxReader {
   convertTable(tbl: Element): JNode {
     const tblPr = kid(tbl, 'tblPr');
     const styleId = attr(kid(tblPr, 'tblStyle'), 'val');
-    let tableNoBorders: string[] | null = null;
-    const bordersEl = kid(tblPr, 'tblBorders') || (styleId ? kid(this.styles.get(styleId)?.tblPr, 'tblBorders') : null);
-    if (bordersEl) {
-      const none = (tag: string) => {
-        const b = kid(bordersEl, tag) || kid(bordersEl, tag === 'left' ? 'start' : tag === 'right' ? 'end' : tag);
-        const v = attr(b, 'val');
-        return !b || v === 'none' || v === 'nil';
-      };
-      if (['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].every(none)) tableNoBorders = ['l', 'r', 't', 'b'];
-    } else if (!styleId) tableNoBorders = ['l', 'r', 't', 'b'];
     const grid = kids(kid(tbl, 'tblGrid'), 'gridCol').map((g) => Math.round((parseFloat(attr(g, 'w') || '0') / 15) * 100) / 100);
     // 칸의 안 여백 (twip → px): 표 스타일 → 표 → 줄(tblPrEx) → 칸(tcMar) 순서로 덮어쓴다. Word 의 기본은 왼쪽·오른쪽 0.19cm, 위·아래 0
     const styleChain = styleId ? this.styleChain(styleId) : this.defaultTableStyle ? this.styleChain(this.defaultTableStyle) : [];
+    // 표 선: 표 스타일(바탕 스타일부터) → 표에 적은 것. 칸마다 자리(바깥·안쪽)에 맞는 것을 고르고, 조건부 서식과 칸에 적은 선이 덮는다 (표를 다 읽은 뒤)
+    const tblSides: TblSides = {};
+    for (const st of styleChain) bordersOf(kid(st.tblPr, 'tblBorders'), tblSides);
+    bordersOf(kid(tblPr, 'tblBorders'), tblSides);
+    // 표 스타일의 조건부 서식 (머리 행·마지막 행·첫 열·끝 열·줄무늬·모서리 칸): 종류 → 요소들 (바탕 스타일 것부터)
+    const conds = new Map<string, Element[]>();
+    for (const st of styleChain)
+      for (const e of kids(st.el || null, 'tblStylePr')) {
+        const ty = attr(e, 'type') || '';
+        if (!conds.has(ty)) conds.set(ty, []);
+        conds.get(ty)!.push(e);
+      }
+    // 어느 조건부 서식을 쓸지 (tblLook: 속성 또는 예전 16진 값. 없으면 Word 가 새 표에 주는 머리 행·첫 열·가로 줄무늬)
+    const look = kid(tblPr, 'tblLook');
+    const lookVal = parseInt(attr(look, 'val') || '', 16);
+    const lookOn = (name: string, bit: number, dflt: boolean) => {
+      const v = attr(look, name);
+      if (v != null) return v === '1' || v === 'true' || v === 'on';
+      return Number.isFinite(lookVal) ? !!(lookVal & bit) : dflt;
+    };
+    const lk = { fr: lookOn('firstRow', 0x20, true), lr: lookOn('lastRow', 0x40, false), fc: lookOn('firstColumn', 0x80, true), lc: lookOn('lastColumn', 0x100, false), hb: !lookOn('noHBand', 0x200, false), vb: !lookOn('noVBand', 0x400, true) };
+    const bandSize = (tag: string) => {
+      let v = 1;
+      for (const el of [...styleChain.map((st) => st.tblPr), tblPr]) {
+        const e = kid(el, tag);
+        if (e) v = parseInt(attr(e, 'val') || '1', 10) || 1;
+      }
+      return Math.max(1, Math.min(100, v));
+    };
+    const rowBand = bandSize('tblStyleRowBandSize');
+    const colBand = bandSize('tblStyleColBandSize');
+    const nRows = kids(tbl, 'tr').length;
     const marOf = (el: Element | null | undefined, base: number[]): number[] => {
       if (!el) return base;
       const out = [...base];
@@ -1808,7 +2048,8 @@ class DocxReader {
     if (!tblAlign) for (const st of styleChain) tblAlign = jcOf(st.tblPr) || tblAlign;
     const indEl = kid(tblPr, 'tblInd') || [...styleChain].reverse().map((st) => kid(st.tblPr, 'tblInd')).find(Boolean) || null;
     const tblInd = indEl && (attr(indEl, 'type') || 'dxa') === 'dxa' ? (parseFloat(attr(indEl, 'w') || '0') || 0) / 20 : 0;
-    type Cell = { row: number; col: number; cs: number; rs: number; w: number; node: JNode };
+    /** bd: 선을 정할 재료 (칸에 드는 조건부 서식, 칸에 적은 선, 줄의 예외 선, 줄의 첫·끝 칸인가) */
+    type Cell = { row: number; col: number; cs: number; rs: number; w: number; node: JNode; bd?: { conds: { k: string; e: Element }[]; tcb: Element | null; ex: TblSides | null; first: boolean; last: boolean } };
     const cells: Cell[] = [];
     const origin = new Map<number, Cell>();
     this.tableStyles.push(styleChain);
@@ -1826,7 +2067,12 @@ class DocxReader {
       const gridBefore = Math.max(0, Math.min(512, parseInt(attr(kid(trPr, 'gridBefore'), 'val') || '0', 10) || 0));
       col += gridBefore;
       const rowMar = marOf(kid(kid(tr, 'tblPrEx'), 'tblCellMar'), tblMar);
-      for (const tc of kids(tr).filter((e) => localName(e) === 'tc' || localName(e) === 'sdt')) {
+      // 이 줄만의 표 선 (tblPrEx: HTML 에서 온 표 등)
+      const exEl = kid(kid(tr, 'tblPrEx'), 'tblBorders');
+      const rowEx = exEl ? bordersOf(exEl) : null;
+      const tcs = kids(tr).filter((e) => localName(e) === 'tc' || localName(e) === 'sdt');
+      for (let ci = 0; ci < tcs.length; ci++) {
+        const tc = tcs[ci];
         const tcEl = localName(tc) === 'sdt' ? kid(kid(tc, 'sdtContent'), 'tc') : tc;
         if (!tcEl) continue;
         const tcPr = kid(tcEl, 'tcPr');
@@ -1842,7 +2088,30 @@ class DocxReader {
           col += span;
           continue;
         }
-        let content = this.convertBody(tcEl).filter((n) => n.type !== 'pageBreak');
+        // 이 칸에 드는 조건부 서식. Word 가 덮어쓰는 차례: 전체 → 가로·세로 줄무늬 → 끝·첫 열 → 끝·첫 행 → 모서리 칸
+        const first = ci === 0;
+        const last = ci === tcs.length - 1;
+        const inHead = lk.fr && (rowIdx === 0 || rowIdx < headRows);
+        const inLast = lk.lr && rowIdx === nRows - 1 && nRows > 1;
+        const kinds = ['wholeTable'];
+        if (lk.hb && !inHead) kinds.push(Math.floor((rowIdx - (lk.fr ? Math.max(1, headRows) : 0)) / rowBand) % 2 ? 'band2Horz' : 'band1Horz');
+        if (lk.vb && !(lk.fc && first)) kinds.push(Math.floor((ci - (lk.fc ? 1 : 0)) / colBand) % 2 ? 'band2Vert' : 'band1Vert');
+        if (lk.lc && last) kinds.push('lastCol');
+        if (lk.fc && first) kinds.push('firstCol');
+        if (inLast) kinds.push('lastRow');
+        if (inHead) kinds.push('firstRow');
+        if (inLast && lk.lc && last) kinds.push('seCell');
+        if (inLast && lk.fc && first) kinds.push('swCell');
+        if (inHead && lk.lc && last) kinds.push('neCell');
+        if (inHead && lk.fc && first) kinds.push('nwCell');
+        const cellConds = conds.size ? kinds.flatMap((k) => (conds.get(k) || []).map((e) => ({ k, e }))) : [];
+        this.cellConds.push(cellConds.map((c) => c.e));
+        let content: JNode[];
+        try {
+          content = this.convertBody(tcEl).filter((n) => n.type !== 'pageBreak');
+        } finally {
+          this.cellConds.pop();
+        }
         if (!content.length) content = [paragraph()];
         // 자동 간격은 칸의 첫 문단 위와 마지막 문단 아래에는 두지 않는다 (Word 의 HTML 문단 간격)
         const head = content[0];
@@ -1855,34 +2124,19 @@ class DocxReader {
           tail.attrs = { ...tail.attrs, cellTail: true };
         }
         const attrs: Record<string, any> = { colspan: span, rowspan: 1, colwidth: null };
-        const shd = normColor(attr(kid(tcPr, 'shd'), 'fill'));
+        // 칸 바탕: 표 스타일의 칸 모양 → 조건부 서식 → 칸에 적은 것
+        let shd: string | null | undefined;
+        for (const st of styleChain) shd = shdOf(kid(st.el || null, 'tcPr')) ?? shd;
+        for (const c of cellConds) shd = shdOf(kid(c.e, 'tcPr')) ?? shd;
+        shd = shdOf(tcPr) ?? shd;
         if (shd && shd !== '#FFFFFF') attrs.backgroundColor = shd;
         const va = attr(kid(tcPr, 'vAlign'), 'val');
         if (va === 'center') attrs.verticalAlign = null;
         else if (va === 'bottom') attrs.verticalAlign = 'bottom';
         else attrs.verticalAlign = 'top';
-        const tcb = kid(tcPr, 'tcBorders');
-        let noB = tableNoBorders ? [...tableNoBorders] : [];
-        if (tcb) {
-          const sides: [string, string, string][] = [
-            ['left', 'start', 'l'],
-            ['right', 'end', 'r'],
-            ['top', 'top', 't'],
-            ['bottom', 'bottom', 'b'],
-          ];
-          for (const [a, b, s] of sides) {
-            const e = kid(tcb, a) || kid(tcb, b);
-            if (!e) continue;
-            const v = attr(e, 'val');
-            const isNone = v === 'none' || v === 'nil';
-            noB = noB.filter((x) => x !== s);
-            if (isNone) noB.push(s);
-          }
-        }
-        if (noB.length) attrs.borderStyle = noB.join(' ');
         attrs.margins = marOf(kid(tcPr, 'tcMar'), rowMar).map((v) => Math.round(v * 10) / 10);
         const wPx = grid.slice(col, col + span).reduce((a, b) => a + b, 0) || Math.round(parseFloat(attr(kid(tcPr, 'tcW'), 'w') || '0') / 15);
-        const cell: Cell = { row: rowIdx, col, cs: span, rs: 1, w: wPx, node: { type: 'tableCell', attrs, content } };
+        const cell: Cell = { row: rowIdx, col, cs: span, rs: 1, w: wPx, node: { type: 'tableCell', attrs, content }, bd: { conds: cellConds, tcb: kid(tcPr, 'tcBorders'), ex: rowEx, first, last } };
         cells.push(cell);
         if (vmVal === 'restart') for (let i = 0; i < span; i++) origin.set(col + i, cell);
         else for (let i = 0; i < span; i++) origin.delete(col + i);
@@ -1891,6 +2145,7 @@ class DocxReader {
       rowIdx++;
     }
     this.tableStyles.pop();
+    this.cellBorders(cells, tblSides, nRows);
     // 그리드 기반 열 너비를 우선 사용
     const t = assembleTable(cells, rowIdx, 0, 0, rowH);
     // 제목 줄: 표가 다음 쪽으로 이어지면 그 쪽 맨 위에 되풀이한다 (칸 모양은 그대로)
@@ -1912,6 +2167,62 @@ class DocxReader {
       if (Math.abs(ind) > 0.05) t.attrs = { ...t.attrs, indent: ind };
     }
     return t;
+  }
+
+  /**
+   * 칸마다 네 변의 선 (Word): 표 선 가운데 칸 자리에 맞는 것(바깥 선 또는 안쪽 선 insideH·insideV, 줄의 예외 선이 덮는다) →
+   * 조건부 서식의 칸 선(행 영역은 위·아래 선과 영역 안 세로 선, 열 영역은 왼쪽·오른쪽 선과 영역 안 가로 선) → 칸에 적은 선.
+   * 선이 없는 변은 borderStyle 로 (편집 화면에서만 '투명 선'), 있는 변은 굵기·종류·색을 borderCss 로
+   */
+  private cellBorders(cells: { row: number; rs: number; node: JNode; bd?: { conds: { k: string; e: Element }[]; tcb: Element | null; ex: TblSides | null; first: boolean; last: boolean } }[], tbl: TblSides, nRows: number) {
+    type Side = 'top' | 'bottom' | 'left' | 'right';
+    for (const c of cells) {
+      const bd = c.bd;
+      if (!bd) continue;
+      delete c.bd;
+      const topRow = c.row === 0;
+      const botRow = c.row + c.rs >= nRows;
+      const base = bd.ex ? { ...tbl, ...bd.ex } : tbl;
+      /** 영역의 선 묶음 r 에서 칸 자리에 맞는 변 (있으면) */
+      const sides: TblSides = { top: topRow ? base.top : base.insideH, bottom: botRow ? base.bottom : base.insideH, left: bd.first ? base.left : base.insideV, right: bd.last ? base.right : base.insideV };
+      const take = (side: Side, r: TblSides, key: keyof TblSides) => {
+        if (key in r) sides[side] = r[key];
+      };
+      for (const { k, e } of bd.conds) {
+        const r = bordersOf(kid(kid(e, 'tcPr'), 'tcBorders'));
+        if (!Object.keys(r).length) continue;
+        if (/Row$|Horz$/.test(k)) {
+          take('top', r, 'top');
+          take('bottom', r, 'bottom');
+          take('left', r, bd.first ? 'left' : 'insideV');
+          take('right', r, bd.last ? 'right' : 'insideV');
+        } else if (/Col$|Vert$/.test(k)) {
+          take('left', r, 'left');
+          take('right', r, 'right');
+          take('top', r, topRow ? 'top' : 'insideH');
+          take('bottom', r, botRow ? 'bottom' : 'insideH');
+        } else if (k === 'wholeTable') {
+          take('top', r, topRow ? 'top' : 'insideH');
+          take('bottom', r, botRow ? 'bottom' : 'insideH');
+          take('left', r, bd.first ? 'left' : 'insideV');
+          take('right', r, bd.last ? 'right' : 'insideV');
+        } else for (const sd of ['top', 'bottom', 'left', 'right'] as const) take(sd, r, sd);
+      }
+      if (bd.tcb) {
+        const r = bordersOf(bd.tcb);
+        for (const sd of ['top', 'bottom', 'left', 'right'] as const) take(sd, r, sd);
+      }
+      const css: string[] = [];
+      const none: string[] = [];
+      for (const [k, s] of [['top', 't'], ['bottom', 'b'], ['left', 'l'], ['right', 'r']] as const) {
+        const v = sides[k];
+        if (v) css.push(`${s}:${sideCss(v)}`);
+        else none.push(s);
+      }
+      const a = c.node.attrs!;
+      if (css.length) a.borderCss = css.join(';');
+      if (none.length) a.borderStyle = none.join(' ');
+    }
   }
 
   /**

@@ -16,6 +16,12 @@ export interface FlatFloat {
   hw?: FloatHw | null;
   /** 둘레 글 흐름 (Word 문서에서 읽은 것) */
   wrap?: FloatWrap | null;
+  /** 폭이 내용대로인 글상자(Word 의 틀)의 가로 기준: r 오른쪽 끝·c 가운데에서 잰 x */
+  ax?: 'r' | 'c' | null;
+  /** 왼쪽(l)·오른쪽(r) 끝에 붙어 글이 옆으로 흐르는 틀 (x 는 붙은 끝에서 민 거리) */
+  cf?: 'l' | 'r' | null;
+  /** 크기를 정하지 않은 상자의 어림 폭 (px) */
+  zw?: number | null;
 }
 
 /** 문서 노드의 float 속성 → FlatFloat (이상한 값은 null) */
@@ -29,6 +35,9 @@ export function flatFloatOf(v: any): FlatFloat | null {
   if (v.behind === true) out.behind = true;
   const wrap = cleanFloatWrap(v.wrap);
   if (wrap) out.wrap = wrap;
+  if (v.ax === 'r' || v.ax === 'c') out.ax = v.ax;
+  if (v.cf === 'l' || v.cf === 'r') out.cf = v.cf;
+  if (Number.isFinite(+v.zw) && +v.zw > 0 && +v.zw < 5000) out.zw = +v.zw;
   const h = v.hw;
   if (h && typeof h === 'object' && [h.vo, h.ho].every((n: any) => Number.isFinite(+n))) {
     const pick = (val: any, list: string[], def: string) => (list.includes(val) ? val : def);

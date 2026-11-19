@@ -272,5 +272,83 @@ const text = (n) => (n.type === 'text' ? n.text : (n.content || []).map(text).jo
   ok(same, '저장 후 다시 읽으면 테두리·간격이 같다', JSON.stringify([bp[0].attrs, ps[0].attrs]));
 }
 
+// ---- 8b. 바탕만 칠한 문단 (w:shd): 같은 바탕의 이웃 문단은 한 덩어리, 문단 간격은 칠하지 않는다. 테두리 안 바탕은 선 안쪽만 ----
+{
+  const shd = '<w:shd w:val="clear" w:color="auto" w:fill="EEEEEE"/>';
+  const body = p(t('코드 1'), `${shd}<w:spacing w:before="120" w:after="120"/>`) + p(t('코드 2'), `${shd}<w:spacing w:before="120" w:after="120"/>`) + p(t('보통 문단'));
+  const doc = await m.readDocx(await makeDocx({ body }));
+  const [a, b, c] = doc.content.content.map((n) => n.attrs);
+  ok(a.paraBg === '#EEEEEE' && a.paraBorder && !a.paraBorder.t && !a.paraBorder.l && JSON.stringify(a.paraBorder.a) === '[0,0]' && a.paraBorder.c && a.paraBorder.c === b.paraBorder?.c, '바탕만 칠한 이웃 문단: 한 덩어리 (선 없이 칠할 자리만)', JSON.stringify([a, b]));
+  ok(a.spaceBefore === 6 && b.spaceAfter === 6 && !c.paraBorder, '문단 간격은 그대로 (바탕 덩어리 바깥)', JSON.stringify([a.spaceBefore, b.spaceAfter, c]));
+  const back = await m.readDocx(await m.writeDocx({ content: doc.content, settings: doc.settings, meta: {} }));
+  ok(back.content.content[0].attrs.paraBg === '#EEEEEE' && JSON.stringify(back.content.content[0].attrs.paraBorder) === JSON.stringify(a.paraBorder), '저장 후 다시 읽어도 같다', JSON.stringify(back.content.content[0].attrs));
+}
+
+// ---- 9. 표 선: 색·굵기·종류, 바깥 선과 안쪽 선, 칸에 적은 선, 줄 예외 선 ----
+{
+  const bd = (v, sz, c) => `w:val="${v}" w:sz="${sz}" w:space="0" w:color="${c}"`;
+  const cell = (txt, tcpr = '') => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/>${tcpr}</w:tcPr>${p(t(txt))}</w:tc>`;
+  const tbl = (tblpr, rows) => `<w:tbl><w:tblPr>${tblpr}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>${rows}</w:tbl>`;
+  // 바깥은 굵은 파란 선, 안쪽 가로선은 회색, 안쪽 세로선은 없음
+  const borders = `<w:tblBorders><w:top ${bd('single', 12, '0000FF')}/><w:left ${bd('single', 12, '0000FF')}/><w:bottom ${bd('double', 4, '0000FF')}/><w:right ${bd('single', 12, '0000FF')}/><w:insideH ${bd('single', 4, 'E1E1E1')}/><w:insideV w:val="nil"/></w:tblBorders>`;
+  const body =
+    tbl(borders, `<w:tr>${cell('가')}${cell('나', `<w:tcBorders><w:right ${bd('dashed', 8, 'FF0000')}/></w:tcBorders>`)}</w:tr><w:tr>${cell('다')}${cell('라')}</w:tr>`) +
+    p(t('사이')) +
+    // 스타일 없는 표: 선 없음. 줄 예외 선(tblPrEx)이 있는 줄만 선
+    tbl('', `<w:tr>${cell('마')}${cell('바')}</w:tr><w:tr><w:tblPrEx><w:tblBorders><w:top ${bd('single', 4, '00AA00')}/><w:bottom ${bd('single', 4, '00AA00')}/><w:insideH ${bd('single', 4, '00AA00')}/></w:tblBorders></w:tblPrEx>${cell('사')}${cell('아')}</w:tr>`);
+  const doc = await m.readDocx(await makeDocx({ body }));
+  const [t1, , t2] = doc.content.content;
+  const cellsOf = (tb) => tb.content.flatMap((r) => r.content);
+  const [a, b, c, d] = cellsOf(t1).map((x) => x.attrs);
+  const css = (x) => Object.fromEntries((x.borderCss || '').split(';').filter(Boolean).map((q) => q.split(':')));
+  ok(css(a).t === '0.529mm solid #0000FF' && css(a).l === '0.529mm solid #0000FF' && css(a).b === '0.176mm solid #E1E1E1' && a.borderStyle === 'r', '왼쪽 위 칸: 바깥 선(위·왼쪽), 안쪽 가로선(아래), 안쪽 세로선 없음', JSON.stringify(a));
+  ok(css(b).r === '0.353mm dashed #FF0000' && b.borderStyle === 'l', '칸에 적은 선이 표 선을 덮는다', JSON.stringify(b));
+  // 이중선: 0.5pt 선 둘과 틈 → 1.5pt 를 2.4 로 나눈 값
+  ok(css(c).b === '0.22mm double #0000FF' && css(c).t === '0.176mm solid #E1E1E1', '아래 칸: 바깥 아래 이중선, 위는 안쪽 가로선', JSON.stringify(c));
+  ok(css(d).r === '0.529mm solid #0000FF', '오른쪽 아래 칸: 바깥 오른쪽 선', JSON.stringify(d));
+  const [e, f, g] = cellsOf(t2).map((x) => x.attrs);
+  ok(e.borderStyle === 't b l r' && !e.borderCss && f.borderStyle === 't b l r', '스타일·선이 없는 표는 선 없음', JSON.stringify([e, f]));
+  ok(css(g).t === '0.176mm solid #00AA00' && css(g).b === '0.176mm solid #00AA00' && g.borderStyle === 'l r', '줄 예외 선(tblPrEx)은 그 줄에만 (가운데 줄의 위는 안쪽 가로선, 끝 줄의 아래는 아래 선)', JSON.stringify(g));
+
+  // 저장 후 다시 읽어도 선이 같다 (이중선 굵기도)
+  const back = await m.readDocx(await m.writeDocx({ content: doc.content, settings: doc.settings, meta: {} }));
+  const b1 = cellsOf(back.content.content[0]).map((x) => x.attrs);
+  ok(b1[0].borderCss === a.borderCss && b1[2].borderCss === c.borderCss && b1[1].borderCss === b.borderCss, '저장 후 다시 읽어도 칸 선이 같다', JSON.stringify([b1[2].borderCss, c.borderCss]));
+}
+
+// ---- 10. 표 스타일의 조건부 서식: 머리 행·첫 열·가로 줄무늬 (tblLook), 바탕·글자 모양·선 ----
+{
+  const styles =
+    '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
+    '<w:style w:type="table" w:styleId="Grid4"><w:name w:val="Grid Table 4"/><w:tblPr><w:tblStyleRowBandSize w:val="1"/><w:tblBorders>' +
+    '<w:top w:val="single" w:sz="4" w:space="0" w:color="8EAADB"/><w:left w:val="single" w:sz="4" w:space="0" w:color="8EAADB"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="8EAADB"/><w:right w:val="single" w:sz="4" w:space="0" w:color="8EAADB"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="8EAADB"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="8EAADB"/></w:tblBorders></w:tblPr>' +
+    '<w:tblStylePr w:type="firstRow"><w:rPr><w:b/><w:color w:val="FFFFFF"/></w:rPr><w:tcPr><w:tcBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="4472C4"/><w:insideV w:val="nil"/></w:tcBorders><w:shd w:val="clear" w:color="auto" w:fill="4472C4"/></w:tcPr></w:tblStylePr>' +
+    '<w:tblStylePr w:type="firstCol"><w:rPr><w:b/></w:rPr></w:tblStylePr>' +
+    '<w:tblStylePr w:type="band1Horz"><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/></w:tcPr></w:tblStylePr>' +
+    '</w:style>';
+  const cell = (txt, tcpr = '') => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/>${tcpr}</w:tcPr>${p(t(txt))}</w:tc>`;
+  const row = (...cs) => `<w:tr>${cs.join('')}</w:tr>`;
+  const look = (v) => `<w:tblLook w:val="${v}" w:firstRow="${v === '04A0' ? 1 : 0}" w:lastRow="0" w:firstColumn="${v === '04A0' ? 1 : 0}" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>`;
+  const tbl = (lk, rows) => `<w:tbl><w:tblPr><w:tblStyle w:val="Grid4"/><w:tblW w:w="0" w:type="auto"/>${lk}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>${rows}</w:tbl>`;
+  const body =
+    tbl(look('04A0'), row(cell('머리1'), cell('머리2')) + row(cell('첫1'), cell('값1')) + row(cell('첫2'), cell('값2', '<w:shd w:val="clear" w:color="auto" w:fill="FFFF00"/>')) + row(cell('첫3'), cell('값3'))) +
+    p(t('사이')) +
+    // 머리 행·첫 열을 끈 표: 줄무늬만 (첫 줄부터)
+    tbl(look('0000'), row(cell('가'), cell('나')) + row(cell('다'), cell('라')));
+  const doc = await m.readDocx(await makeDocx({ body, styles }));
+  const [t1, , t2] = doc.content.content;
+  const rows = t1.content.map((r) => r.content);
+  const marksOf = (c) => c.content[0].content[0].marks || [];
+  const bold = (c) => marksOf(c).some((k) => k.type === 'bold');
+  const color = (c) => marksOf(c).find((k) => k.type === 'textStyle')?.attrs?.color;
+  ok(rows[0][0].attrs.backgroundColor === '#4472C4' && bold(rows[0][1]) && color(rows[0][1]) === '#FFFFFF', '머리 행: 바탕·굵은 흰 글자', JSON.stringify([rows[0][0].attrs.backgroundColor, marksOf(rows[0][1])]));
+  ok(rows[0][0].attrs.borderStyle === 'r' && rows[0][1].attrs.borderStyle === 'l' && /t:0\.176mm solid #4472C4/.test(rows[0][0].attrs.borderCss), '머리 행의 선: 위 선 색, 행 안 세로선 없음', JSON.stringify(rows[0][0].attrs));
+  ok(bold(rows[1][0]) && !bold(rows[1][1]), '첫 열은 굵게 (나머지 칸은 아님)', '');
+  ok(rows[1][1].attrs.backgroundColor === '#D9E2F3' && !rows[2][0].attrs.backgroundColor && rows[3][1].attrs.backgroundColor === '#D9E2F3', '가로 줄무늬: 머리 행 다음 줄부터 하나 건너 하나', JSON.stringify(rows.map((r) => r.map((c) => c.attrs.backgroundColor || ''))));
+  ok(rows[2][1].attrs.backgroundColor === '#FFFF00', '칸에 적은 바탕이 조건부 서식을 덮는다', '');
+  const r2 = t2.content.map((r) => r.content);
+  ok(r2[0][0].attrs.backgroundColor === '#D9E2F3' && !r2[1][0].attrs.backgroundColor && !bold(r2[0][0]), '머리 행·첫 열을 끈 표: 첫 줄부터 줄무늬, 굵은 글자 없음', JSON.stringify(r2.map((r) => r.map((c) => c.attrs.backgroundColor || ''))));
+}
+
 console.log(failed ? `실패 ${failed}건` : '모두 통과');
 process.exit(failed ? 1 : 0);

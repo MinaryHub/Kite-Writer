@@ -69,6 +69,22 @@ export interface TableCut {
   table: number;
   page: number;
   y: number;
+  /**
+   * 닫는 선 (Word 등 한글 문서가 아닌 것): CSS 선 값. 'none' 이면 긋지 않는다 (줄이 통째로 넘어간 곳: 표 자신의 선이 그 자리에 있다).
+   * off: 덮개를 그만큼 아래에서 시작한다 (그 자리의 표 선을 가리지 않게). 없으면 1px 검은 선 (한글)
+   */
+  line?: string;
+  off?: number;
+}
+
+/** 표 칸의 한 변의 선 (CSS 값·굵기 px). 선이 없으면 null */
+function cellLine(td: Element | null | undefined, side: 'Top' | 'Bottom'): { css: string; w: number } | null {
+  if (!(td instanceof HTMLElement)) return null;
+  const cs = getComputedStyle(td);
+  const w = parseFloat(side === 'Top' ? cs.borderTopWidth : cs.borderBottomWidth) || 0;
+  const st = side === 'Top' ? cs.borderTopStyle : cs.borderBottomStyle;
+  if (!(w > 0) || st === 'none' || st === 'hidden') return null;
+  return { css: `${w}px ${st} ${side === 'Top' ? cs.borderTopColor : cs.borderBottomColor}`, w };
 }
 
 export interface RepeatHead {
@@ -1022,12 +1038,18 @@ function computeLayout(
     };
     // 칸마다 끊긴 자리 가운데 가장 아래: 그 쪽에서 표가 끝나는 곳 (닫는 선을 긋는다)
     const cutRef = new Map<number, PageBreakInfo>();
+    // 나뉜 줄의 앞 조각을 닫는 선: 그 줄 칸의 아래 선 (Word 는 나뉜 칸을 쪽마다 선으로 닫는다)
+    let splitLine: string | null = null;
     const noteCut = (pg: number, y: number) => {
       const b = breaks[breaks.length - 1];
       const ref = cutRef.get(pg);
       if (ref && ref.cut) ref.cut.y = Math.max(ref.cut.y, y);
       else if (b && curTable >= 0) {
-        b.cut = { table: curTable, page: pg, y };
+        if (splitLine === null) {
+          const el = nodeDom(rowPos) as HTMLElement | null;
+          splitLine = cellLine(el?.firstElementChild, 'Bottom')?.css || 'none';
+        }
+        b.cut = { table: curTable, page: pg, y, line: splitLine };
         cutRef.set(pg, b);
       }
     };
@@ -1216,7 +1238,13 @@ function computeLayout(
       if (i === 0) place(uTop, uBottom, fnH, () => pos, 'block', pos);
       else place(uTop, uBottom, fnH, () => row.pos, 'row', row.pos);
       // 줄이 통째로 다음 쪽으로 넘어갔으면 앞 쪽에서는 표를 그 자리에서 닫는다 (넘긴 줄의 세로선이 빈자리까지 이어지지 않게)
-      if (i > 0 && breaks.length > nb && page > pg0) breaks[breaks.length - 1].cut = { table: pos, page: pg0, y: Math.round((uTop + shift0 - T(pg0)) * 100) / 100 };
+      if (i > 0 && breaks.length > nb && page > pg0) {
+        // 그 자리에는 앞 줄의 아래 선과 넘긴 줄의 위 선이 겹친 표 선이 있다: 덮개는 그 선 아래에서 시작한다 (한글 문서는 닫는 선을 따로 긋는다)
+        const a = cellLine(row.el.previousElementSibling?.firstElementChild, 'Bottom');
+        const c = cellLine(row.el.firstElementChild, 'Top');
+        const off = Math.round((Math.max(a?.w || 0, c?.w || 0) / 2) * 100) / 100;
+        breaks[breaks.length - 1].cut = { table: pos, page: pg0, y: Math.round((uTop + shift0 - T(pg0)) * 100) / 100, line: 'none', ...(off ? { off } : {}) };
+      }
       // 이 줄이 다음 쪽으로 넘어갔으면 그 쪽 맨 위에 제목 줄 자리를 비운다
       if (tableHead && breaks.length > nb && page > pg0) {
         const b = breaks[breaks.length - 1];

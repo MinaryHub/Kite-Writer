@@ -246,9 +246,15 @@ function anchorHead(ctx: Ctx, fl: FlatFloat, cx: number, cy: number, xPx: number
     else wrap = `<wp:wrapSquare wrapText="${fl.wrap.o || (fl.wrap.s === 'l' ? 'left' : 'right')}" ${dist}/>`;
   }
   const v = fl.py != null ? `<wp:positionV relativeFrom="margin"><wp:posOffset>${emu(fl.py)}</wp:posOffset></wp:positionV>` : `<wp:positionV relativeFrom="paragraph"><wp:posOffset>${emu(fl.y)}</wp:posOffset></wp:positionV>`;
+  // 오른쪽·가운데 맞춤 틀 (폭이 내용대로): 단 오른쪽 끝·가운데에 맞춘다 (끝에서 민 거리가 있으면 종이 기준으로 어림)
+  const right = fl.ax === 'r' || fl.cf === 'r';
+  const h =
+    right || fl.ax === 'c'
+      ? `<wp:positionH relativeFrom="${Math.abs(fl.x) > 1 ? 'page' : 'margin'}"><wp:align>${right ? 'right' : 'center'}</wp:align></wp:positionH>`
+      : `<wp:positionH relativeFrom="column"><wp:posOffset>${emu(xPx)}</wp:posOffset></wp:positionH>`;
   return (
     `<wp:anchor ${dist} simplePos="0" relativeHeight="${ctx.relHeight++}" behindDoc="${fl.behind ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>` +
-    `<wp:positionH relativeFrom="column"><wp:posOffset>${emu(xPx)}</wp:posOffset></wp:positionH>${v}<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>${wrap}` +
+    `${h}${v}<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>${wrap}` +
     `<wp:docPr id="${id}" name="${xmlEscape(name)}"/><wp:cNvGraphicFramePr/>`
   );
 }
@@ -477,7 +483,9 @@ function shapeDrawing(ctx: Ctx, it: Extract<FlatInline, { type: 'shape' }>, para
 /** 떠 있는 글상자 → 글상자 도형(wps:wsp) 을 담은 글자 묶음 (뒤 문단에 매단다) */
 function textBoxRun(ctx: Ctx, b: FlatBox): string {
   const fl = b.float!;
-  const w = b.width && b.width > 0 ? b.width : 200;
+  // 크기를 정하지 않은 상자(Word 의 틀): 어림 크기로 두고 Word 가 글에 맞춰 늘이고 줄이게 한다 (spAutoFit, 줄 바꿈 없음)
+  const auto = !(b.width && b.width > 0);
+  const w = b.width && b.width > 0 ? b.width : fl.zw || 200;
   const h = b.height && b.height > 0 ? b.height : 100;
   const cx = emu(w);
   const cy = emu(h);
@@ -507,7 +515,7 @@ function textBoxRun(ctx: Ctx, b: FlatBox): string {
     `<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/>` +
     `<wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="${geom}"><a:avLst>${av}</a:avLst></a:prstGeom>${fill}${ln}</wps:spPr>` +
     `<wps:txbx><w:txbxContent>${inner}</w:txbxContent></wps:txbx>` +
-    `<wps:bodyPr rot="0" vert="horz" wrap="square" lIns="${emu(pad[3])}" tIns="${emu(pad[0])}" rIns="${emu(pad[1])}" bIns="${emu(pad[2])}" anchor="${anchor}" anchorCtr="0"><a:noAutofit/></wps:bodyPr>` +
+    `<wps:bodyPr rot="0" vert="horz" wrap="${auto ? 'none' : 'square'}" lIns="${emu(pad[3])}" tIns="${emu(pad[0])}" rIns="${emu(pad[1])}" bIns="${emu(pad[2])}" anchor="${anchor}" anchorCtr="0">${auto || !(b.height && b.height > 0) ? '<a:spAutoFit/>' : '<a:noAutofit/>'}</wps:bodyPr>` +
     `</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`
   );
 }
@@ -590,7 +598,8 @@ function tableXml(ctx: Ctx, t: FlatTable): string {
             .map((s) => {
               if (c.noBorders.includes(s)) return `<w:${map[s]} w:val="nil"/>`;
               const d = det[s as 'l'];
-              return d ? `<w:${map[s]} w:val="${VAL[d.s]}" w:sz="${Math.max(2, Math.round((d.w / 0.3528) * 8))}" w:space="0" w:color="${hex(d.c)}"/>` : '';
+              // 굵기(1/8 pt): 이중선은 그려지는 굵기(값 × 2.4)를 선 둘과 사이 틈으로 셋으로 나눈 것
+              return d ? `<w:${map[s]} w:val="${VAL[d.s]}" w:sz="${Math.max(2, Math.min(96, Math.round(((d.s === 'double' ? (d.w * 2.4) / 3 : d.w) / 0.3528) * 8)))}" w:space="0" w:color="${hex(d.c)}"/>` : '';
             })
             .join('') +
           '</w:tcBorders>';

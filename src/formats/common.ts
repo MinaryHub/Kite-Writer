@@ -701,7 +701,9 @@ export function cleanParaBorder(v: any): ParaBorder | null {
     const m = typeof v[k] === 'string' ? PB_SIDE.exec(v[k].trim()) : null;
     if (m) out[k] = `${Math.max(0.1, Math.min(10, parseFloat(m[1])))}mm ${m[2]} ${m[3].toUpperCase()}`;
   }
-  if (!out.l && !out.r && !out.t && !out.b) return null;
+  // 변이 없어도 Word 의 바탕 덩어리(a: 문단 간격을 뺀 칠할 자리)는 둔다
+  const wordBg = Array.isArray(v.a) && v.a.length === 2;
+  if (!out.l && !out.r && !out.t && !out.b && !wordBg) return null;
   if (Array.isArray(v.o) && v.o.length === 4 && v.o.every((x: any) => Number.isFinite(+x))) {
     const o = v.o.map((x: any) => Math.max(-50, Math.min(200, Math.round(+x * 100) / 100)));
     if (o.some((x: number) => x)) out.o = o;

@@ -328,8 +328,11 @@ export function repeatHeadsHtml(tab: DocTab, g: PageGeom, k: number): string {
     if (!table || table.getAttribute('data-borderless') === 'true') continue;
     const wrap = table.parentElement as HTMLElement | null;
     const left = (wrap && wrap !== tab.editor.view.dom ? wrap.offsetLeft : 0) + table.offsetLeft;
-    const y = Math.min(g.contentH, Math.max(0, c.y));
-    html += `<div class="pg-table-cut" style="position:absolute;left:${g.ml + left}px;top:${g.mt + y}px;width:${table.offsetWidth}px;height:${Math.max(0, g.contentH - y)}px;border-top:1px solid #000;background:#fff;box-sizing:border-box;pointer-events:none"></div>`;
+    // Word 등: 표 자신의 선으로 닫는다 (pagination 이 적어 둔 그 자리의 선). 한글 문서: 1px 검은 선
+    const word = !tab.settings.hwpMetrics && c.line != null;
+    const y = Math.min(g.contentH, Math.max(0, c.y + (word ? c.off || 0 : 0)));
+    const line = word ? (/^[\w\s.#(),%-]+$/.test(c.line!) ? c.line! : 'none') : '1px solid #000';
+    html += `<div class="pg-table-cut" style="position:absolute;left:${g.ml + left}px;top:${g.mt + y}px;width:${table.offsetWidth}px;height:${Math.max(0, g.contentH - y)}px;border-top:${line};background:#fff;box-sizing:border-box;pointer-events:none"></div>`;
   }
   return html;
 }
@@ -427,7 +430,8 @@ interface WrapCarry {
 
 /** 블록 사본은 따로 놓여 앞 블록의 float 가 미치지 않는다: 이어지는 비킴 자리를 모아 뒤 블록의 사본에도 둔다 */
 function wrapCarries(root: HTMLElement): WrapCarry[] {
-  const els = root.querySelectorAll<HTMLElement>('.k-wrap-x');
+  // 비킴 자리와, 스스로 float 인 틀(k-cfloat: 높이 없는 자리 표시 안에 있어 뒤 블록으로 이어진다)
+  const els = root.querySelectorAll<HTMLElement>('.k-wrap-x, .k-cfloat');
   if (!els.length) return [];
   const rr = root.getBoundingClientRect();
   const z = root.offsetHeight > 0 ? rr.height / root.offsetHeight || 1 : 1;

@@ -27,15 +27,22 @@ declare module '@tiptap/core' {
 }
 
 /** 떠 있는 개체의 자리 (px). 값이 이상하면 null */
-export function floatOf(v: any): { x: number; y: number; behind: boolean; py: number | null; wrap: FloatWrap | null } | null {
+export function floatOf(v: any): { x: number; y: number; behind: boolean; py: number | null; wrap: FloatWrap | null; ax: 'r' | 'c' | null; zw: number | null; zh: number | null; cf: 'l' | 'r' | null } | null {
   if (!v || typeof v !== 'object') return null;
   const x = Number(v.x);
   const y = Number(v.y);
   if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 20000 || Math.abs(y) > 20000) return null;
   // py: 쪽·종이 기준으로 놓인 개체의 쪽 본문 안 세로 자리 (쪽 나누기가 그 자리에 놓는다: placePageFloats)
   const py = v.py != null && Number.isFinite(+v.py) && Math.abs(+v.py) < 20000 ? +v.py : null;
+  // ax: 폭이 내용대로인 글상자(Word 의 틀)의 가로 기준 — r: x 는 오른쪽 끝에서 잰 거리, c: 가운데에서 민 거리
+  const ax = v.ax === 'r' || v.ax === 'c' ? v.ax : null;
+  // zw·zh: 크기를 정하지 않은 상자의 어림 폭·높이 (둘레 글이 비켜 갈 자리를 셀 때만 쓴다)
+  const zw = Number.isFinite(+v.zw) && +v.zw > 0 && +v.zw < 5000 ? +v.zw : null;
+  const zh = Number.isFinite(+v.zh) && +v.zh > 0 && +v.zh < 5000 ? +v.zh : null;
+  // cf: 왼쪽(l)·오른쪽(r) 끝에 붙어 글이 옆으로 흐르는 글상자 (Word 의 틀·첫 글자 장식): 내용 폭 그대로 CSS float 로 그린다
+  const cf = v.cf === 'l' || v.cf === 'r' ? v.cf : null;
   // wrap: 둘레 글이 비켜 가는 개체 (Word 의 정사각형·위아래 배치 — floatWrap 이 글줄을 비킨다)
-  return { x, y, behind: v.behind === true, py, wrap: cleanFloatWrap(v.wrap) };
+  return { x, y, behind: v.behind === true, py, wrap: cleanFloatWrap(v.wrap), ax, zw, zh, cf };
 }
 
 // ---------------- 글상자 (도형 안의 글) ----------------
@@ -124,8 +131,19 @@ export const TextBox = Node.create({
     if (typeof a.radius === 'string' && RADIUS_RE.test(a.radius)) st.push(`border-radius:${a.radius}`);
     if (Array.isArray(a.padding) && a.padding.length === 4) st.push(`padding:${a.padding.map((v: any) => Math.max(0, +v || 0) + 'px').join(' ')}`);
     if (a.valign === 'middle' || a.valign === 'bottom') st.push('display:flex', 'flex-direction:column', `justify-content:${a.valign === 'middle' ? 'center' : 'flex-end'}`);
+    if (fl && fl.cf && fl.py == null) {
+      // 글이 옆으로 흐르는 틀: 상자를 감싼 CSS float (안쪽 여백이 둘레 글과의 간격). x 는 붙은 끝에서 민 거리
+      const d = fl.wrap?.d || [0, 0, 0, 0];
+      const side = fl.cf === 'r' ? 'right' : 'left';
+      // hg: 곁 문단의 내어쓰기 (CSS 는 첫 줄을 그만큼 틀 쪽으로 당긴다: 비킬 자리를 그만큼 넓힌다)
+      const hg = Number.isFinite(+(a.float as any)?.hg) ? Math.max(0, Math.min(500, +(a.float as any).hg)) : 0;
+      const outer = [`float:${side}`, `margin-top:${fl.y}px`, `margin-${side}:${fl.x}px`, fl.cf === 'r' ? `padding:0 0 ${d[2]}px ${d[3]}px` : `padding:0 ${d[1] + hg}px ${d[2]}px 0`];
+      return ['div', { class: 'k-float-anchor' }, ['div', { class: 'k-cfloat', style: outer.join(';'), 'data-f': side, 'data-t': '0' }, ['div', { class: 'k-textbox', style: st.join(';') }, 0]]];
+    }
     if (fl) {
-      st.push(`left:${fl.x}px`, `top:${fl.y}px`);
+      if (fl.ax === 'r') st.push(`right:${fl.x}px`, `top:${fl.y}px`);
+      else if (fl.ax === 'c') st.push(`left:calc(50% + ${fl.x}px)`, 'transform:translateX(-50%)', `top:${fl.y}px`);
+      else st.push(`left:${fl.x}px`, `top:${fl.y}px`);
       return ['div', { class: 'k-float-anchor' }, ['div', { class: 'k-textbox k-float' + (fl.behind ? ' behind' : ''), style: st.join(';'), ...(fl.py != null ? { 'data-py': String(fl.py) } : {}) }, 0]];
     }
     return ['div', { class: 'k-textbox', style: st.join(';') }, 0];
