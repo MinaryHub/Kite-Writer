@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
-import type { DocMeta, HeaderFooter, LoadedDoc } from '../../types';
+import type { DocMeta, HeaderFooter, LoadedDoc, PageBorder, PageBorderSide } from '../../types';
 import {
+  type FloatWrap,
   type JMark,
   type JNode,
   attr,
@@ -27,6 +28,8 @@ import {
   readZipEntry,
 } from '../common';
 import { assembleTable } from '../hwp/reader';
+import { anchorPlace, adjustValues, arrowOfEnd, colorOf, dashOf, emuPx, presetGeometry, themeColors, type AnchorPlace, type PageGeo } from './drawing';
+import type { Mat, ShapeItem } from '../shape';
 import { naturalLineRatio } from '../fontMetrics';
 
 /** DOCX(Office Open XML) 읽기 */
@@ -126,6 +129,10 @@ const onOff = (el: Element | null): boolean | undefined => {
 };
 
 const twipToPt = (v: number) => v / 20;
+/** 떠 있는 그림·도형의 x 가 아직 본문 왼쪽 기준이라는 표시 (문단 속성을 안 뒤 문단 상자 기준으로 고치고 지운다) */
+const BODY_X = '__bodyX';
+/** 글이 든 블록이 있는가 (빈 문단만 있는 글상자는 글 없는 도형으로) */
+const hasBodyText = (blocks: JNode[]) => blocks.some((n) => n.type !== 'paragraph' || (n.content || []).some((c) => c.type !== 'text' || !!(c.text || '').trim()));
 
 const SYMBOL_MAP: Record<number, string> = {
   0xf0b7: '•',
@@ -157,6 +164,18 @@ class DocxReader {
   footnotes = new Map<string, string>();
   endnotes = new Map<string, string>();
   theme = { minorLatin: '', minorEa: '', majorLatin: '', majorEa: '' };
+  /** 테마 색 (dk1·lt1·accent1 …) */
+  themeClr = new Map<string, string>();
+  /** 테마의 선 굵기 목록 (fmtScheme 의 lnStyleLst, px): 도형 스타일의 lnRef 번호가 가리킨다 */
+  themeLines: number[] = [0.67, 1.33, 2];
+  /** 쪽 크기·여백 (px): 떠 있는 개체의 자리를 셈한다 (본문의 마지막 구역 설정) */
+  geo: PageGeo = { W: 816, H: 1056, ml: 96, mr: 96, mt: 96, mb: 96 };
+  /** 머리말 영역의 위쪽 (종이 위에서, px) */
+  hdrTop = 48;
+  /** 쪽 배경을 보인다 (settings 의 displayBackgroundShape) */
+  showBackground = false;
+  /** 지금 읽는 머리말·꼬리말 */
+  private hfKind: 'header' | 'footer' | null = null;
   /** 줄 격자 간격 (pt). 구역의 docGrid 가 type=lines·linesAndChars 일 때만 */
   gridPt = 0;
   /** 호환 모드 (settings.xml 의 compatibilityMode: 15 = Word 2013 이후). 표의 왼쪽 자리 등이 달라진다 */
@@ -229,6 +248,9 @@ class DocxReader {
       const mi = pick('minorFont');
       const ma = pick('majorFont');
       this.theme = { minorLatin: mi.latin, minorEa: mi.ea, majorLatin: ma.latin, majorEa: ma.ea };
+      this.themeClr = themeColors(th);
+      const lws = kids(descendant(th, 'lnStyleLst'), 'ln').map((l) => emuPx(attr(l, 'w'), 0));
+      if (lws.length) this.themeLines = lws;
     }
     const settingsXml = await this.text('word/settings.xml');
     if (settingsXml) {
@@ -242,6 +264,9 @@ class DocxReader {
       this.evenOdd = !!eo && onOff(eo) !== false;
       const as = descendant(sx, 'doNotUseHTMLParagraphAutoSpacing');
       this.addSpacing = !!as && onOff(as) !== false;
+      // 쪽 배경(w:background)은 이것이 있어야 쪽 보기에 나온다
+      const db = descendant(sx, 'displayBackgroundShape');
+      this.showBackground = !!db && onOff(db) !== false;
     }
     const appXml = await this.text('docProps/app.xml');
     this.fromKite = !!appXml && /<Application>Kite<\/Application>/.test(appXml);
@@ -776,6 +801,22 @@ class DocxReader {
     const pAttrs = this.paraAttrs(p, font, size);
     // 제목: 제목 문단의 모양은 Word 의 스타일 그대로 두고(글자 모양은 글자마다 적혀 있다) 개요 수준만 단다 (차례 만들기가 쓴다)
     if (heading) pAttrs.outlineLevel = heading;
+    // 떠 있는 글상자는 문단 앞의 높이 없는 자리 표시로, 떠 있는 그림·도형의 x 는 문단 상자 왼쪽(왼쪽 여백 + 내어쓰기) 기준으로
+    const floatBoxes: JNode[] = [];
+    const paraLeft = ((+pAttrs.indentLeft || 0) + Math.max(0, -(+pAttrs.textIndent || 0))) * (96 / 72);
+    for (let i = 0; i < inline.length; i++) {
+      const n = inline[i];
+      if (n.type === '__floatbox') {
+        floatBoxes.push(n.attrs!.node);
+        inline.splice(i--, 1);
+        continue;
+      }
+      const fl = n.attrs?.float;
+      if (fl && fl[BODY_X]) {
+        const { [BODY_X]: _drop, ...rest } = fl;
+        n.attrs = { ...n.attrs, float: { ...rest, x: round(rest.x - paraLeft, 2) } };
+      }
+    }
     // 쪽 나누기로 분할
     const segments: JNode[][] = [[]];
     /** 조각 앞의 나누기가 단 나누기인가 (아니면 쪽 나누기) */
@@ -788,6 +829,7 @@ class DocxReader {
     }
     const blocks: { node: JNode }[] = [];
     if (p.pageBreakBefore) blocks.push({ node: { type: 'pageBreak' } });
+    for (const fb of floatBoxes) blocks.push({ node: fb });
     // 번호 매기기: Word 가 그리는 번호 글을 문단 맨 앞에 글자로 넣는다 (번호 모양·다단계 번호·수준별 들여쓰기를 그대로 보이게).
     // 번호 뒤의 탭은 내어쓰기 자리(문단 왼쪽)까지 건너뛴다
     if (p.numId && p.numId !== '0' && !this.headerMode) {
@@ -1031,9 +1073,39 @@ class DocxReader {
 
   private convertDrawing(d: Element, out: JNode[], after: JNode[]) {
     const container = kid(d, 'inline') || kid(d, 'anchor');
+    // 떠 있는 개체(wp:anchor): 종이·여백·문단 기준 자리에 띄운다
+    let place = container && localName(container) === 'anchor' ? anchorPlace(container, this.geo) : null;
     const ext = kid(container, 'extent');
-    const w = ext ? Math.round(parseFloat(attr(ext, 'cx') || '0') / 9525) : null;
-    const h = ext ? Math.round(parseFloat(attr(ext, 'cy') || '0') / 9525) : null;
+    // 크기: 떠 있는 개체는 쪽·여백에 대한 상대 크기까지 셈한 것
+    const w = place ? Math.round(place.w) : ext ? Math.round(parseFloat(attr(ext, 'cx') || '0') / 9525) : null;
+    const h = place ? Math.round(place.h) : ext ? Math.round(parseFloat(attr(ext, 'cy') || '0') / 9525) : null;
+    // 머리말·꼬리말 안: 종이·여백 기준 세로 자리를 그 영역 위쪽(영역의 첫 문단) 기준으로 바꾼다 (쪽마다 같은 자리라 쪽 나누기 뒤 맞출 것이 없다)
+    if (place && this.headerMode && place.py != null) {
+      const zoneTop = this.hfKind === 'footer' ? this.geo.H - this.geo.mb : this.hdrTop;
+      place = { ...place, y: round(place.py + this.geo.mt - zoneTop, 2), py: null };
+    }
+    const floatAt = (pl: AnchorPlace, bodyX: boolean) => {
+      const wrap = this.wrapOf(pl);
+      return { x: pl.x, y: pl.y, ...(pl.py != null ? { py: pl.py } : {}), ...(pl.behind ? { behind: true } : {}), ...(wrap ? { wrap } : {}), ...(bodyX ? { [BODY_X]: true } : {}) };
+    };
+    // 도형·글상자·묶음 (wps:wsp, wpg:wgp): 글이 든 사각형·타원은 고칠 수 있는 글상자, 그 밖에는 그린 도형으로
+    const gd = descendant(container, 'graphicData');
+    const shapeEl = gd ? kids(gd).find((k) => localName(k) === 'wsp' || localName(k) === 'wgp') || null : null;
+    if (shapeEl && w && h) {
+      const node = this.drawingShape(shapeEl, w, h);
+      if (node) {
+        if (node.type === 'textBox') {
+          if (place) {
+            node.attrs = { ...node.attrs, float: floatAt(place, false) };
+            out.push({ type: '__floatbox', attrs: { node } });
+          } else after.push(node);
+        } else {
+          if (place) node.attrs = { ...node.attrs, float: floatAt(place, true) };
+          out.push(node);
+        }
+        return;
+      }
+    }
     // 같은 그림을 형식만 달리 두 번 담은 것(AlternateContent 의 Choice·Fallback)은 하나만 쓴다: 널리 읽히는 Fallback 쪽
     const blips = descendants(d, 'blip').filter((b) => {
       for (let e: Element | null = b.parentElement; e && e !== d; e = e.parentElement) {
@@ -1052,7 +1124,7 @@ class DocxReader {
         const sr = descendant(d, 'srcRect');
         const pv = (k: string) => (parseFloat(attr(sr, k) || '0') || 0) / 100000;
         const crop = sr ? normCrop(pv('t'), pv('r'), pv('b'), pv('l')) : null;
-        if (src) out.push({ type: 'image', attrs: { src, width: w || null, height: h || null, crop } });
+        if (src) out.push({ type: 'image', attrs: { src, width: w || null, height: h || null, crop, ...(place ? { float: floatAt(place, true) } : {}) } });
         else out.push({ type: 'image', attrs: { src: placeholderImage('그림', w || 120, h || 80), width: w || 120, height: h || 80 } });
         if (blips.length === 1) break;
       }
@@ -1061,6 +1133,185 @@ class DocxReader {
     }
     const txbx = descendant(d, 'txbxContent');
     if (txbx) after.push(...this.convertBody(txbx));
+  }
+
+  /**
+   * 떠 있는 개체 둘레의 글 흐름 (정사각형·빽빽하게·통과 → 한쪽, 위아래 → 옆을 비움).
+   * 문단 기준으로 놓인 것만: 쪽·여백 기준(py)은 쪽 나누기 뒤에야 자리가 정해지고, 머리말·꼬리말 안의 것은 본문 글과 따로 그린다.
+   * 화면(CSS)은 글을 한쪽으로만 흐르게 할 수 있어 양쪽·넓은 쪽은 남는 자리가 넓은 쪽으로 정한다
+   */
+  private wrapOf(pl: AnchorPlace): FloatWrap | null {
+    if (this.headerMode || pl.behind || pl.py != null || pl.wrap === 'none') return null;
+    const d = pl.dist;
+    if (pl.wrap === 'topBottom') return { s: 'tb', d };
+    const bodyW = this.geo.W - this.geo.ml - this.geo.mr;
+    const roomL = pl.x - d[3];
+    const roomR = bodyW - (pl.x + pl.w + d[1]);
+    // 이보다 좁은 틈에는 글을 넣지 않는다 (0.5 인치)
+    const MIN = 48;
+    if (pl.side === 'left') return { s: roomL >= MIN ? 'l' : 'tb', d };
+    if (pl.side === 'right') return { s: roomR >= MIN ? 'r' : 'tb', d };
+    if (Math.max(roomL, roomR) < MIN) return { s: 'tb', d };
+    return { s: roomR >= roomL ? 'r' : 'l', d };
+  }
+
+  /** 그리기 개체(wps:wsp 도형, wpg:wgp 묶음, 크기 w×h px) → 글상자(글이 든 돌리지 않은 사각형·타원) 또는 도형 노드 */
+  private drawingShape(el: Element, w: number, h: number): JNode | null {
+    if (localName(el) === 'wsp') {
+      const sp = this.wspParts(el);
+      const txbx = descendant(el, 'txbxContent');
+      const content = txbx ? this.convertBody(txbx) : [];
+      const boxGeom = ['rect', 'roundRect', 'ellipse', 'flowChartProcess', 'flowChartAlternateProcess'].includes(sp.prst);
+      if (hasBodyText(content) && boxGeom && !sp.rot) {
+        const attrs: Record<string, any> = { width: w, height: h, padding: sp.pad };
+        // 반쯤 넘게 투명한 채우기는 글상자 바탕으로 쓰지 않는다 (글이 비쳐 보이게)
+        if (sp.fill && sp.fill.a >= 0.5) attrs.bg = sp.fill.c;
+        if (sp.line) {
+          attrs.borderColor = sp.line.c;
+          attrs.borderWidth = Math.round(sp.line.w * 100) / 100;
+          if (sp.line.d !== 'SOLID') attrs.borderDash = sp.line.d;
+        }
+        if (sp.prst === 'ellipse') {
+          attrs.radius = '50%';
+          // 타원의 글 영역은 타원 안에 든 사각형 (Word 의 ellipse 꼴의 글 상자: 가로·세로 양쪽에서 (1 - 1/√2)/2 씩 안쪽)
+          const k = (1 - Math.SQRT1_2) / 2;
+          attrs.padding = [h * k, w * k, h * k, w * k].map((v, i) => Math.round((v + sp.pad[i]) * 100) / 100);
+        }
+        else if (sp.prst === 'roundRect' || sp.prst === 'flowChartAlternateProcess') attrs.radius = `${round((Math.min(w, h) * (sp.av.get('adj') ?? 16667)) / 100000, 1)}px`;
+        if (sp.va) attrs.valign = sp.va;
+        return { type: 'textBox', attrs, content: content.length ? content : [paragraph()] };
+      }
+      const items = this.wspItems(sp, 0, 0, w, h, content);
+      return items.length ? { type: 'shape', attrs: { width: w, height: h, d: { items } } } : null;
+    }
+    const items: ShapeItem[] = [];
+    this.groupItems(el, { x: 0, y: 0, w, h }, items, 0);
+    return items.length ? { type: 'shape', attrs: { width: w, height: h, d: { items, group: true } } } : null;
+  }
+
+  /** 도형(wps:wsp)의 꼴·돌림·채우기·선·글 안 여백 (도형 스타일 wps:style 의 테마 색·선 굵기까지) */
+  private wspParts(el: Element) {
+    const spPr = kid(el, 'spPr');
+    const xfrm = kid(spPr, 'xfrm');
+    const rot = ((parseFloat(attr(xfrm, 'rot') || '0') || 0) / 60000) % 360;
+    const flipH = attr(xfrm, 'flipH') === '1';
+    const flipV = attr(xfrm, 'flipV') === '1';
+    const pg = kid(spPr, 'prstGeom');
+    const prst = attr(pg, 'prst') || (kid(spPr, 'custGeom') ? 'custom' : 'rect');
+    const av = adjustValues(pg);
+    const style = kid(el, 'style');
+    let fill: { c: string; a: number } | null = null;
+    const solid = kid(spPr, 'solidFill');
+    const grad = kid(spPr, 'gradFill');
+    if (solid) fill = colorOf(solid, this.themeClr);
+    else if (grad) fill = colorOf(descendant(grad, 'gs'), this.themeClr);
+    else if (!kid(spPr, 'noFill') && !kid(spPr, 'blipFill')) {
+      const fr = kid(style, 'fillRef');
+      if ((parseInt(attr(fr, 'idx') || '0', 10) || 0) > 0) fill = colorOf(fr, this.themeClr);
+    }
+    const ln = kid(spPr, 'ln');
+    let line: { c: string; w: number; d: string; head: string | null; tail: string | null } | null = null;
+    if (!(ln && kid(ln, 'noFill'))) {
+      const lnRef = kid(style, 'lnRef');
+      const idx = parseInt(attr(lnRef, 'idx') || '0', 10) || 0;
+      const c = (ln && colorOf(kid(ln, 'solidFill'), this.themeClr)) || (idx > 0 ? colorOf(lnRef, this.themeClr) : null);
+      const lw = ln && attr(ln, 'w') ? emuPx(attr(ln, 'w')) : idx > 0 ? this.themeLines[Math.min(idx, this.themeLines.length) - 1] : 0.75;
+      if (c) line = { c: c.c, w: Math.max(0.5, Math.min(40, lw)), d: dashOf(attr(kid(ln, 'prstDash'), 'val')), head: arrowOfEnd(kid(ln, 'headEnd')), tail: arrowOfEnd(kid(ln, 'tailEnd')) };
+    }
+    const bp = kid(el, 'bodyPr');
+    const ins = (k: string, d: number) => (attr(bp, k) != null ? Math.max(0, emuPx(attr(bp, k))) : d);
+    const pad = [ins('tIns', 4.8), ins('rIns', 9.6), ins('bIns', 4.8), ins('lIns', 9.6)].map((v) => Math.round(v * 100) / 100);
+    const anc = attr(bp, 'anchor');
+    const va: 'middle' | 'bottom' | null = anc === 'ctr' ? 'middle' : anc === 'b' ? 'bottom' : null;
+    return { rot, flipH, flipV, prst, av, fill, line, pad, va };
+  }
+
+  /** 도형 하나 → 도형 조각들 (꼴 + 안의 글). (fx, fy, fw, fh): 틀 안 자리 px */
+  private wspItems(sp: ReturnType<DocxReader['wspParts']>, fx: number, fy: number, fw: number, fh: number, content: JNode[]): ShapeItem[] {
+    const geom = presetGeometry(sp.prst === 'custom' ? 'rect' : sp.prst, fw, fh, sp.av);
+    // 가운데를 축으로 돌리고 뒤집은 뒤 틀 안 자리로
+    const t = (sp.rot * Math.PI) / 180;
+    const cos = Math.cos(t);
+    const sin = Math.sin(t);
+    const sx = sp.flipH ? -1 : 1;
+    const sy = sp.flipV ? -1 : 1;
+    const a = cos * sx;
+    const b = sin * sx;
+    const c = -sin * sy;
+    const d = cos * sy;
+    const cx = fw / 2;
+    const cy = fh / 2;
+    const r4 = (v: number) => Math.round(v * 10000) / 10000;
+    const m = [a, b, c, d, cx - (a * cx + c * cy) + fx, cy - (b * cx + d * cy) + fy].map(r4) as Mat;
+    const it: ShapeItem = { ...geom, m, w: fw, h: fh, fc: geom.k === 'line' ? null : sp.fill?.c ?? null, sc: sp.line?.c ?? null };
+    if (sp.fill && sp.fill.a < 1 && geom.k !== 'line') it.al = Math.round((1 - sp.fill.a) * 100) / 100;
+    if (sp.line) {
+      it.sw = Math.round(sp.line.w * 100) / 100;
+      if (sp.line.d !== 'SOLID') it.sd = sp.line.d;
+      if (sp.line.head) Object.assign(it, { hs: sp.line.head, hf: true });
+      if (sp.line.tail) Object.assign(it, { ts: sp.line.tail, tf: true });
+    }
+    const out: ShapeItem[] = [it];
+    if (hasBodyText(content)) out.push({ k: 'text', m: [1, 0, 0, 1, r4(fx), r4(fy)], w: fw, h: fh, content, pad: sp.pad, ...(sp.va ? { va: sp.va } : {}) });
+    return out;
+  }
+
+  /** 묶음(wpg:wgp·grpSp)의 조각들: 묶음 틀(frame, px) 안에 자식 좌표(chOff·chExt)를 맞춰 놓는다 */
+  private groupItems(g: Element, frame: { x: number; y: number; w: number; h: number }, items: ShapeItem[], depth: number) {
+    if (depth > 8 || items.length > 1000) return;
+    const xfrm = kid(kid(g, 'grpSpPr'), 'xfrm');
+    const num = (el: Element | null, k: string) => {
+      const v = parseFloat(attr(el, k) || '0');
+      return Number.isFinite(v) ? v : 0;
+    };
+    const chOff = kid(xfrm, 'chOff');
+    const chExt = kid(xfrm, 'chExt');
+    const cox = num(chOff, 'x');
+    const coy = num(chOff, 'y');
+    const cew = num(chExt, 'cx');
+    const ceh = num(chExt, 'cy');
+    const sx = cew > 0 ? frame.w / cew : 1 / 9525;
+    const sy = ceh > 0 ? frame.h / ceh : 1 / 9525;
+    for (const ch of kids(g)) {
+      const n = localName(ch);
+      if (n !== 'wsp' && n !== 'pic' && n !== 'grpSp') continue;
+      const xf = kid(kid(ch, n === 'grpSp' ? 'grpSpPr' : 'spPr'), 'xfrm');
+      const off = kid(xf, 'off');
+      const ext = kid(xf, 'ext');
+      const r = { x: frame.x + (num(off, 'x') - cox) * sx, y: frame.y + (num(off, 'y') - coy) * sy, w: Math.abs(num(ext, 'cx') * sx), h: Math.abs(num(ext, 'cy') * sy) };
+      if (n === 'grpSp') this.groupItems(ch, r, items, depth + 1);
+      else if (n === 'wsp') {
+        const txbx = descendant(ch, 'txbxContent');
+        items.push(...this.wspItems(this.wspParts(ch), r.x, r.y, r.w, r.h, txbx ? this.convertBody(txbx) : []));
+      } else {
+        const rid = attr(descendant(ch, 'blip'), 'embed');
+        const src = rid ? this.images.get(rid) : undefined;
+        if (src) items.push({ k: 'img', m: [1, 0, 0, 1, r.x, r.y], w: r.w, h: r.h, src });
+      }
+    }
+  }
+
+  /** 쪽 배경 (w:background): 색, 또는 VML 채우기의 그림(바둑판·늘이기). settings 의 displayBackgroundShape 가 있을 때만 보인다 */
+  applyBackground(doc: Document) {
+    const bg = kid(doc.documentElement, 'background');
+    if (!bg || !this.showBackground) return;
+    const v = attr(bg, 'color');
+    const color = v && /^[0-9A-Fa-f]{6}$/.test(v) ? '#' + v.toUpperCase() : null;
+    const fill = descendant(bg, 'fill');
+    const rid = attr(fill, 'id');
+    const src = rid ? this.images.get(rid) : undefined;
+    const type = attr(fill, 'type') || 'solid';
+    const image = src && /^data:image\/(png|jpeg|gif|webp|bmp);base64,/.test(src) && (type === 'tile' || type === 'frame') ? src : null;
+    // 흰 바탕은 그리지 않는다 (종이 색과 같다)
+    if (!image && (!color || color === '#FFFFFF')) return;
+    const pb: PageBorder = this.settings.pageBorder || { body: true, offset: [0, 0, 0, 0] };
+    pb.bg = color;
+    pb.fillArea = 'paper';
+    if (image) {
+      pb.image = image;
+      pb.imageMode = type === 'tile' ? 'TILE' : 'TOTAL';
+    }
+    this.settings.pageBorder = pb;
   }
 
   convertTable(tbl: Element): JNode {
@@ -1211,6 +1462,7 @@ class DocxReader {
     this.images = new Map();
     await this.loadImages(this.rels, this.images);
     this.headerMode = true;
+    this.hfKind = which;
     let blocks: JNode[];
     const rootEl = parseXml(xml).documentElement;
     // Kite 가 쓴 글자뿐인 머리말: 문단마다 Header·Footer 스타일이 달려 있다 (모양을 갖춘 머리말에는 없다)
@@ -1219,6 +1471,7 @@ class DocxReader {
       blocks = this.convertBody(rootEl);
     } finally {
       this.headerMode = false;
+      this.hfKind = null;
       this.rels = bodyRels;
       this.images = bodyImages;
     }
@@ -1260,6 +1513,18 @@ class DocxReader {
     // 꼬리말은 아래쪽 끝(종이 아래에서 꼬리말 거리)에 맞춰 위로 자란다
     if (which === 'footer') hf.valign = 'bottom';
     return { hf, pageNums };
+  }
+
+  /** 떠 있는 개체의 자리를 셈할 쪽 크기·여백 (본문의 구역 설정에서, 본문을 읽기 전에) */
+  setGeo(sectPr: Element | null) {
+    const sz = kid(sectPr, 'pgSz');
+    const mar = kid(sectPr, 'pgMar');
+    const tw = (el: Element | null, k: string, d: number) => {
+      const v = Math.abs(parseFloat(attr(el, k) || String(d)));
+      return Number.isFinite(v) ? Math.min(v, 100000) / 15 : d / 15;
+    };
+    this.geo = { W: tw(sz, 'w', 12240), H: tw(sz, 'h', 15840), ml: tw(mar, 'left', 1440), mr: tw(mar, 'right', 1440), mt: tw(mar, 'top', 1440), mb: tw(mar, 'bottom', 1440) };
+    this.hdrTop = Math.min(tw(mar, 'header', 720), this.geo.mt);
   }
 
   async applySection(sectPr: Element | null) {
@@ -1305,6 +1570,31 @@ class DocxReader {
       }
       if (attr(cols, 'sep') === '1' || attr(cols, 'sep') === 'true') c.line = { w: 0.12, c: '#000000', s: 'solid' };
       pg.columns = c;
+    }
+    // 쪽 테두리 (w:pgBorders): 선으로 된 것만 (그림 테두리 — mapleMuffins 같은 — 는 그릴 수 없어 뺀다)
+    const pgb = kid(sectPr, 'pgBorders');
+    if (pgb) {
+      const LINE: Record<string, PageBorderSide['s']> = { single: 'solid', thick: 'solid', double: 'double', dotted: 'dotted', dashed: 'dashed', dashSmallGap: 'dashed', dotDash: 'dashed', dotDotDash: 'dashed', triple: 'double', thinThickSmallGap: 'double', thickThinSmallGap: 'double', thinThickMediumGap: 'double', thickThinMediumGap: 'double', thinThickLargeGap: 'double', thickThinLargeGap: 'double', thinThickThinSmallGap: 'double', thinThickThinMediumGap: 'double', thinThickThinLargeGap: 'double', threeDEmboss: 'solid', threeDEngrave: 'solid', outset: 'solid', inset: 'solid', wave: 'solid', doubleWave: 'double', dashDotStroked: 'dashed' };
+      const PT_MM = 25.4 / 72;
+      const sides: NonNullable<PageBorder['sides']> = {};
+      const offset = [0, 0, 0, 0];
+      const names = [['left', 'l', 0], ['right', 'r', 1], ['top', 't', 2], ['bottom', 'b', 3]] as const;
+      for (const [name, k, i] of names) {
+        const e = kid(pgb, name);
+        const s = LINE[attr(e, 'val') || ''];
+        if (!e || !s) continue;
+        const sz = parseFloat(attr(e, 'sz') || '4');
+        const c = attr(e, 'color');
+        sides[k] = { s, w: round(Math.max(0.1, Math.min(10, ((Number.isFinite(sz) ? sz : 4) / 8) * PT_MM)), 3), c: c && /^[0-9A-Fa-f]{6}$/.test(c) ? '#' + c.toUpperCase() : '#000000' };
+        const sp = parseFloat(attr(e, 'space') || '0');
+        offset[i] = round(Math.max(0, Math.min(31, Number.isFinite(sp) ? sp : 0)) * PT_MM, 2);
+      }
+      if (Object.keys(sides).length) {
+        const disp = attr(pgb, 'display');
+        const pb: PageBorder = { ...(this.settings.pageBorder || {}), sides, body: attr(pgb, 'offsetFrom') !== 'page', offset };
+        pb.borderOn = disp === 'firstPage' ? 'first' : disp === 'notFirstPage' ? 'notFirst' : null;
+        this.settings.pageBorder = pb;
+      }
     }
     // 줄 번호 (w:lnNumType): countBy 가 있어야 켜진 것. start 는 0부터 센 값, 간격 기본은 0.25 인치
     const lnt = kid(sectPr, 'lnNumType');
@@ -1476,8 +1766,10 @@ export async function readDocx(data: Uint8Array): Promise<LoadedDoc> {
   // 줄 격자: 문단의 줄 높이를 셈할 때 쓰므로 본문보다 먼저 읽는다
   const grid = kid(sectPr, 'docGrid');
   if (grid && /^(lines|linesAndChars|snapToChars)$/.test(attr(grid, 'type') || '')) reader.gridPt = Math.max(0, Math.min(200, parseFloat(attr(grid, 'linePitch') || '0') / 20)) || 0;
+  reader.setGeo(sectPr);
   const blocks = body ? reader.convertBody(body) : [];
   await reader.applySection(sectPr);
+  reader.applyBackground(doc);
   const meta: DocMeta = {};
   const core = await readZipEntry(zip.file('docProps/core.xml'), 'string');
   if (core) {

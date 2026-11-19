@@ -1,7 +1,7 @@
 import { cleanLook, type PicLook } from './picLook';
 import { latexToHwp } from '../math/hwpEq';
 import { cleanTabs, type TabDefs } from '../editor/tabLayout';
-import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type JMark, type JNode, type ParaBorder, cleanColumns, cleanPageHide, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
+import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type FloatWrap, type JMark, type JNode, type ParaBorder, cleanColumns, cleanFloatWrap, cleanPageHide, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
 import type { Columns } from '../types';
 import { cleanShape, type ShapeData } from './shape';
 import type { FloatHw } from './hwpLayout';
@@ -12,6 +12,8 @@ export interface FlatFloat {
   y: number;
   behind?: boolean;
   hw?: FloatHw | null;
+  /** 둘레 글 흐름 (Word 문서에서 읽은 것) */
+  wrap?: FloatWrap | null;
 }
 
 /** 문서 노드의 float 속성 → FlatFloat (이상한 값은 null) */
@@ -22,6 +24,8 @@ export function flatFloatOf(v: any): FlatFloat | null {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   const out: FlatFloat = { x, y };
   if (v.behind === true) out.behind = true;
+  const wrap = cleanFloatWrap(v.wrap);
+  if (wrap) out.wrap = wrap;
   const h = v.hw;
   if (h && typeof h === 'object' && [h.vo, h.ho].every((n: any) => Number.isFinite(+n))) {
     const pick = (val: any, list: string[], def: string) => (list.includes(val) ? val : def);

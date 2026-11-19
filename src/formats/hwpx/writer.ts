@@ -159,14 +159,15 @@ class SectionWriter {
       };
     }
     const hw = fl.hw || {
-      wrap: fl.behind ? 'BEHIND_TEXT' : 'IN_FRONT_OF_TEXT',
+      // Word 문서의 둘레 글 흐름은 한글의 어울림·자리 차지로 (바깥 여백: 왼쪽·오른쪽·위·아래)
+      wrap: fl.wrap ? (fl.wrap.s === 'tb' ? 'TOP_AND_BOTTOM' : 'SQUARE') : fl.behind ? 'BEHIND_TEXT' : 'IN_FRONT_OF_TEXT',
       vr: 'PARA',
       hr: 'COLUMN',
       va: 'TOP',
       ha: 'LEFT',
       vo: Math.max(0, pxToHwp(fl.y - sb)),
       ho: pxToHwp(fl.x + paraLeft),
-      om: [0, 0, 0, 0],
+      om: fl.wrap ? [fl.wrap.d[3], fl.wrap.d[1], fl.wrap.d[0], fl.wrap.d[2]].map((v) => Math.min(60000, pxToHwp(v))) : [0, 0, 0, 0],
     };
     const om = hw.om || [0, 0, 0, 0];
     const overlay = hw.wrap === 'IN_FRONT_OF_TEXT' || hw.wrap === 'BEHIND_TEXT';

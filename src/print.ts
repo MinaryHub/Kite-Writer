@@ -413,6 +413,56 @@ export function collectPageBoxes(root: HTMLElement): PageBox[] {
     });
 }
 
+/** 둘레 글이 비켜 가는 자리(floatWrap)가 제 블록 아래로 이어지는 것 (편집기 본문 기준 px) */
+interface WrapCarry {
+  f: string;
+  left: number;
+  right: number;
+  /** 글이 비켜 가기 시작하는 곳 (float 위쪽 + 꼴의 위 안쪽) */
+  top: number;
+  bottom: number;
+  owner: HTMLElement;
+}
+
+/** 블록 사본은 따로 놓여 앞 블록의 float 가 미치지 않는다: 이어지는 비킴 자리를 모아 뒤 블록의 사본에도 둔다 */
+function wrapCarries(root: HTMLElement): WrapCarry[] {
+  const els = root.querySelectorAll<HTMLElement>('.k-wrap-x');
+  if (!els.length) return [];
+  const rr = root.getBoundingClientRect();
+  const z = root.offsetHeight > 0 ? rr.height / root.offsetHeight || 1 : 1;
+  const out: WrapCarry[] = [];
+  for (const el of Array.from(els)) {
+    let owner: HTMLElement | null = el;
+    while (owner && owner.parentElement !== root) owner = owner.parentElement;
+    if (!owner) continue;
+    const r = el.getBoundingClientRect();
+    const bottom = (r.bottom - rr.top) / z;
+    if (bottom <= owner.offsetTop + owner.offsetHeight) continue;
+    out.push({ f: el.dataset.f || 'left', left: (r.left - rr.left) / z, right: (r.right - rr.left) / z, top: (r.top - rr.top) / z + (parseFloat(el.dataset.t || '0') || 0), bottom, owner });
+  }
+  return out;
+}
+
+/** 앞 블록에서 이어지는 비킴 자리를 이 문단 사본 맨 앞에 둔다 */
+function addWrapCarries(clone: HTMLElement, b: PageBox, carries: WrapCarry[]) {
+  if (!/^(P|H[1-6])$/.test(b.el.tagName)) return;
+  let cs: CSSStyleDeclaration | null = null;
+  for (const c of carries) {
+    if (c.owner === b.el || c.owner.offsetTop >= b.top || c.bottom <= b.top) continue;
+    cs = cs || getComputedStyle(b.el);
+    const px = (v: string) => parseFloat(v) || 0;
+    const ct = b.top + px(cs.borderTopWidth) + px(cs.paddingTop);
+    const cl = b.left + px(cs.borderLeftWidth) + px(cs.paddingLeft);
+    const cr = b.left + b.width - px(cs.borderRightWidth) - px(cs.paddingRight);
+    if (c.bottom <= ct) continue;
+    const width = c.f === 'full' ? '100%' : c.f === 'right' ? `${Math.max(0, cr - c.left).toFixed(2)}px` : `${Math.max(0, c.right - cl).toFixed(2)}px`;
+    const span = document.createElement('span');
+    span.className = 'k-wrap-x';
+    span.style.cssText = `float:${c.f === 'right' ? 'right' : 'left'};width:${width};height:${(c.bottom - ct).toFixed(2)}px;shape-outside:inset(${Math.max(0, c.top - ct).toFixed(2)}px 0 0 0)`;
+    clone.insertBefore(span, clone.firstChild);
+  }
+}
+
 /** 편집 화면의 쪽 배치 (구역마다 용지가 다르면 쪽마다 다르다) */
 export function printPlans(tab: DocTab): PagePlan[] {
   const pageCount = Math.max(1, tab.layout.pageCount);
@@ -441,7 +491,9 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
   body.className = 'print-body';
   Object.assign(body.style, { left: `${g.ml}px`, top: `${g.mt}px`, width: `${g.contentW}px`, height: `${g.contentH}px` });
   const content = document.createElement('div');
-  content.className = 'kdoc-content' + (tab.settings.hwpMetrics ? ' hwp-metrics' : '') + (tab.settings.fixedLines ? ' fixed-lines' : '');
+  const root = boxes[0]?.el.parentElement || null;
+  const carries = root ? wrapCarries(root) : [];
+  content.className = 'kdoc-content' + (tab.settings.hwpMetrics ? ' hwp-metrics' : '') + (tab.settings.fixedLines ? ' fixed-lines' : '') + (root?.classList.contains('k-has-wrap') ? ' k-has-wrap' : '');
   Object.assign(content.style, { position: 'relative', width: `${g.contentW}px`, height: `${g.contentH}px` });
   const y0 = plan.contentTop;
   const y1 = y0 + g.contentH;
@@ -461,6 +513,7 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
     clone.classList.remove('pg-measuring');
     clone.querySelectorAll('.selectedCell').forEach((e) => e.classList.remove('selectedCell'));
     clone.querySelectorAll('.search-match').forEach((e) => e.classList.remove('search-match', 'current'));
+    if (carries.length) addWrapCarries(clone, b, carries);
     content.appendChild(clone);
   }
   body.appendChild(content);

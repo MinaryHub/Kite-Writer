@@ -761,6 +761,28 @@
 .master-page {
   isolation: isolate;
 }
+/* 떠 있는 그림·도형이 든 문단은 그 개체의 자리 기준이 된다 (Word 문서 등 한글 문서가 아닌 것: 한글 문서는 모든 문단이 기준) */
+.kdoc-content :is(p, h1, h2, h3, h4, h5, h6):has(.k-float) {
+  position: relative;
+}
+/* 떠 있는 개체 둘레로 글이 비켜 가는 자리 (floatWrap): 보이지 않고 누르거나 고를 수 없다 */
+.kdoc-content .k-wrap-x {
+  pointer-events: none;
+  user-select: none;
+}
+.kdoc-content .k-wrap-w {
+  display: none;
+}
+/*
+ * 그런 개체가 있는 문서의 빈 문단(떠 있는 개체만 든 것도): 폭이 조금 있어야 옆을 비운 개체 아래로 밀린다 (Word 와 같이).
+ * 비킴 자리가 든 문단은 그 float 뒤의 자리(k-wrap-w)에 폭을 준다 (앞에 두면 float 가 다음 줄로 밀린다)
+ */
+:is(.ProseMirror.k-has-wrap, .kdoc-content.k-has-wrap) :is(p, h1, h2, h3, h4, h5, h6):has(> br.ProseMirror-trailingBreak):not(:has(> :not(br, .k-float, .ProseMirror-separator)))::before,
+.kdoc-content :is(p, h1, h2, h3, h4, h5, h6):has(> br.ProseMirror-trailingBreak):not(:has(> :not(br, .k-wrap, .k-float, .ProseMirror-separator))) > .k-wrap > .k-wrap-w {
+  content: '';
+  display: inline-block;
+  width: 1px;
+}
 /* 떠 있는 글상자: 높이 없는 자리 표시 안에서 제 위치에 뜬다 (뒤따르는 문단 상자의 위쪽이 기준) */
 .kdoc-content .k-float-anchor {
   position: relative;

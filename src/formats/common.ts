@@ -125,6 +125,24 @@ export function cleanPageHide(v: unknown): string | null {
   return out || null;
 }
 
+/**
+ * 떠 있는 개체 둘레의 글 흐름 (Word 의 정사각형·빽빽하게·통과·위아래 배치).
+ * s: 글이 흐르는 쪽 — r 개체 오른쪽, l 개체 왼쪽, tb 개체 위아래만(옆은 비움). d: 개체와 글 사이 간격 px (위·오른쪽·아래·왼쪽)
+ */
+export interface FloatWrap {
+  s: 'l' | 'r' | 'tb';
+  d: [number, number, number, number];
+}
+
+/** float.wrap 값 검사 (이상하면 null) */
+export function cleanFloatWrap(v: unknown): FloatWrap | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as { s?: unknown; d?: unknown };
+  if (o.s !== 'l' && o.s !== 'r' && o.s !== 'tb') return null;
+  const d = Array.isArray(o.d) && o.d.length === 4 ? o.d.map((n) => Math.max(0, Math.min(500, Number(n) || 0))) : [0, 0, 0, 0];
+  return { s: o.s, d: d as FloatWrap['d'] };
+}
+
 export function placeholderImage(label: string, w = 160, h = 90): string {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect x="0.5" y="0.5" width="${w - 1}" height="${h - 1}" fill="#f4f4f4" stroke="#999" stroke-dasharray="4 3"/><text x="50%" y="50%" font-size="12" fill="#666" text-anchor="middle" dominant-baseline="middle" font-family="sans-serif">${xmlEscape(label)}</text></svg>`;
   return 'data:image/svg+xml;base64,' + bytesToBase64(new TextEncoder().encode(svg));

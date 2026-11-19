@@ -12,7 +12,7 @@ import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import { viewState } from '../viewState';
 import type { Columns } from '../../types';
 import { cleanMargins } from '../../formats/flatten';
-import { cleanColumns, normColor, parseBorderCss } from '../../formats/common';
+import { cleanColumns, cleanFloatWrap, normColor, parseBorderCss, type FloatWrap } from '../../formats/common';
 import { cleanLook, lookCss, lookStyle } from '../../formats/picLook';
 import { viewSrc } from '../imageUrls';
 import { decorationSet } from '../decoSet';
@@ -27,14 +27,15 @@ declare module '@tiptap/core' {
 }
 
 /** 떠 있는 개체의 자리 (px). 값이 이상하면 null */
-export function floatOf(v: any): { x: number; y: number; behind: boolean; py: number | null } | null {
+export function floatOf(v: any): { x: number; y: number; behind: boolean; py: number | null; wrap: FloatWrap | null } | null {
   if (!v || typeof v !== 'object') return null;
   const x = Number(v.x);
   const y = Number(v.y);
   if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 20000 || Math.abs(y) > 20000) return null;
   // py: 쪽·종이 기준으로 놓인 개체의 쪽 본문 안 세로 자리 (쪽 나누기가 그 자리에 놓는다: placePageFloats)
   const py = v.py != null && Number.isFinite(+v.py) && Math.abs(+v.py) < 20000 ? +v.py : null;
-  return { x, y, behind: v.behind === true, py };
+  // wrap: 둘레 글이 비켜 가는 개체 (Word 의 정사각형·위아래 배치 — floatWrap 이 글줄을 비킨다)
+  return { x, y, behind: v.behind === true, py, wrap: cleanFloatWrap(v.wrap) };
 }
 
 // ---------------- 글상자 (도형 안의 글) ----------------
