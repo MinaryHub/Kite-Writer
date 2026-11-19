@@ -32,6 +32,7 @@ import { anchorPlace, adjustValues, arrowOfEnd, colorOf, customGeometry, dashOf,
 import { isVmlShape, vmlArrow, vmlColor, vmlDash, vmlLen, vmlOff, vmlPair, vmlPath, vmlStyle, vmlWrap } from './vml';
 import type { Mat, ShapeItem } from '../shape';
 import { isMetafileExt, metafileToSvg } from '../metafile';
+import { chartToSvg } from '../chart';
 import { naturalLineRatio } from '../fontMetrics';
 
 /** DOCX(Office Open XML) 읽기 */
@@ -310,6 +311,8 @@ class DocxReader {
   /** 지금 읽는 표의 표 스타일 (안쪽 표가 뒤): 표 스타일의 문단·글자 모양이 칸 안 문단에 깔린다 */
   private tableStyles: StyleDef[][] = [];
   images = new Map<string, string>();
+  /** 차트 부분의 XML (관계 id → XML): 그릴 때 크기를 알아야 해서 글로 둔다 */
+  chartXml = new Map<string, string>();
   warnings: string[] = [];
   settings = defaultSettings();
   // 필드 상태
@@ -491,8 +494,9 @@ class DocxReader {
         map.set(id, text);
       }
     }
-    // 그림
+    // 그림·차트
     await this.loadImages(this.rels, this.images);
+    await this.loadCharts(this.rels, this.chartXml);
   }
 
   /** 관계 파일이 가리키는 그림을 읽어 둔다 (관계 id → data URL) */
@@ -508,6 +512,15 @@ class DocxReader {
       // 윈도 메타파일(WMF·EMF): 그려서 SVG 로
       else if (isMetafileExt(ext)) into.set(id, metafileToSvg(await readZipEntry(f, 'uint8array')) || placeholderImage(`그림(${ext.toUpperCase()})`));
       else into.set(id, placeholderImage(`그림(${ext.toUpperCase()})`));
+    }
+  }
+
+  /** 관계 파일이 가리키는 차트 부분을 읽어 둔다 (관계 id → XML) */
+  private async loadCharts(rels: Map<string, { target: string; type: string; external: boolean }>, into: Map<string, string>) {
+    for (const [id, r] of rels) {
+      if ((r.type !== 'chart' && r.type !== 'chartEx') || r.external) continue;
+      const xml = await this.text(normalizePath('word/' + r.target));
+      if (xml && xml.length < 8_000_000) into.set(id, xml);
     }
   }
 
@@ -1474,7 +1487,10 @@ class DocxReader {
           break;
         case 'AlternateContent': {
           const choice = kid(c, 'Choice');
-          const target = choice && descendant(choice, 'drawing') ? choice : kid(c, 'Fallback') || choice;
+          const fb = kid(c, 'Fallback');
+          // 새 차트(chartex: 폭포·트리맵 등)는 그릴 수 없어 Word 가 함께 넣어 둔 그림(Fallback)으로
+          const chartEx = !!choice && descendants(choice, 'graphicData').some((g) => /\/chartex$/.test(attr(g, 'uri') || '')) && !!fb && !!descendant(fb, 'drawing');
+          const target = choice && descendant(choice, 'drawing') && !chartEx ? choice : fb || choice;
           if (target) {
             for (const cc of kids(target)) {
               if (localName(cc) === 'drawing') this.convertDrawing(cc, out, after);
@@ -1552,7 +1568,12 @@ class DocxReader {
         if (blips.length === 1) break;
       }
     } else if (descendant(d, 'chart')) {
-      out.push({ type: 'image', attrs: { src: placeholderImage('차트', w || 300, h || 180), width: w || 300, height: h || 180 } });
+      // 차트: 함께 저장된 값으로 그린다 (그릴 수 없는 종류는 자리 표시)
+      const cw = w || 480;
+      const ch = h || 288;
+      const xml = this.chartXml.get(attr(descendant(d, 'chart'), 'id') || '');
+      const src = xml ? chartToSvg(xml, { w: cw, h: ch, theme: this.themeClr, font: this.theme.minorLatin || undefined }) : null;
+      out.push({ type: 'image', attrs: { src: src || placeholderImage('차트', cw, ch), width: cw, height: ch, ...(place ? { float: floatAt(place, true) } : {}) } });
     }
     const txbx = descendant(d, 'txbxContent');
     if (txbx) after.push(...this.convertBody(txbx));
@@ -2240,9 +2261,12 @@ class DocxReader {
     // 머리말 안의 그림·링크는 그 부분의 관계 파일에서 찾는다 (관계 id 가 본문의 것과 겹친다)
     const bodyRels = this.rels;
     const bodyImages = this.images;
+    const bodyCharts = this.chartXml;
     this.rels = await this.loadRels(path.replace(/([^/]+)$/, '_rels/$1.rels'));
     this.images = new Map();
+    this.chartXml = new Map();
     await this.loadImages(this.rels, this.images);
+    await this.loadCharts(this.rels, this.chartXml);
     this.headerMode = true;
     this.hfKind = which;
     let blocks: JNode[];
@@ -2256,6 +2280,7 @@ class DocxReader {
       this.hfKind = null;
       this.rels = bodyRels;
       this.images = bodyImages;
+      this.chartXml = bodyCharts;
     }
     const alignOf = (n: JNode): 'left' | 'center' | 'right' => (n.attrs?.textAlign === 'right' ? 'right' : n.attrs?.textAlign === 'center' ? 'center' : 'left');
     const textOf = (n: JNode): string => (n.content || []).map((c) => (c.type === 'text' ? (c.text === '\t' ? ' ' : c.text) : c.type === 'hardBreak' ? ' ' : '')).join('');

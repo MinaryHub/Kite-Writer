@@ -2,6 +2,7 @@ import { LineSegStats, cellContentNeed, dropHwpLayout, floatOverhang, indentByBl
 import { cleanLook, type PicLook } from '../picLook';
 import { olePreview } from '../olePreview';
 import { isMetafileExt, metafileToSvg } from '../metafile';
+import { chartToSvg } from '../chart';
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
 import { CELL_VMARGIN_HWP, FLOATING, HwpPageMarks, assembleTable, fitTableLines, placeCaptions, takeFloating, type Caption, type Captions } from '../hwp/reader';
@@ -745,6 +746,8 @@ export class HwpxConverter {
     private images: Map<string, string>,
     public settings: DocSettings,
     public warnings: string[],
+    /** 차트 부분 (Chart/chartN.xml → DrawingML 차트 XML) */
+    private charts: Map<string, string> = new Map(),
   ) {}
 
   convertParagraphs(ps: Element[], ctx: Ctx): JNode[] {
@@ -914,7 +917,13 @@ export class HwpxConverter {
         if (t) inline.push(t);
         prefixDone = true;
       }
-      for (const child of kids(run)) {
+      // hp:switch 안의 차트(ooxmlchart): 그릴 수 있으므로 case 의 것을 쓴다 (그 밖의 switch 는 예전처럼 둔다)
+      const runKids = kids(run).flatMap((c) => {
+        if (localName(c) !== 'switch') return [c];
+        const ck = kids(kid(c, 'case'));
+        return ck.length && ck.every((k) => localName(k) === 'chart') ? ck : [c];
+      });
+      for (const child of runKids) {
         const name = localName(child);
         if (name !== 't') track.step(8 * (name === 'ctrl' ? kids(child).length : 1));
         switch (name) {
@@ -1015,8 +1024,22 @@ export class HwpxConverter {
           case 'secPr':
             this.handleSecPr(child);
             break;
-          case 'container':
           case 'chart': {
+            // 차트: 함께 저장된 값(DrawingML 차트 XML)으로 그린 그림을 그 자리에 (못 그리면 자리 표시)
+            const sz = objSize(child);
+            const w = Math.max(1, Math.round(hwpToPx(sz.w || 32250)));
+            const h = Math.max(1, Math.round(hwpToPx(sz.h || 18750)));
+            const xml = this.charts.get(attr(child, 'chartIDRef') || '');
+            const src = (xml && chartToSvg(xml, { w, h, font: '맑은 고딕' })) || placeholderImage('차트', w, h);
+            const img: JNode = { type: 'image', attrs: { src, width: w, height: h, alt: '차트' } };
+            const fp = this.floatPos(child, pp, segV, ctx, pushed);
+            if (fp) img.attrs = { ...img.attrs, float: { ...fp, x: r2(fp.x - (pp.indentLeft + Math.max(0, -pp.textIndent)) * PT2PX) } };
+            else if (attr(kid(child, 'pos'), 'treatAsChar') !== '1') img.attrs = { ...img.attrs, [FLOATING]: true };
+            inline.push(img);
+            this.addCaption(child, captions, fp, before);
+            break;
+          }
+          case 'container': {
             // 묶은 개체: 자식들을 제자리에 그린 도형 하나로 (그릴 것이 없으면 예전처럼 자식을 차례로 놓는다)
             const node = name === 'container' ? this.shapeNode(child, ctx) : null;
             let cfp: FloatPos | null = null;
@@ -2308,7 +2331,14 @@ export async function readHwpx(data: Uint8Array): Promise<LoadedDoc> {
   }
   const settings = defaultSettings();
   settings.hwpMetrics = true;
-  const conv = new HwpxConverter(header, images, settings, warnings);
+  // 차트 부분 (한글의 OOXML 차트)
+  const charts = new Map<string, string>();
+  for (const name of Object.keys(zip.files)) {
+    if (!/^Chart\/[^/]+\.xml$/i.test(name)) continue;
+    const xml = await zipText(zip, name);
+    if (xml && xml.length < 8_000_000) charts.set(name, xml);
+  }
+  const conv = new HwpxConverter(header, images, settings, warnings, charts);
   const blocks: JNode[] = [];
   for (let i = 0; i < sectionPaths.length; i++) {
     const xml = await zipText(zip, sectionPaths[i]);

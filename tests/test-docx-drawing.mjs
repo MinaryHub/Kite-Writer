@@ -276,5 +276,23 @@ const shapes = (doc) => find(doc.content.content, (n) => n.type === 'shape');
   ok(/<wps:bodyPr [^>]*wrap="none"[^>]*><a:spAutoFit\/>/.test(dx) && /<wp:wrapSquare wrapText="[a-zA-Z]+"/.test(dx), '저장: 본문 틀 → 글에 맞춘 크기의 글상자, 둘레 글 흐름', '');
 }
 
+// ---- 9. 차트: 함께 저장된 값으로 그린다 (그릴 수 없는 새 차트는 Word 가 넣어 둔 그림) ----
+{
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', DECL + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  zip.file('_rels/.rels', DECL + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`);
+  zip.file('word/_rels/document.xml.rels', DECL + `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rC1" Type="${REL}/chart" Target="charts/chart1.xml"/></Relationships>`);
+  const C = 'xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"';
+  const pt = (v) => v.map((x, i) => `<c:pt idx="${i}"><c:v>${x}</c:v></c:pt>`).join('');
+  zip.file('word/charts/chart1.xml', DECL + `<c:chartSpace ${C} xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:title><c:overlay val="0"/></c:title><c:plotArea><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>매출</c:v></c:tx><c:cat><c:strRef><c:strCache><c:ptCount val="3"/>${pt(['1분기', '2분기', '3분기'])}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="3"/>${pt([10, 20, 15])}</c:numCache></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/></c:catAx><c:valAx><c:axId val="2"/></c:valAx></c:plotArea></c:chart></c:chartSpace>`);
+  const drawing = `<w:r><w:drawing><wp:inline><wp:extent cx="${480 * EMU}" cy="${288 * EMU}"/><wp:docPr id="1" name="차트"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart ${C} xmlns:r="${REL}" r:id="rC1"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+  zip.file('word/document.xml', DECL + `<w:document ${NS}><w:body>${p(drawing)}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`);
+  zip.file('word/styles.xml', DECL + `<w:styles ${NS}></w:styles>`);
+  const doc = await m.readDocx(await zip.generateAsync({ type: 'uint8array' }));
+  const img = find(doc.content.content, (n) => n.type === 'image')[0];
+  const svg = img && /^data:image\/svg\+xml;base64,/.test(img.attrs.src) ? Buffer.from(img.attrs.src.split(',')[1], 'base64').toString() : '';
+  ok(img && img.attrs.width === 480 && img.attrs.height === 288 && />1분기</.test(svg) && />매출</.test(svg) && (svg.match(/<rect /g) || []).length >= 4, '차트: 크기 그대로 막대·항목·제목(글 없는 제목은 계열 이름)을 그린 SVG', svg.slice(0, 200));
+}
+
 console.log(failed ? `${failed}개 실패` : '모두 통과');
 process.exit(failed ? 1 : 0);
