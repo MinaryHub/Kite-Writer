@@ -612,6 +612,22 @@ function alignIs(a: string) {
   return cur === a;
 }
 
+/** 보호된 문서(배포용)에서도 되는 명령: 보기·이동·찾기·파일 열기/닫기·도움말 (복사·인쇄는 막지 않았을 때만) */
+const PROTECT_OK = /^(view\.|window\.|page\.(prev|next)$|edit\.(find|findNext|goto|selectAll)$|file\.(new|open|template|close|exit|info|share|preview)$|tools\.(palette|prefs|shortcuts|about|contact|sponsor|privacyPolicy|licenses|wordCount)$)/;
+function protectAllows(id: string): boolean {
+  const p = app.active?.protect;
+  if (!p) return true;
+  if (PROTECT_OK.test(id)) return true;
+  if (id === 'edit.copy') return !p.noCopy;
+  if (id === 'file.print' || id === 'file.exportPdf') return !p.noPrint;
+  return false;
+}
+// 모든 명령의 '쓸 수 있음' 에 보호 검사를 더한다 (메뉴·도구 상자·팔레트가 흐리게 보인다)
+for (const [id, c] of Object.entries(commands)) {
+  const orig = c.enabled;
+  c.enabled = () => protectAllows(id) && (orig ? orig() : true);
+}
+
 export function runCommand(id: string) {
   const c = commands[id];
   if (!c) return;

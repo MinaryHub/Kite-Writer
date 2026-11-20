@@ -10,6 +10,8 @@ import { writeMarkdown } from '../formats/markdown';
 export function getAiContext(mode: 'doc' | 'selection' | 'none'): { text: string; label: string } | null {
   const tab = app.active;
   if (!tab || mode === 'none') return null;
+  // 배포용 문서는 내용을 AI 로 보내지 않는다 (복사를 막은 문서에서 글을 꺼내는 길이 된다)
+  if (tab.protect) return null;
   const ed = tab.editor;
   const { from, to, empty } = ed.state.selection;
   if (mode === 'selection') {

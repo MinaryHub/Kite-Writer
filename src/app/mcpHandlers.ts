@@ -25,14 +25,16 @@ const MAX_MARKDOWN = 1_000_000;
 
 function tabOf(args: Record<string, any>): DocTab {
   const id = args.document_id;
+  let t: DocTab | undefined;
   if (id != null) {
     if (typeof id !== 'string') throw new ToolError('document_id 는 문자열이어야 합니다.');
-    const t = app.docs.find((d) => d.id === id);
+    t = app.docs.find((d) => d.id === id);
     if (!t) throw new ToolError(`문서 '${id}' 를 찾을 수 없습니다. list_documents 로 id 를 확인하세요.`);
-    return t;
-  }
-  if (!app.active) throw new ToolError('열려 있는 문서가 없습니다.');
-  return app.active;
+  } else t = app.active || undefined;
+  if (!t) throw new ToolError('열려 있는 문서가 없습니다.');
+  // 배포용 문서: 내용을 꺼내거나 고칠 수 없다
+  if (t.protect) throw new ToolError('배포용(보호된) 문서라 AI 앱이 읽거나 고칠 수 없습니다.');
+  return t;
 }
 
 function int(v: unknown, name: string, def?: number): number {

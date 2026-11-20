@@ -213,8 +213,19 @@ export interface KDocument {
   meta: DocMeta;
 }
 
+/** 고치거나 내보낼 수 없게 보호된 문서 (배포용 HWP) */
+export interface DocProtect {
+  kind: 'distribution';
+  /** 글을 복사·오려 두기 못 하게 */
+  noCopy: boolean;
+  /** 인쇄·PDF 로 저장 못 하게 */
+  noPrint: boolean;
+}
+
 export interface LoadedDoc extends KDocument {
   warnings: string[];
+  /** 있으면 읽기 전용으로 연다 */
+  protect?: DocProtect;
 }
 
 export type FormatId = 'hwpx' | 'hwp' | 'docx' | 'doc' | 'pdf' | 'md' | 'html' | 'txt';

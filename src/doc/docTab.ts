@@ -1,9 +1,9 @@
 import { Editor } from '@tiptap/react';
 import type { JSONContent } from '@tiptap/core';
-import { Selection } from '@tiptap/pm/state';
+import { Plugin, PluginKey, Selection } from '@tiptap/pm/state';
 import { getEditorExtensions } from '../editor/extensions';
 import { sanitizeDoc } from '../editor/sanitize';
-import type { DocMeta, DocSettings, FormatId, KDocument, SaveFormatId } from '../types';
+import type { DocMeta, DocProtect, DocSettings, FormatId, KDocument, SaveFormatId } from '../types';
 import { defaultSettings } from '../formats/common';
 import type { LayoutResult } from '../editor/extensions/pagination';
 import { tabFillKey } from '../editor/extensions/tabFill';
@@ -21,6 +21,8 @@ export class DocTab {
   meta: DocMeta;
   dirty = false;
   warnings: string[] = [];
+  /** 배포용 문서처럼 보호된 문서: 고칠 수 없고 저장하지 않는다 (복사·인쇄도 막을 수 있다) */
+  readonly protect: DocProtect | null;
   /** 쪽 배치 결과: 늘 최신 값 (쪽 시작 위치처럼 화면을 다시 그리지 않는 변화도 반영) */
   get layout(): LayoutResult {
     return this.editor.storage.pagination.result;
@@ -37,6 +39,7 @@ export class DocTab {
     path?: string | null;
     sourceFormat?: FormatId | null;
     warnings?: string[];
+    protect?: DocProtect | null;
   }) {
     this.id = `doc-${Date.now().toString(36)}-${++seq}`;
     this.title = init.title;
@@ -46,12 +49,21 @@ export class DocTab {
     this.settings = init.settings || defaultSettings();
     this.meta = init.meta || {};
     this.warnings = init.warnings || [];
+    this.protect = init.protect || null;
+    if (this.protect) this.saveFormat = null;
+    const block = (_v: unknown, e: Event) => {
+      e.preventDefault();
+      return true;
+    };
     this.editor = new Editor({
       extensions: getEditorExtensions(),
       content: '',
       editorProps: {
         attributes: { class: 'kdoc-content', spellcheck: 'false', autocomplete: 'off', autocorrect: 'off', autocapitalize: 'off' },
+        // 복사를 막은 문서: 복사·오려 두기·끌어 놓기로 글을 꺼내지 못하게
+        ...(this.protect?.noCopy ? { handleDOMEvents: { copy: block, cut: block, dragstart: block } } : {}),
       },
+      editable: !this.protect,
       injectCSS: false,
       enableInputRules: true,
       enablePasteRules: true,
@@ -60,6 +72,15 @@ export class DocTab {
     this.editor.storage.hwpMetrics.enabled = !!this.settings.hwpMetrics;
     if (init.content) this.setContent(init.content, true);
     this.savedDoc = this.editor.state.doc;
+    // 보호된 문서: 도구 상자·명령이 편집기를 직접 고치는 것도 막는다.
+    // 되돌리기 기록에 남지 않는 것(쪽 배치처럼 화면을 맞추는 변화)만 지나가게 한다
+    if (this.protect)
+      this.editor.registerPlugin(
+        new Plugin({
+          key: new PluginKey('kiteProtect'),
+          filterTransaction: (tr) => !tr.docChanged || tr.getMeta('addToHistory') === false || !!tr.getMeta(tabFillKey),
+        }),
+      );
     this.editor.on('update', ({ transaction }) => {
       // 탭 폭 맞춤(화면 배치)만 바뀐 것은 저장할 변경이 아니다: 저장한 문서로 여긴다
       if (transaction.getMeta(tabFillKey) && !this.dirty) this.savedDoc = this.editor.state.doc;
