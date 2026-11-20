@@ -198,7 +198,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
 let appRef: ReturnType<typeof useApp> | null = null;
 
 /** 안드로이드에서는 쓸 수 없는 데스크톱 전용 메뉴를 감춘다 (눌러도 안내만 뜨거나 아무 일도 없었다) */
-const DESKTOP_ONLY = new Set(['tools.ai', 'tools.mcp', 'tools.collab', 'tools.contact', 'view.fullscreen']);
+const DESKTOP_ONLY = new Set(['tools.ai', 'tools.mcp', 'tools.collab', 'view.fullscreen']);
 function visibleItems(items: MenuEntry[]): MenuEntry[] {
   if (!platform.isAndroid) return items;
   const out = items.filter((it) => !(typeof it === 'string' && DESKTOP_ONLY.has(it)));

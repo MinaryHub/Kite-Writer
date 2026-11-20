@@ -128,7 +128,7 @@ npm run dist:store      # 윈도우에서만: electron-builder 의 makeappx 로 
 제출 전에 채울 값:
 
 - `package.json` → `build.appx` 의 식별 값은 Partner Center 값(minary.KiteWord, 게시자 minary)으로 넣어 두었다. `displayName` 은 Partner Center 에 예약한 앱 이름과 같아야 한다
-- `src/appInfo.ts` → `CONTACT_FORM_ENDPOINT` 또는 `CONTACT_FORM_KEY`(문의 양식), `PRIVACY_URL`(아래 처리방침을 올린 웹 주소)
+- `src/appInfo.ts` → `ISSUES_URL`(문의하기가 여는 GitHub 이슈 주소), `PRIVACY_URL`(아래 처리방침을 올린 웹 주소)
 - `PRIVACY.md` 의 문의처. 이 내용을 웹에 올리고 그 주소를 Partner Center 의 개인정보 처리방침 칸에도 넣는다
 
 스토어판에서 달라지는 점 (MSIX 로 설치되면 자동, 시험할 때는 `KITE_STORE=1`):
@@ -144,7 +144,7 @@ npm run dist:store      # 윈도우에서만: electron-builder 의 makeappx 로 
 ## 후원·문의
 
 - 후원: 도구 → 후원하기 또는 정보 창의 "후원하기" → GitHub Sponsors(https://github.com/sponsors/minaryhub). 저장소의 `.github/FUNDING.yml` 이 GitHub 의 Sponsor 단추를 만든다 (저장소가 공개일 때)
-- 문의: 도구 → 문의하기. 앱 안 문의 창의 내용을 주 프로세스가 문의 중계(`contact-relay/`, Vercel 함수)로 보내고, 중계가 GitHub 의 Kite 저장소에 공개 이슈로 올리며(답장 메일 주소는 빼고) 메일(Brevo)로도 전달한다. 문의 창은 내용이 공개된다고 알리고, 보낸 뒤 만든 이슈를 열어 볼 수 있다. 개발사 메일 주소와 GitHub 토큰은 앱에 들어가지 않는다. `src/appInfo.ts` 의 `CONTACT_FORM_ENDPOINT`(중계의 배포 주소 또는 Formspree) 또는 `CONTACT_FORM_KEY`(Web3Forms)를 채워야 켜진다. AI 응답 신고도 이 창으로 보낸다 (설정: `contact-relay/README.md`)
+- 문의: 도구 → 문의하기 (안드로이드 포함). 문의 창에 분류·내용을 적으면 그 내용을 채운 GitHub 의 새 이슈 페이지(`src/appInfo.ts` 의 `ISSUES_URL`)를 브라우저로 열고, 사용자가 자기 GitHub 계정으로 올린다. Kite 는 아무것도 보내지 않으며 서버·토큰이 필요 없다. 주소에 다 들어가지 않는 긴 내용은 클립보드로 넘긴다. AI 응답 신고도 이 창으로 올린다. (`contact-relay/` 는 1.5.1 이하 앱의 문의를 받던 중계로, 예전 앱을 위해 남겨 둔다)
 
 ## 구조
 
