@@ -16,6 +16,7 @@ import android.print.PrintDocumentAdapter;
 import android.print.PrintDocumentInfo;
 import android.print.PrintManager;
 import android.util.Base64;
+import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -24,6 +25,7 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 
 import androidx.activity.ComponentActivity;
 import androidx.activity.OnBackPressedCallback;
@@ -32,7 +34,9 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -87,13 +91,25 @@ public class MainActivity extends ComponentActivity {
         chooserLauncher = registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), this::onChooserResult);
 
         webView = new WebView(this);
-        setContentView(webView);
-        // 안드로이드 15 부터는 화면 끝까지 그린다: 상태 표시줄·탐색 막대·키보드만큼 안쪽으로 들인다
-        ViewCompat.setOnApplyWindowInsetsListener(webView, (v, insets) -> {
+        // 화면 끝까지 그린다 (안드로이드 15 부터는 강제. 그 아래 판도 같게 맞춰 여백을 한 곳에서 다룬다).
+        // WebView 는 제 안 여백(padding)을 무시하고 웹 화면을 맨 위부터 그리므로, WebView 를 감싼 틀에
+        // 상태 표시줄·탐색 막대·화면 홈·키보드만큼 안 여백을 준다. WebView 에 주면 메뉴 막대가 상태 표시줄 밑에 깔려
+        // 보이기만 하고 눌리지 않는다 (그 자리의 터치는 상태 표시줄이 가져간다)
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        FrameLayout root = new FrameLayout(this);
+        // 여백 자리(상태 표시줄·탐색 막대 뒤)의 색
+        root.setBackgroundColor(getColor(R.color.kite_navy));
+        root.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        setContentView(root);
+        ViewCompat.setOnApplyWindowInsetsListener(root, (v, insets) -> {
             Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout() | WindowInsetsCompat.Type.ime());
             v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
             return WindowInsetsCompat.CONSUMED;
         });
+        // 짙은 바탕 위의 상태 표시줄·탐색 막대 아이콘은 밝게
+        WindowInsetsControllerCompat sysBars = WindowCompat.getInsetsController(getWindow(), root);
+        sysBars.setAppearanceLightStatusBars(false);
+        sysBars.setAppearanceLightNavigationBars(false);
 
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);

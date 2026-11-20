@@ -1,8 +1,12 @@
 import { useState } from 'react';
 import { Modal } from '../widgets';
 import { app } from '../../app/controller';
+import { platform } from '../../platform';
 
-/** 도구 > 문의하기: 내용을 문의 양식 서비스로 보낸다 (개발사 메일 주소는 드러나지 않는다) */
+/**
+ * 도구 > 문의하기: 내용을 문의 중계로 보낸다 (개발사 메일 주소는 드러나지 않는다).
+ * 중계는 문의를 GitHub 의 Kite 저장소에 공개 이슈로 올리므로(메일 주소는 빼고) 창에서 그 사실을 알린다
+ */
 const CATS = ['문의', '오류 신고', '기능 제안', '부적절한 AI 응답'];
 
 export function ContactDialog({ onClose, category: initCat, message: initMsg }: { onClose: () => void; category?: string; message?: string }) {
@@ -34,8 +38,19 @@ export function ContactDialog({ onClose, category: initCat, message: initMsg }: 
     } catch {
       /* 무시 */
     }
-    app.toast(email.trim() ? '문의를 보냈습니다. 적어 주신 주소로 답장드리겠습니다.' : '문의를 보냈습니다. 고맙습니다.', 'info', 5000);
     onClose();
+    // GitHub 이슈로 올라갔으면 이슈를 열어 볼 수 있게 한다 (답변·진행 상황은 이슈에)
+    const url = (r as { issueUrl?: string }).issueUrl;
+    if (url) {
+      const n = /\/issues\/(\d+)$/.exec(url)?.[1];
+      const pick = await app.confirm('문의를 보냈습니다', `GitHub 이슈${n ? ` #${n}` : ''}로 올렸습니다. 답변과 진행 상황은 이슈에서 볼 수 있습니다.${email.trim() ? '\n적어 주신 메일 주소로도 답장드립니다.' : ''}`, [
+        { id: 'open', label: '이슈 열기', primary: true },
+        { id: 'close', label: '닫기' },
+      ]);
+      if (pick === 'open') platform.openExternal(url);
+      return;
+    }
+    app.toast(email.trim() ? '문의를 보냈습니다. 적어 주신 주소로 답장드리겠습니다.' : '문의를 보냈습니다. 고맙습니다.', 'info', 5000);
   };
 
   return (
@@ -84,7 +99,8 @@ export function ContactDialog({ onClose, category: initCat, message: initMsg }: 
       </label>
       {err && <div className="ai-warn">{err}</div>}
       <p className="unit" style={{ lineHeight: 1.6, marginTop: 8 }}>
-        문의는 양식 전달 서비스를 거쳐 개발사에 전달됩니다. 적어 주신 내용과 메일 주소는 답변에만 씁니다.
+        보낸 내용은 GitHub 의 Kite 저장소에 <b>공개 이슈</b>로 올라가 누구나 볼 수 있습니다. 개인정보나 문서 내용은 적지 마세요.
+        메일 주소는 공개하지 않고 답장에만 씁니다.
       </p>
     </Modal>
   );
