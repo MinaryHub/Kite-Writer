@@ -2,7 +2,7 @@ import { DocTab } from '../doc/docTab';
 import { platform } from '../platform';
 import { importDocument, exportDocument, SAVE_FORMATS, OPEN_FILTERS } from '../formats';
 import { baseName, splitExt, MAX_IMPORT_BYTES } from '../formats/common';
-import type { SaveFormatId } from '../types';
+import type { DocProtect, SaveFormatId } from '../types';
 import { withPrintRoot, printPlans } from '../print';
 import { viewState } from '../editor/viewState';
 import { KOREAN_FONTS, LATIN_FONTS, installedFonts, privateFontNames, ensurePrivateFonts, collectFontNames, registerPdfFonts, applyPdfFontVars, embeddedAliases } from '../fonts';
@@ -466,14 +466,17 @@ export class AppController {
         path: loaded.format === 'pdf' || loaded.format === 'doc' ? null : path,
         sourceFormat: loaded.format,
         warnings: loaded.warnings,
+        protect: loaded.protect,
       });
       if (loaded.format === 'pdf' || loaded.format === 'doc') tab.title = `${stem} (${loaded.format.toUpperCase()}에서 변환)`;
+      if (loaded.protect) tab.title = `${name} (배포용·읽기 전용)`;
       if (replace && cur) this.closeTab(cur.id, true);
       // 변환하면서 잃은 것이 있는 문서는 원본을 덮어쓰기 전에 한 번 확인한다
       if (tab.path && tab.saveFormat && loaded.warnings.length) this.overwriteConfirm.set(tab.id, 'lossy');
       this.addDoc(tab);
       if (path) this.recent = await platform.addRecent(path);
       if (loaded.warnings.length) this.toast(loaded.warnings.slice(0, 2).join(' / '), 'warn', 6000);
+      if (loaded.protect) this.toast(protectNotice(loaded.protect), 'info', 9000);
     } catch (e: any) {
       console.error(e);
       this.toast(`'${name}' 파일을 열 수 없습니다: ${e?.message || e}`, 'error', 7000);
@@ -482,8 +485,17 @@ export class AppController {
     }
   }
 
+  /** 보호된 문서에서 막힌 일이면 알리고 true */
+  protectedBlocks(tab: DocTab, what: 'save' | 'print'): boolean {
+    const p = tab.protect;
+    if (!p || (what === 'print' && !p.noPrint)) return false;
+    this.toast(what === 'save' ? '배포용 문서는 고치거나 다른 형식으로 저장할 수 없습니다.' : '배포용 문서는 인쇄하거나 PDF 로 저장할 수 없습니다.', 'warn', 5000);
+    return true;
+  }
+
   async save(tab = this.active): Promise<boolean> {
     if (!tab) return false;
+    if (this.protectedBlocks(tab, 'save')) return false;
     if (!tab.path || !tab.saveFormat) return this.saveAs(tab);
     const reason = this.overwriteConfirm.get(tab.id);
     if (reason) {
@@ -505,6 +517,7 @@ export class AppController {
 
   async saveAs(tab = this.active, format?: SaveFormatId): Promise<boolean> {
     if (!tab) return false;
+    if (this.protectedBlocks(tab, 'save')) return false;
     const fmt = format || tab.saveFormat || this.prefs.defaultSaveFormat;
     const def = SAVE_FORMATS.find((f) => f.id === fmt) || SAVE_FORMATS[0];
     const [stem] = splitExt(tab.path ? baseName(tab.path) : tab.title.replace(/\s*\(.*에서 변환\)$/, ''));
@@ -596,6 +609,7 @@ export class AppController {
 
   async exportPdf(tab = this.active, path?: string) {
     if (!tab) return;
+    if (this.protectedBlocks(tab, 'print')) return;
     const [stem] = splitExt(tab.path ? baseName(tab.path) : tab.title);
     // 안드로이드는 인쇄 화면에서 PDF 로 저장한다
     if (platform.isAndroid) this.toast("인쇄 화면 위쪽의 프린터 목록에서 'PDF로 저장'을 고르세요.", 'info', 6000);
@@ -612,6 +626,7 @@ export class AppController {
 
   async print(tab = this.active) {
     if (!tab) return;
+    if (this.protectedBlocks(tab, 'print')) return;
     try {
       await withPrintRoot(tab, (g) => platform.print({ widthMm: g.wMm, heightMm: g.hMm, landscape: tab.settings.page.landscape }));
     } catch (e: any) {
@@ -674,7 +689,8 @@ export class AppController {
     const jobs: Promise<unknown>[] = [];
     const idle = () => new Promise<void>((r) => ((window as any).requestIdleCallback ? (window as any).requestIdleCallback(() => r(), { timeout: 4000 }) : setTimeout(r, 0)));
     for (const d of this.docs) {
-      if (!d.dirty) continue;
+      // 보호된 문서는 풀어 놓은 내용을 디스크에 남기지 않는다
+      if (!d.dirty || d.protect) continue;
       // 지난 자동 저장 뒤로 바뀐 것이 없으면 건너뛴다
       if (this.autosavedDoc.get(d) === d.editor.state.doc) continue;
       if (!immediate) {
@@ -847,3 +863,9 @@ export class AppController {
 }
 
 export const app = new AppController();
+
+/** 보호된 문서를 열 때 알림 */
+export function protectNotice(p: DocProtect): string {
+  const limits = [p.noCopy && '복사', p.noPrint && '인쇄'].filter(Boolean).join('·');
+  return `배포용 문서라 읽기 전용으로 열었습니다. 고치거나 저장할 수 없고${limits ? `, ${limits}도 막혀 있습니다` : ''}.`;
+}

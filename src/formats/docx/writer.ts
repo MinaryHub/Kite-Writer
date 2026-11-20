@@ -537,6 +537,8 @@ function paragraphXml(ctx: Ctx, p: FlatPara): string {
     }
   };
   for (const it of p.inlines) {
+    // 비어 있는 누름틀의 안내문은 자리 표시일 뿐이라 쓰지 않는다
+    if (it.type === 'text' && it.field?.empty) continue;
     const link = it.type === 'text' ? it.link : null;
     if (link !== linkOpen) {
       closeLink();

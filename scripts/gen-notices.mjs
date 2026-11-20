@@ -49,6 +49,10 @@ for (const e of entries) {
   if (n) out += '\n[NOTICE]\n' + fs.readFileSync(path.join(e.dir, n), 'utf8').trim() + '\n';
   out += '\n';
 }
+// 함께 넣는 자료 (한자 사전 등)
+for (const [name, file] of [['libhangul 한자 사전 (BSD-3-Clause)', path.join(root, 'src', 'data', 'hanja', 'LICENSE')]]) {
+  if (fs.existsSync(file)) out += `${'='.repeat(72)}\n${name}\n${'-'.repeat(72)}\n${fs.readFileSync(file, 'utf8').trim()}\n\n`;
+}
 fs.writeFileSync(path.join(root, 'src', 'legal', 'THIRD_PARTY_NOTICES.txt'), out);
 const strong = entries.filter((e) => /GPL|AGPL|SSPL|CC-BY-NC/i.test(e.license) && !/LGPL/i.test(e.license));
 console.log(`패키지 ${entries.length}개`, counts);

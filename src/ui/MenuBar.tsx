@@ -95,6 +95,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
       'insert.table',
       'insert.image',
       'image.crop',
+      'object.props',
       'insert.shape',
       'insert.textBox',
       '-',
@@ -102,9 +103,11 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
       'insert.compose',
       '-',
       'insert.link',
+      'insert.clickHere',
       'insert.footnote',
       'insert.math',
       'insert.symbol',
+      { label: '한자', items: ['insert.hanja', 'edit.hanjaToHangul'] },
       { label: '날짜/시간', items: ['insert.date', 'insert.dateKo', 'insert.time'] },
       { label: '차례', items: ['insert.toc', 'insert.tocUpdate', '-', 'format.leaderTab'] },
       '-',
@@ -130,6 +133,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
       '-',
       'format.bullet',
       'format.number',
+      'format.govNumber',
       'format.outdent',
       'format.indent',
       '-',
@@ -198,7 +202,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
 let appRef: ReturnType<typeof useApp> | null = null;
 
 /** 안드로이드에서는 쓸 수 없는 데스크톱 전용 메뉴를 감춘다 (눌러도 안내만 뜨거나 아무 일도 없었다) */
-const DESKTOP_ONLY = new Set(['tools.ai', 'tools.mcp', 'tools.collab', 'tools.contact', 'view.fullscreen']);
+const DESKTOP_ONLY = new Set(['tools.ai', 'tools.mcp', 'tools.collab', 'view.fullscreen']);
 function visibleItems(items: MenuEntry[]): MenuEntry[] {
   if (!platform.isAndroid) return items;
   const out = items.filter((it) => !(typeof it === 'string' && DESKTOP_ONLY.has(it)));

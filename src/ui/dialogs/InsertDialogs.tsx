@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { fieldRange } from '../../editor/extensions/clickHere';
 import { app } from '../../app/controller';
 import { Modal, OkCancel, Fieldset, NumberInput, Seg, ColorField } from '../widgets';
 import { PX_PER_MM } from '../../formats/common';
@@ -248,6 +249,73 @@ export function ShapeDialog({ onClose }: { onClose: () => void }) {
           </div>
         </Fieldset>
       )}
+    </Modal>
+  );
+}
+
+/** 입력 → 누름틀: 서식 문서의 입력 칸. 커서가 누름틀 안이면 그 누름틀을 고친다 */
+export function ClickHereDialog({ onClose }: { onClose: () => void }) {
+  const editor = app.active!.editor;
+  const [sel] = useState(() => {
+    const { from, to, empty } = editor.state.selection;
+    const type = editor.schema.marks.clickHere;
+    const r = type ? fieldRange(editor.state.doc, from, type) : null;
+    return { from, to, empty, field: r };
+  });
+  const cur = sel.field?.mark.attrs;
+  const [guide, setGuide] = useState<string>(cur?.guide || '이곳을 눌러 내용을 입력하세요.');
+  const [memo, setMemo] = useState<string>(cur?.memo || '');
+  const [name, setName] = useState<string>(cur?.name || '');
+  const apply = () => {
+    const g = guide.trim();
+    if (!g) {
+      app.toast('안내문을 입력하세요.', 'error');
+      return;
+    }
+    const c = editor.chain().focus().setTextSelection({ from: sel.from, to: sel.to });
+    if (sel.field) c.updateClickHere({ guide: g, memo: memo.trim(), name: name.trim() }).run();
+    else c.insertClickHere({ guide: g, memo: memo.trim(), name: name.trim() }).run();
+    onClose();
+  };
+  const remove = () => {
+    editor.chain().focus().setTextSelection(sel.from).removeClickHere().run();
+    onClose();
+  };
+  return (
+    <Modal
+      title={sel.field ? '누름틀 고치기' : '누름틀 넣기'}
+      onClose={onClose}
+      width={420}
+      footer={
+        <OkCancel
+          onOk={apply}
+          onCancel={onClose}
+          okLabel={sel.field ? '고치기' : '넣기'}
+          extra={
+            sel.field ? (
+              <button className="btn" onClick={remove}>
+                누름틀 지우기
+              </button>
+            ) : undefined
+          }
+        />
+      }
+    >
+      <div className="form-grid">
+        <label>안내문</label>
+        <input type="text" value={guide} autoFocus onChange={(e) => setGuide(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && apply()} />
+        <label>메모</label>
+        <input type="text" value={memo} placeholder="선택 — 누름틀에 마우스를 올리면 보이는 도움말" onChange={(e) => setMemo(e.target.value)} />
+        <label>필드 이름</label>
+        <input type="text" value={name} placeholder="선택" onChange={(e) => setName(e.target.value)} />
+      </div>
+      <p className="unit" style={{ lineHeight: 1.6, marginTop: 8 }}>
+        {sel.empty && !sel.field
+          ? '커서 자리에 안내문이 빨간 글씨로 들어갑니다. 누르면 안내문이 통째로 골라져 치는 글로 바뀝니다. 안내문은 인쇄되지 않습니다.'
+          : !sel.field
+            ? '고른 글을 누름틀로 만듭니다.'
+            : '누름틀 지우기: 입력한 글은 남기고 누름틀만 없앱니다.'}
+      </p>
     </Modal>
   );
 }

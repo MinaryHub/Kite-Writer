@@ -10,7 +10,6 @@ const api = {
   imageDialog: (): Promise<{ name: string; data: Uint8Array }[]> => ipcRenderer.invoke('file:image-dialog'),
   showItemInFolder: (p: string) => ipcRenderer.invoke('shell:show-item', p),
   openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url),
-  supportSend: (p: { category: string; message: string; email?: string; withEnv?: boolean }): Promise<{ ok: boolean; error?: string; issueUrl?: string }> => ipcRenderer.invoke('support:send', p),
   getRecent: (): Promise<string[]> => ipcRenderer.invoke('recent:get'),
   addRecent: (p: string): Promise<string[]> => ipcRenderer.invoke('recent:add', p),
   clearRecent: (): Promise<string[]> => ipcRenderer.invoke('recent:clear'),

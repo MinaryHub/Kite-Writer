@@ -21,6 +21,30 @@
   prefix: '(';
   suffix: ') ';
 }
+@counter-style k-rparen {
+  system: extends decimal;
+  suffix: ') ';
+}
+@counter-style k-rparen-hangul {
+  system: extends hangul;
+  suffix: ') ';
+}
+@counter-style k-circled-hangul {
+  system: fixed;
+  symbols: '㉮' '㉯' '㉰' '㉱' '㉲' '㉳' '㉴' '㉵' '㉶' '㉷' '㉸' '㉹' '㉺' '㉻';
+  suffix: ' ';
+}
+/* 공문서 항목 기호: 맨 바깥 1. → 가. → 1) → 가) → (1) → (가) → ① → ㉮ (안쪽 목록은 모양을 따로 정하지 않았을 때) */
+@counter-style k-gov {
+  system: extends decimal;
+}
+ol[style*='k-gov'] ol:not([style*='list-style-type']) { list-style-type: hangul; }
+ol[style*='k-gov'] ol ol:not([style*='list-style-type']) { list-style-type: k-rparen; }
+ol[style*='k-gov'] ol ol ol:not([style*='list-style-type']) { list-style-type: k-rparen-hangul; }
+ol[style*='k-gov'] ol ol ol ol:not([style*='list-style-type']) { list-style-type: k-paren; }
+ol[style*='k-gov'] ol ol ol ol ol:not([style*='list-style-type']) { list-style-type: k-paren-hangul; }
+ol[style*='k-gov'] ol ol ol ol ol ol:not([style*='list-style-type']) { list-style-type: k-circled; }
+ol[style*='k-gov'] ol ol ol ol ol ol ol:not([style*='list-style-type']) { list-style-type: k-circled-hangul; }
 @counter-style k-dash { system: cyclic; symbols: '-'; suffix: ' '; }
 @counter-style k-arrow { system: cyclic; symbols: '➢'; suffix: ' '; }
 @counter-style k-check { system: cyclic; symbols: '✓'; suffix: ' '; }
@@ -1156,3 +1180,20 @@ p[data-cell-tail]:is(:empty, :has(> br:only-child)):not(.k-caret-here) {
   background-clip: content-box;
   background-origin: content-box;
 }
+
+/* ----- 누름틀: 입력 칸 (화면에서만 옅은 바탕. 비어 있으면 안내문을 빨간 기울임 글씨로 — 한글과 같게) ----- */
+.kdoc-content .k-field {
+  background: rgba(255, 196, 0, 0.13);
+  border-radius: 2px;
+}
+.kdoc-content .k-field[data-empty] {
+  color: #d23 !important;
+  font-style: italic;
+}
+.print-page .k-field {
+  background: none;
+}
+.print-page .k-field[data-empty] {
+  visibility: hidden;
+}
+

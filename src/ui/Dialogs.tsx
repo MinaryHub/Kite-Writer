@@ -3,7 +3,7 @@ import { CharShapeDialog } from './dialogs/CharShapeDialog';
 import { ParaShapeDialog } from './dialogs/ParaShapeDialog';
 import { PageSetupDialog, HeaderFooterDialog, PageNumberDialog } from './dialogs/PageDialogs';
 import { ColumnsDialog, PageBorderDialog } from './dialogs/LayoutDialogs';
-import { RubyDialog, ComposeDialog, ShapeDialog } from './dialogs/InsertDialogs';
+import { RubyDialog, ComposeDialog, ShapeDialog, ClickHereDialog } from './dialogs/InsertDialogs';
 import {
   TableDialog,
   LinkDialog,
@@ -26,6 +26,8 @@ import { CollabDialog } from './dialogs/CollabDialog';
 import { TemplateDialog } from './dialogs/TemplateDialog';
 import { LegalDialog } from './dialogs/LegalDialog';
 import { ContactDialog } from './dialogs/ContactDialog';
+import { ObjectDialog } from './dialogs/ObjectDialog';
+import { HanjaDialog } from './dialogs/HanjaDialog';
 
 export function Dialogs() {
   const app = useApp();
@@ -97,6 +99,15 @@ export function Dialogs() {
         break;
       case 'imageCrop':
         el = <ImageCropDialog onClose={close} />;
+        break;
+      case 'object':
+        el = <ObjectDialog onClose={close} />;
+        break;
+      case 'clickHere':
+        el = <ClickHereDialog onClose={close} />;
+        break;
+      case 'hanja':
+        el = <HanjaDialog onClose={close} from={d.props.from} text={d.props.text} />;
         break;
       case 'about':
         el = <AboutDialog onClose={close} />;

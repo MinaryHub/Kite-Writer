@@ -6,7 +6,6 @@ import { execFile } from 'node:child_process';
 import { initMcpHost, isMcpBridge, runMcpBridge } from './mcp';
 import { setupCollab } from './collab';
 import { STORE_BUILD } from './flags';
-import { setupSupport } from './support';
 import { guardAiWebHost, setupAiWeb } from './aiWeb';
 import { listPrivateFonts, readPrivateFont } from './fonts';
 
@@ -300,7 +299,6 @@ app.whenReady().then(() => {
   createWindow();
   initMcpHost(() => mainWindow);
   setupCollab();
-  setupSupport();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

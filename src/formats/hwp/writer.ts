@@ -1,8 +1,9 @@
 import * as CFB from 'cfb';
+import { clickHereCommand } from '../clickHere';
 import { deflateRaw } from 'pako';
 import type { Columns, HeaderFooter, KDocument } from '../../types';
 import { type JNode, mmToHwp, pxToHwp, ptToHwp, parseBorderCss, paraBorderToFill, cleanColumns, HWP_BORDER_WIDTHS, FIXED_SPACE } from '../common';
-import { type CharStyle, type FlatBlock, type FlatFloat, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, unwrapBoxes } from '../flatten';
+import { type CharStyle, type FlatBlock, type FlatFloat, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, unwrapBoxes, fieldKey } from '../flatten';
 import { prepareImage } from '../imageUtil';
 import { HWP_LINE_STYLES, SHADOW_UNIT_PX, type ShapeData, type ShapeItem, type ShapeRaw } from '../shape';
 import { rawOf, shapeImageSrcs, shapeObjects } from '../hwpx/shapeWriter';
@@ -104,6 +105,7 @@ const TAG = {
   PARA_CHAR_SHAPE: 68,
   PARA_LINE_SEG: 69,
   CTRL_HEADER: 71,
+  CTRL_DATA: 87,
   LIST_HEADER: 72,
   PAGE_DEF: 73,
   FOOTNOTE_SHAPE: 74,
@@ -600,8 +602,33 @@ class BodyWriter {
       pb.text.push(4, 0x6c6b, 0x0068, 0, 0, 0, 0, 4);
       curLink = null;
     };
+    // 누름틀 (%clk): 이어진 같은 누름틀 글을 필드 시작(글자 3)~끝(글자 4)으로 감싼다. 비어 있으면 글은 쓰지 않는다
+    let curField = '';
+    const endField = () => {
+      if (!curField) return;
+      const v = ctrlId('%clk');
+      pb.text.push(4, v & 0xffff, (v >>> 16) & 0xff, 0, 0, 0, 0, 4);
+      curField = '';
+    };
     for (const it of list) {
-      const link = it.type === 'text' ? it.link : null;
+      const f = it.type === 'text' ? it.field : undefined;
+      if (fieldKey(f) !== curField) {
+        endLink();
+        endField();
+        if (f) {
+          this.ctrlChars(pb, 3, '%clk');
+          const cmd = clickHereCommand(f);
+          pb.ctrls.push((w, lv) => {
+            // 속성: 읽기 전용에서도 고칠 수 있음(bit 0), 내용을 고쳤음(bit 15). 기타 속성 9 (한글이 만든 파일과 같게)
+            w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('%clk')).u32(f.empty ? 1 : 0x8001).u8(9).wstr(cmd).u32(inst()).u32(0).out());
+            // 필드 이름: 매개 변수 집합 (id 0x021b, 항목 하나: 0x4000 문자열)
+            if (f.name) w.rec(TAG.CTRL_DATA, lv + 1, new Buf().u16(0x021b).u16(1).u16(0).u16(0x4000).u16(1).wstr(f.name).out());
+          });
+          curField = fieldKey(f);
+        }
+      }
+      if (it.type === 'text' && it.field?.empty) continue;
+      const link = it.type === 'text' && !it.field ? it.link : null;
       if (link !== curLink) {
         endLink();
         if (link) {
@@ -692,6 +719,7 @@ class BodyWriter {
       }
     }
     endLink();
+    endField();
   }
 
   private picture(w: RecWriter, lv: number, wv: number, hv: number, binId: number, ow = wv, oh = hv, crop: { t: number; r: number; b: number; l: number } | null = null, fl: FlatFloat | null = null, paraLeft = 0, sb = 0) {

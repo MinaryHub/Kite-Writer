@@ -2,55 +2,59 @@ import { useState } from 'react';
 import { Modal } from '../widgets';
 import { app } from '../../app/controller';
 import { platform } from '../../platform';
+import { ISSUES_URL } from '../../appInfo';
+import { issueTitle, newIssueUrl, osName } from '../../issueLink';
 
 /**
- * 도구 > 문의하기: 내용을 문의 중계로 보낸다 (개발사 메일 주소는 드러나지 않는다).
- * 중계는 문의를 GitHub 의 Kite 저장소에 공개 이슈로 올리므로(메일 주소는 빼고) 창에서 그 사실을 알린다
+ * 도구 > 문의하기: 분류·내용을 채운 GitHub 새 이슈 페이지를 브라우저로 연다.
+ * Kite 는 아무것도 보내지 않는다: 사용자가 GitHub 에 로그인해 직접 올린다 (공개 이슈)
  */
 const CATS = ['문의', '오류 신고', '기능 제안', '부적절한 AI 응답'];
+async function copyText(t: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(t);
+    return true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  }
+}
 
 export function ContactDialog({ onClose, category: initCat, message: initMsg }: { onClose: () => void; category?: string; message?: string }) {
   const [category, setCategory] = useState(CATS.includes(initCat || '') ? initCat! : '문의');
   const [message, setMessage] = useState(initMsg || '');
-  const [email, setEmail] = useState(() => {
-    try {
-      return localStorage.getItem('kite:contact:email') || '';
-    } catch {
-      return '';
-    }
-  });
   const [withEnv, setWithEnv] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
 
   const send = async () => {
     if (!message.trim() || busy) return;
     setBusy(true);
-    setErr('');
-    const r = await window.kite!.supportSend({ category, message, email: email.trim() || undefined, withEnv }).catch((e: any) => ({ ok: false, error: String(e?.message || e) }));
+    let body = message.trim();
+    if (withEnv) {
+      const ver = await platform.version().catch(() => '');
+      body += `\n\n---\n- Kite: ${ver || '알 수 없음'}\n- 운영체제: ${osName()}`;
+    }
+    const { url, long } = newIssueUrl(category, issueTitle(category, message), body, '(Kite 문의 창에서 복사한 내용을 여기에 붙여 넣어 주세요: Ctrl+V)');
+    if (long && !(await copyText(body))) {
+      setBusy(false);
+      app.toast('내용이 길어 복사해 넘기려 했는데 복사하지 못했습니다. 내용을 줄여 주세요.', 'error');
+      return;
+    }
     setBusy(false);
-    if (!r.ok) {
-      setErr(r.error || '보내지 못했습니다.');
-      return;
-    }
-    try {
-      if (email.trim()) localStorage.setItem('kite:contact:email', email.trim());
-    } catch {
-      /* 무시 */
-    }
     onClose();
-    // GitHub 이슈로 올라갔으면 이슈를 열어 볼 수 있게 한다 (답변·진행 상황은 이슈에)
-    const url = (r as { issueUrl?: string }).issueUrl;
-    if (url) {
-      const n = /\/issues\/(\d+)$/.exec(url)?.[1];
-      const pick = await app.confirm('문의를 보냈습니다', `GitHub 이슈${n ? ` #${n}` : ''}로 올렸습니다. 답변과 진행 상황은 이슈에서 볼 수 있습니다.${email.trim() ? '\n적어 주신 메일 주소로도 답장드립니다.' : ''}`, [
-        { id: 'open', label: '이슈 열기', primary: true },
-        { id: 'close', label: '닫기' },
-      ]);
-      if (pick === 'open') platform.openExternal(url);
-      return;
-    }
-    app.toast(email.trim() ? '문의를 보냈습니다. 적어 주신 주소로 답장드리겠습니다.' : '문의를 보냈습니다. 고맙습니다.', 'info', 5000);
+    platform.openExternal(url);
+    app.toast(
+      long ? '내용이 길어 클립보드에 복사했습니다. 열린 GitHub 페이지의 본문 칸에 붙여 넣은 뒤 "Submit new issue" 를 눌러 주세요.' : '열린 GitHub 페이지에서 내용을 확인하고 "Submit new issue" 를 눌러 주세요.',
+      'info',
+      8000,
+    );
   };
 
   return (
@@ -61,7 +65,10 @@ export function ContactDialog({ onClose, category: initCat, message: initMsg }: 
       footer={
         <>
           <button className="btn primary" disabled={!message.trim() || busy} onClick={send}>
-            {busy ? '보내는 중…' : '보내기'}
+            GitHub 에 올리기
+          </button>
+          <button className="btn" onClick={() => platform.openExternal(ISSUES_URL)}>
+            올라온 이슈 보기
           </button>
           <button className="btn" onClick={onClose}>
             취소
@@ -76,8 +83,6 @@ export function ContactDialog({ onClose, category: initCat, message: initMsg }: 
             <option key={c}>{c}</option>
           ))}
         </select>
-        <label>답장 받을 메일</label>
-        <input type="email" value={email} placeholder="선택 — 답장이 필요하면 적어 주세요" onChange={(e) => setEmail(e.target.value)} />
       </div>
       <textarea
         className="contact-msg"
@@ -95,12 +100,11 @@ export function ContactDialog({ onClose, category: initCat, message: initMsg }: 
       />
       <label className="check" style={{ display: 'flex', marginTop: 6 }}>
         <input type="checkbox" checked={withEnv} onChange={(e) => setWithEnv(e.target.checked)} />
-        앱 버전과 운영체제 정보를 함께 보내기 (문서 내용은 보내지 않습니다)
+        앱 버전과 운영체제 이름을 함께 적기 (문서 내용은 넣지 않습니다)
       </label>
-      {err && <div className="ai-warn">{err}</div>}
       <p className="unit" style={{ lineHeight: 1.6, marginTop: 8 }}>
-        보낸 내용은 GitHub 의 Kite 저장소에 <b>공개 이슈</b>로 올라가 누구나 볼 수 있습니다. 개인정보나 문서 내용은 적지 마세요.
-        메일 주소는 공개하지 않고 답장에만 씁니다.
+        "GitHub 에 올리기" 를 누르면 내용을 채운 GitHub 의 새 이슈 페이지가 브라우저로 열립니다. GitHub 계정으로 로그인해 올리면 되고, 답변과 진행 상황은
+        그 이슈에서 볼 수 있습니다. 이슈는 <b>공개</b>되어 누구나 볼 수 있으니 개인정보나 문서 내용은 적지 마세요.
       </p>
     </Modal>
   );

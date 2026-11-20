@@ -1,4 +1,6 @@
-import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, floatOverhang, floatTableX, gapInBox, headMark, indentByPara, isBreakBlock, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx, type ParaHead } from '../hwpLayout';
+import { LineSegStats, ParaLayout, dropHwpLayout, wrapFromHw, bodyPxOf, estimateMissingLines, floatOverhang, floatTableX, gapInBox, headMark, indentByPara, isBreakBlock, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx, type ParaHead } from '../hwpLayout';
+import { aes128EcbDecrypt } from './aes';
+import { applyClickHere, fieldNameFromCtrlData, parseClickHereCommand } from '../clickHere';
 import { cleanLook, type PicLook } from '../picLook';
 import { olePreview } from '../olePreview';
 import { isMetafileExt, metafileToSvg } from '../metafile';
@@ -437,6 +439,8 @@ class HwpConverter {
   /** 지금 읽는 구역의 편집 용지 (구역 정의에서 처음 읽은 것) */
   sectionPage: PageSetup | null = null;
   private linkHref: string | null = null;
+  /** 열린 필드 (끝 표시가 어느 필드를 닫는지): 하이퍼링크 또는 누름틀(시작 자리·안내문) */
+  private fieldStack: ({ kind: 'hlk' } | { kind: 'clk'; inline: JNode[]; start: number; f: { guide: string; memo: string; name: string }; shape: number } | { kind: 'other' })[] = [];
   /** 이 문단에서 읽은 감추기 (첫 블록에 단다) */
   private pageHide: string | null = null;
   /** 지금 읽는 문단이 놓인 쪽 (0 부터; 쪽 나누기와 줄 정보로 센다) */
@@ -710,7 +714,9 @@ class HwpConverter {
             if (t) inline.push(t);
           } else if (c === 4) {
             pushText();
-            this.linkHref = null;
+            const top = this.fieldStack.pop();
+            if (top?.kind === 'clk') applyClickHere(top.inline === inline ? [[inline, top.start]] : [[top.inline, top.start], [inline, 0]], top.f, charMarks(this.charPr(top.shape), this.linkHref));
+            else this.linkHref = null;
           }
           i += 8;
           continue;
@@ -796,6 +802,8 @@ class HwpConverter {
   /** 확장 컨트롤 처리. 블록을 반환하면 문단을 끊고 삽입 */
   private handleCtrl(ctrl: Rec, shapeId: number, inline: JNode[], captions?: Captions, lay?: ParaLayout): JNode[] {
     const id = ctrlIdOf(ctrl);
+    // 끝 표시(글자 4)로 닫히는 다른 필드도 쌓아 둔다 (누름틀·하이퍼링크의 끝과 헷갈리지 않게)
+    if (id.startsWith('%') && id !== '%hlk' && id !== '%clk') this.fieldStack.push({ kind: 'other' });
     switch (id) {
       case 'secd':
         this.handleSecd(ctrl);
@@ -902,6 +910,15 @@ class HwpConverter {
       case '%hlk': {
         const cmd = wstr(ctrl, 9).s;
         this.linkHref = cmd.split(';')[0].replace(/\\:/g, ':') || null;
+        this.fieldStack.push({ kind: 'hlk' });
+        return [];
+      }
+      case '%clk': {
+        // 누름틀: 안내문·메모는 명령 글에, 이름은 CTRL_DATA 에. 끝 표시(글자 4)에서 그 사이 글에 누름틀 표시를 단다
+        const cmd = wstr(ctrl, 9).s;
+        const data = ctrl.children.find((c) => c.tag === T.CTRL_DATA);
+        const f = { ...parseClickHereCommand(cmd), name: data ? fieldNameFromCtrlData(data.data) : '' };
+        this.fieldStack.push({ kind: 'clk', inline, start: inline.length, f, shape: shapeId });
         return [];
       }
       case 'tdut': {
@@ -1837,7 +1854,8 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
   const flags = hdv.getUint32(36, true);
   const compressed = (flags & 1) === 1;
   if (flags & 2) throw new Error('암호가 설정된 문서는 열 수 없습니다.');
-  if (flags & 4) throw new Error('배포용 문서는 열 수 없습니다.');
+  // 배포용 문서: 본문이 BodyText 대신 ViewText 에 암호화되어 있다. 읽기 전용으로 연다
+  const distributed = !!(flags & 4);
 
   const docInfoEntry = find('DocInfo');
   if (!docInfoEntry) throw new Error('DocInfo 스트림이 없습니다.');
@@ -1866,9 +1884,11 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
   if (info.pageNumCharPr != null) applyPageNumStyle(conv.settings, info.charPrs[info.pageNumCharPr]);
   const blocks: JNode[] = [];
   for (let i = 0; ; i++) {
-    const sec = find(`BodyText/Section${i}`);
+    const sec = find(`${distributed ? 'ViewText' : 'BodyText'}/Section${i}`);
     if (!sec) break;
-    const recs = buildTree(parseRecords(decompress(new Uint8Array(sec.content as any), compressed)));
+    let raw = new Uint8Array(sec.content as any);
+    if (distributed) raw = decodeDistributedStream(raw);
+    const recs = buildTree(parseRecords(decompress(raw, compressed)));
     // 구역 나누기: 구역마다 용지가 다를 수 있으므로 쪽 나누기에 이 구역의 용지(구역 정의에서 읽은 것)를 담는다
     const brk: JNode | null = i > 0 && blocks.length ? { type: 'pageBreak' } : null;
     if (brk) blocks.push(brk);
@@ -1878,10 +1898,46 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
   }
   while (blocks.length && blocks[0].type === 'pageBreak') blocks.shift();
   // 줄 정보가 형식뿐인 문서(한글이 배치하지 않은 파일)는 그 값을 따르지 않고 자연 배치로 흐르게 한다
-  const content = docNode(conv.segStats.fake ? blocks.map(dropHwpLayout) : blocks);
+  const content = docNode(conv.segStats.fake ? blocks.map((b) => wrapFromHw(dropHwpLayout(b), bodyPxOf(conv.settings.page))) : conv.segStats.none ? blocks.map((b) => wrapFromHw(b, bodyPxOf(conv.settings.page))) : blocks);
   // 한글이 줄 정보를 적지 않은 문단의 줄 높이를 같은 모양의 다른 문단에서 빌린다
   if (!conv.segStats.fake) estimateMissingLines(content);
-  return { content, settings: conv.settings, meta: {}, warnings: [...new Set(warnings)].slice(0, 20) };
+  const out: LoadedDoc = { content, settings: conv.settings, meta: {}, warnings: [...new Set(warnings)].slice(0, 20) };
+  // 배포자가 복사·인쇄를 막았는지는 알 수 없어(공개된 형식 설명에 없다) 둘 다 막는다
+  if (distributed) out.protect = { kind: 'distribution', noCopy: true, noPrint: true };
+  return out;
+}
+
+/** 배포용 문서 데이터 레코드 (HWPTAG_BEGIN + 12) */
+const TAG_DISTRIBUTE_DOC_DATA = 28;
+
+/**
+ * 배포용 문서의 구역 스트림(ViewText/SectionN)을 푼다: 맨 앞 '배포용 문서 데이터' 레코드(256바이트)는
+ * 앞 4바이트(난수 씨앗)로 만든 난수열과 XOR 되어 있고, 풀면 씨앗에 따라 정해진 자리에 키가 있다.
+ * 나머지는 그 키로 AES-128(ECB) 암호화되어 있다. 푼 결과는 보통 본문처럼 (압축된) 레코드들이다
+ */
+export function decodeDistributedStream(s: Uint8Array): Uint8Array {
+  if (s.length < 260) throw new Error('배포용 문서의 본문이 올바르지 않습니다.');
+  const head = (s[0] | (s[1] << 8) | (s[2] << 16) | (s[3] << 24)) >>> 0;
+  if ((head & 0x3ff) !== TAG_DISTRIBUTE_DOC_DATA || head >>> 20 !== 256) throw new Error('배포용 문서의 본문이 올바르지 않습니다.');
+  const d = s.slice(4, 260);
+  // MS C 런타임의 rand() 와 같은 난수열
+  let seed = (d[0] | (d[1] << 8) | (d[2] << 16) | (d[3] << 24)) >>> 0;
+  const rand = () => {
+    seed = (Math.imul(seed, 214013) + 2531011) >>> 0;
+    return (seed >>> 16) & 0x7fff;
+  };
+  let key = 0;
+  let run = 0;
+  for (let i = 0; i < 256; i++) {
+    if (run === 0) {
+      key = rand() & 0xff;
+      run = (rand() & 0xf) + 1;
+    }
+    if (i >= 4) d[i] ^= key;
+    run--;
+  }
+  const off = 4 + (d[0] & 0xf);
+  return aes128EcbDecrypt(d.subarray(off, off + 16), s.subarray(260));
 }
 
 /**

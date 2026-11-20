@@ -331,6 +331,17 @@ export const commands: Record<string, Command> = {
     enabled: hasDoc,
   },
   'image.crop': { label: '그림 자르기...', icon: 'Crop', run: () => app.openDialog('imageCrop'), enabled: () => isImageSelected() },
+  'insert.clickHere': { label: '누름틀...', icon: 'TextCursorInput', run: () => app.openDialog('clickHere'), enabled: hasDoc },
+  'insert.hanja': {
+    label: '한자로 바꾸기...',
+    icon: 'Languages',
+    shortcut: 'F9',
+    keys: ['F9', 'HanjaMode'],
+    run: () => void startHanja(),
+    enabled: hasDoc,
+  },
+  'edit.hanjaToHangul': { label: '한자를 한글로', run: () => void hanjaSelectionToHangul(), enabled: hasDoc },
+  'object.props': { label: '개체 속성 (배치·위치·크기)...', icon: 'Layers', run: () => app.openDialog('object'), enabled: () => isObjectSelected() },
   'image.uncrop': {
     label: '자르기 취소',
     run: () => {
@@ -386,6 +397,12 @@ export const commands: Record<string, Command> = {
   'format.alignDistribute': { label: '배분 정렬', icon: 'AlignHorizontalSpaceAround', shortcut: 'Ctrl+Shift+T', run: () => chain().setTextAlign('distribute').run(), active: () => alignIs('distribute'), enabled: hasDoc },
   'format.bullet': { label: '글머리표', icon: 'List', shortcut: 'Ctrl+Shift+8', run: () => chain().toggleBulletList().run(), active: () => !!ed()?.isActive('bulletList'), enabled: hasDoc },
   'format.number': { label: '문단 번호', icon: 'ListOrdered', shortcut: 'Ctrl+Shift+7', run: () => chain().toggleOrderedList().run(), active: () => !!ed()?.isActive('orderedList'), enabled: hasDoc },
+  'format.govNumber': {
+    label: '공문서 항목 번호 (1. 가. 1) 가) …)',
+    run: () => setGovNumbering(),
+    active: () => govListActive(),
+    enabled: hasDoc,
+  },
   'format.indent': { label: '왼쪽 여백 늘리기', icon: 'IndentIncrease', shortcut: 'Ctrl+Alt+F6', keys: ['Ctrl+Alt+F6'], run: () => (ed()?.isActive('listItem') ? chain().sinkListItem('listItem').run() : chain().changeIndent(10).run()), enabled: hasDoc },
   'format.outdent': { label: '왼쪽 여백 줄이기', icon: 'IndentDecrease', shortcut: 'Ctrl+Alt+F5', keys: ['Ctrl+Alt+F5'], run: () => (ed()?.isActive('listItem') ? chain().liftListItem('listItem').run() : chain().changeIndent(-10).run()), enabled: hasDoc },
   'format.lineUp': { label: '줄 간격 넓게', shortcut: 'Alt+Shift+A', run: () => chain().changeLineHeight(10).run(), enabled: hasDoc },
@@ -598,6 +615,73 @@ export const commands: Record<string, Command> = {
   'tools.overwrite': { label: '삽입/수정 모드 전환', shortcut: 'Insert', run: () => chain().toggleOverwrite().run(), enabled: hasDoc },
 };
 
+/**
+ * 한자로 바꾸기 (F9·한자 키): 고른 글(한글)이나 커서 앞 낱말의 한자 후보 창을 연다. 고른 글에 한자가 있으면 한글로 바꾼다
+ */
+async function startHanja() {
+  const e = ed();
+  if (!e) return;
+  const { from, to, empty, $from } = e.state.selection;
+  const { loadHanja, wordBeforeCursor, hasHanja } = await import('../hanja');
+  if (!empty) {
+    const text = e.state.doc.textBetween(from, to);
+    if (!text.trim()) return;
+    if (hasHanja(text)) return hanjaSelectionToHangul();
+    // 한 문단 안의 글만 (그림·줄 바꿈이 끼면 자리 계산이 어긋난다)
+    if (text.length !== to - from || text.length > 40) {
+      app.toast('한 문단 안의 글(40글자까지)을 골라 주세요.', 'warn');
+      return;
+    }
+    app.openDialog('hanja', { from, text });
+    return;
+  }
+  let d;
+  try {
+    d = await loadHanja();
+  } catch (err: any) {
+    app.toast(`한자 사전을 불러오지 못했습니다: ${err?.message || err}`, 'error');
+    return;
+  }
+  const before = $from.parent.textBetween(Math.max(0, $from.parentOffset - 8), $from.parentOffset, undefined, '\ufffc');
+  const w = wordBeforeCursor(d, before);
+  if (!w) {
+    app.toast('커서 앞에 한자로 바꿀 한글이 없습니다. 바꿀 글을 고르거나 낱말 뒤에 커서를 두세요.', 'info');
+    return;
+  }
+  app.openDialog('hanja', { from: $from.pos - w.length, text: w });
+}
+
+/** 고른 글의 한자를 한글 읽기로 바꾼다 */
+async function hanjaSelectionToHangul() {
+  const e = ed();
+  if (!e) return;
+  const { from, to, empty } = e.state.selection;
+  if (empty) {
+    app.toast('한글로 바꿀 한자를 고르세요.', 'info');
+    return;
+  }
+  const { loadHanja, hanjaToHangul } = await import('../hanja');
+  const d = await loadHanja();
+  const tr = e.state.tr;
+  // 글 조각마다 바꾼다 (서식·그림은 그대로)
+  e.state.doc.nodesBetween(from, to, (n, pos) => {
+    if (!n.isText) return true;
+    const a = Math.max(from, pos);
+    const b = Math.min(to, pos + n.nodeSize);
+    const t = n.text!.slice(a - pos, b - pos);
+    const out = hanjaToHangul(d, t);
+    if (out !== t) tr.insertText(out, tr.mapping.map(a), tr.mapping.map(b));
+    return false;
+  });
+  if (tr.docChanged) e.view.dispatch(tr);
+}
+
+/** 그림·그리기 개체·글상자가 선택되어 있는가 */
+function isObjectSelected() {
+  const sel = ed()?.state.selection;
+  return sel instanceof NodeSelection && (sel.node.type.name === 'image' || sel.node.type.name === 'shape' || sel.node.type.name === 'textBox');
+}
+
 function isImageSelected() {
   const sel = ed()?.state.selection;
   return sel instanceof NodeSelection && sel.node.type.name === 'image';
@@ -610,6 +694,61 @@ function alignIs(a: string) {
   const p = $from.parent;
   const cur = p.attrs?.textAlign || 'justify';
   return cur === a;
+}
+
+/** 커서가 든 가장 바깥 번호 목록의 자리와 노드 */
+function outerOrderedList(): { pos: number; node: any } | null {
+  const e = ed();
+  if (!e) return null;
+  const $f = e.state.selection.$from;
+  for (let d = 1; d <= $f.depth; d++) {
+    const n = $f.node(d);
+    if (n.type.name === 'orderedList') return { pos: $f.before(d), node: n };
+  }
+  return null;
+}
+
+function govListActive(): boolean {
+  return outerOrderedList()?.node.attrs.listStyle === 'k-gov';
+}
+
+/**
+ * 서식 > 공문서 항목 번호: 번호 목록으로 만들고 가장 바깥 목록을 공문서 모양(k-gov)으로.
+ * 안쪽 수준(Tab 으로 들여 쓴 항목)은 가. 1) 가) (1) (가) ① ㉮ 차례로 저절로 붙는다. 이미 공문서 모양이면 보통 번호로 되돌린다
+ */
+function setGovNumbering() {
+  const e = ed();
+  if (!e) return;
+  const was = govListActive();
+  const c = e.chain().focus();
+  if (!e.isActive('orderedList')) c.toggleOrderedList();
+  // 한 번의 변경으로: 목록으로 만든 뒤의 문서에서 가장 바깥 번호 목록을 찾아 모양을 바꾼다 (커서 자리는 그대로)
+  c.command(({ tr }) => {
+    const $f = tr.selection.$from;
+    for (let d = 1; d <= $f.depth; d++) {
+      const n = $f.node(d);
+      if (n.type.name !== 'orderedList') continue;
+      tr.setNodeMarkup($f.before(d), undefined, { ...n.attrs, listStyle: was ? null : 'k-gov' });
+      return true;
+    }
+    return false;
+  }).run();
+}
+
+/** 보호된 문서(배포용)에서도 되는 명령: 보기·이동·찾기·파일 열기/닫기·도움말 (복사·인쇄는 막지 않았을 때만) */
+const PROTECT_OK = /^(view\.|window\.|page\.(prev|next)$|edit\.(find|findNext|goto|selectAll)$|file\.(new|open|template|close|exit|info|share|preview)$|tools\.(palette|prefs|shortcuts|about|contact|sponsor|privacyPolicy|licenses|wordCount)$)/;
+function protectAllows(id: string): boolean {
+  const p = app.active?.protect;
+  if (!p) return true;
+  if (PROTECT_OK.test(id)) return true;
+  if (id === 'edit.copy') return !p.noCopy;
+  if (id === 'file.print' || id === 'file.exportPdf') return !p.noPrint;
+  return false;
+}
+// 모든 명령의 '쓸 수 있음' 에 보호 검사를 더한다 (메뉴·도구 상자·팔레트가 흐리게 보인다)
+for (const [id, c] of Object.entries(commands)) {
+  const orig = c.enabled;
+  c.enabled = () => protectAllows(id) && (orig ? orig() : true);
 }
 
 export function runCommand(id: string) {
@@ -658,6 +797,17 @@ let chordTimer: any = null;
 
 export function installShortcuts() {
   const onKey = (e: KeyboardEvent) => {
+    // 한글을 조합하는 중에 F9: 조합 중인 글자를 확정한 뒤 한자로 바꾸기 ("가정" 을 치자마자 F9)
+    if ((e.isComposing || e.keyCode === 229) && e.key === 'F9') {
+      const v = ed()?.view;
+      if (v) {
+        e.preventDefault();
+        (v.dom as HTMLElement).blur();
+        v.focus();
+        setTimeout(() => runCommand('insert.hanja'), 30);
+      }
+      return;
+    }
     if (e.isComposing || e.keyCode === 229) return;
     const name = keyName(e);
     const target = e.target as HTMLElement;
