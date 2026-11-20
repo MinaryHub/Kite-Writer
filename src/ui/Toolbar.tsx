@@ -176,7 +176,11 @@ const BULLET_STYLES = [
 ];
 
 const NUMBER_STYLES = [
+  { v: 'k-gov', label: '공문서 (1. 가. 1) 가) (1) (가) ① ㉮)' },
   { v: null, label: '1. 2. 3.' },
+  { v: 'k-rparen', label: '1) 2) 3)' },
+  { v: 'k-rparen-hangul', label: '가) 나) 다)' },
+  { v: 'k-circled-hangul', label: '㉮ ㉯ ㉰' },
   { v: 'hangul', label: '가. 나. 다.' },
   { v: 'hangul-consonant', label: 'ㄱ. ㄴ. ㄷ.' },
   { v: 'k-circled', label: '① ② ③' },

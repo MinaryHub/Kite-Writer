@@ -386,6 +386,12 @@ export const commands: Record<string, Command> = {
   'format.alignDistribute': { label: '배분 정렬', icon: 'AlignHorizontalSpaceAround', shortcut: 'Ctrl+Shift+T', run: () => chain().setTextAlign('distribute').run(), active: () => alignIs('distribute'), enabled: hasDoc },
   'format.bullet': { label: '글머리표', icon: 'List', shortcut: 'Ctrl+Shift+8', run: () => chain().toggleBulletList().run(), active: () => !!ed()?.isActive('bulletList'), enabled: hasDoc },
   'format.number': { label: '문단 번호', icon: 'ListOrdered', shortcut: 'Ctrl+Shift+7', run: () => chain().toggleOrderedList().run(), active: () => !!ed()?.isActive('orderedList'), enabled: hasDoc },
+  'format.govNumber': {
+    label: '공문서 항목 번호 (1. 가. 1) 가) …)',
+    run: () => setGovNumbering(),
+    active: () => govListActive(),
+    enabled: hasDoc,
+  },
   'format.indent': { label: '왼쪽 여백 늘리기', icon: 'IndentIncrease', shortcut: 'Ctrl+Alt+F6', keys: ['Ctrl+Alt+F6'], run: () => (ed()?.isActive('listItem') ? chain().sinkListItem('listItem').run() : chain().changeIndent(10).run()), enabled: hasDoc },
   'format.outdent': { label: '왼쪽 여백 줄이기', icon: 'IndentDecrease', shortcut: 'Ctrl+Alt+F5', keys: ['Ctrl+Alt+F5'], run: () => (ed()?.isActive('listItem') ? chain().liftListItem('listItem').run() : chain().changeIndent(-10).run()), enabled: hasDoc },
   'format.lineUp': { label: '줄 간격 넓게', shortcut: 'Alt+Shift+A', run: () => chain().changeLineHeight(10).run(), enabled: hasDoc },
@@ -610,6 +616,45 @@ function alignIs(a: string) {
   const p = $from.parent;
   const cur = p.attrs?.textAlign || 'justify';
   return cur === a;
+}
+
+/** 커서가 든 가장 바깥 번호 목록의 자리와 노드 */
+function outerOrderedList(): { pos: number; node: any } | null {
+  const e = ed();
+  if (!e) return null;
+  const $f = e.state.selection.$from;
+  for (let d = 1; d <= $f.depth; d++) {
+    const n = $f.node(d);
+    if (n.type.name === 'orderedList') return { pos: $f.before(d), node: n };
+  }
+  return null;
+}
+
+function govListActive(): boolean {
+  return outerOrderedList()?.node.attrs.listStyle === 'k-gov';
+}
+
+/**
+ * 서식 > 공문서 항목 번호: 번호 목록으로 만들고 가장 바깥 목록을 공문서 모양(k-gov)으로.
+ * 안쪽 수준(Tab 으로 들여 쓴 항목)은 가. 1) 가) (1) (가) ① ㉮ 차례로 저절로 붙는다. 이미 공문서 모양이면 보통 번호로 되돌린다
+ */
+function setGovNumbering() {
+  const e = ed();
+  if (!e) return;
+  const was = govListActive();
+  const c = e.chain().focus();
+  if (!e.isActive('orderedList')) c.toggleOrderedList();
+  // 한 번의 변경으로: 목록으로 만든 뒤의 문서에서 가장 바깥 번호 목록을 찾아 모양을 바꾼다 (커서 자리는 그대로)
+  c.command(({ tr }) => {
+    const $f = tr.selection.$from;
+    for (let d = 1; d <= $f.depth; d++) {
+      const n = $f.node(d);
+      if (n.type.name !== 'orderedList') continue;
+      tr.setNodeMarkup($f.before(d), undefined, { ...n.attrs, listStyle: was ? null : 'k-gov' });
+      return true;
+    }
+    return false;
+  }).run();
 }
 
 /** 보호된 문서(배포용)에서도 되는 명령: 보기·이동·찾기·파일 열기/닫기·도움말 (복사·인쇄는 막지 않았을 때만) */

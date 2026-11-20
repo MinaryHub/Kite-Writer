@@ -425,13 +425,27 @@ const BULLETS: Record<string, string> = {
   'k-hollow-square': '□',
 };
 
+const CIRCLED_HANGUL = [...'㉮㉯㉰㉱㉲㉳㉴㉵㉶㉷㉸㉹㉺㉻'];
+
 export function bulletChar(listStyle: string | null | undefined, depth: number): string {
   if (listStyle && BULLETS[listStyle]) return BULLETS[listStyle];
   return ['•', '◦', '▪'][depth % 3];
 }
 
+/**
+ * 공문서 항목 기호 (행정업무규정 시행규칙): 첫째 1. 둘째 가. 셋째 1) 넷째 가) 다섯째 (1) 여섯째 (가) 일곱째 ① 여덟째 ㉮.
+ * 맨 바깥 목록에 'k-gov' 를 주면 안쪽 목록은 모양을 따로 정하지 않은 한 수준에 따라 이 차례로 붙는다
+ */
+export const GOV_LEVELS = ['k-gov', 'hangul', 'k-rparen', 'k-rparen-hangul', 'k-paren', 'k-paren-hangul', 'k-circled', 'k-circled-hangul'];
+
 export function orderedLabel(n: number, listStyle: string | null | undefined): string {
   switch (listStyle) {
+    case 'k-rparen':
+      return `${n})`;
+    case 'k-rparen-hangul':
+      return `${formatNumber(n, 'HANGUL_SYLLABLE')})`;
+    case 'k-circled-hangul':
+      return CIRCLED_HANGUL[n - 1] || `(${formatNumber(n, 'HANGUL_SYLLABLE')})`;
     case 'lower-alpha':
     case 'lower-latin':
       return formatNumber(n, 'LATIN_SMALL') + '.';
@@ -460,6 +474,8 @@ export function orderedLabel(n: number, listStyle: string | null | undefined): s
 
 interface Ctx {
   indent: number;
+  /** 공문서 항목 번호 목록 안이면 지금 수준 (맨 바깥 0) */
+  gov?: number;
   baseChar: CharStyle;
   quote: boolean;
   mono: boolean;
@@ -549,13 +565,17 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
       case 'taskList': {
         let num = n.attrs?.start || 1;
         const depth = Math.round(ctx.indent / 20);
+        // 공문서 항목 번호: 맨 바깥이 k-gov 이면 안쪽 번호 목록은 수준에 따라 모양이 정해진다
+        const own = n.attrs?.listStyle;
+        const gov = n.type === 'orderedList' ? (own === 'k-gov' ? 0 : ctx.gov != null ? ctx.gov + 1 : undefined) : ctx.gov;
+        const numStyle = own && own !== 'k-gov' ? own : gov != null ? GOV_LEVELS[Math.min(gov, GOV_LEVELS.length - 1)] : own;
         for (const li of n.content || []) {
           let label: string;
           if (n.type === 'bulletList') label = bulletChar(n.attrs?.listStyle, depth);
-          else if (n.type === 'orderedList') label = orderedLabel(num, n.attrs?.listStyle);
+          else if (n.type === 'orderedList') label = orderedLabel(num, numStyle === 'k-gov' ? null : numStyle);
           else label = li.attrs?.checked ? '☑' : '☐';
           num++;
-          const childCtx: Ctx = { ...ctx, indent: ctx.indent + 20 };
+          const childCtx: Ctx = { ...ctx, indent: ctx.indent + 20, gov };
           const blocks = flattenBlocks(li.content || [], childCtx);
           const first = blocks.find((b) => b.kind === 'para') as FlatPara | undefined;
           if (first) {

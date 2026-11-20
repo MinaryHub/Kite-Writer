@@ -130,6 +130,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
       '-',
       'format.bullet',
       'format.number',
+      'format.govNumber',
       'format.outdent',
       'format.indent',
       '-',
