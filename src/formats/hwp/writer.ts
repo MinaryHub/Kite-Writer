@@ -322,12 +322,12 @@ function borderFillRec(d: BF): Uint8Array {
   return b.out();
 }
 
-function docInfo(reg: Registry): Uint8Array {
+function docInfo(reg: Registry, pageNumChar: number | null = null): Uint8Array {
   const w = new RecWriter();
   w.rec(TAG.DOCUMENT_PROPERTIES, 0, new Buf().u16(1).u16(1).u16(1).u16(1).u16(1).u16(1).u16(1).u32(0).u32(0).u32(0).out());
   const nf = reg.fonts.length;
   const ids = new Buf();
-  [reg.bins.length, nf, nf, nf, nf, nf, nf, nf, reg.bfs.length, reg.chars.length, 2, 1, 0, reg.paras.length, 1, 0, 0, 0].forEach((v) => ids.i32(v));
+  [reg.bins.length, nf, nf, nf, nf, nf, nf, nf, reg.bfs.length, reg.chars.length, 2, 1, 0, reg.paras.length, pageNumChar == null ? 1 : 2, 0, 0, 0].forEach((v) => ids.i32(v));
   w.rec(TAG.ID_MAPPINGS, 0, ids.out());
   for (const bin of reg.bins) w.rec(TAG.BIN_DATA, 1, new Buf().u16(1).u16(bin.id).wstr(bin.ext).out());
   for (let lang = 0; lang < 7; lang++) for (const f of reg.fonts) w.rec(TAG.FACE_NAME, 1, new Buf().u8(0).wstr(f).out());
@@ -338,6 +338,8 @@ function docInfo(reg: Registry): Uint8Array {
   w.rec(TAG.NUMBERING, 1, NUMBERING_TEMPLATE);
   for (const p of reg.paras) w.rec(TAG.PARA_SHAPE, 1, paraShapeRec(p));
   w.rec(TAG.STYLE, 1, new Buf().wstr('바탕글').wstr('Normal').u8(0).u8(0).i16(0x412).u16(0).u16(0).u16(0).out());
+  // 쪽 번호는 '쪽 번호' 스타일의 글자 모양으로 찍힌다 (한글도, Kite 도)
+  if (pageNumChar != null) w.rec(TAG.STYLE, 1, new Buf().wstr('쪽 번호').wstr('Page Number').u8(0).u8(1).i16(0x412).u16(0).u16(pageNumChar).u16(0).out());
   w.rec(TAG.COMPATIBLE_DOCUMENT, 0, new Buf().u32(0).out());
   w.rec(TAG.LAYOUT_COMPATIBILITY, 1, new Buf().zeros(20).out());
   return w.out();
@@ -1118,7 +1120,9 @@ export async function writeHwp(doc: KDocument, opts: { pageCount?: number } = {}
   body.pageCount = opts.pageCount || 1;
   body.blocks(blocks, 0, true);
   const section = body.w.out();
-  const info = docInfo(reg);
+  const pn = doc.settings.pageNumber;
+  const pnChar = pn.fontSize && pn.fontSize > 0 ? reg.char({ ...defaultChar(), font: pn.fontFamily || '함초롬돋움', size: pn.fontSize, bold: !!pn.bold, italic: !!pn.italic, color: pn.color || '#000000' }) : null;
+  const info = docInfo(reg, pnChar);
 
   // FileHeader (256 바이트)
   const fh = new Uint8Array(256);

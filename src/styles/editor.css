@@ -424,7 +424,10 @@
 .kdoc-content tr.pg-push-row > td,
 .kdoc-content tr.pg-push-row > th {
   padding-top: calc(var(--pg-push) + var(--cm-t, 0.5mm));
-  /* 다음 쪽에서 이어지는 줄의 위쪽 선 */
+}
+/* 다음 쪽에서 이어지는 줄의 위쪽 선 (한글 문서는 칸 테두리 겹이 넘긴 자리에서부터 긋는다: 아래 규칙) */
+.kdoc-content:not(.hwp-metrics):not(.workspace.hwp-metrics *) tr.pg-push-row > td,
+.kdoc-content:not(.hwp-metrics):not(.workspace.hwp-metrics *) tr.pg-push-row > th {
   background-image: linear-gradient(#000, #000);
   background-size: 100% 1px;
   background-position: 0 calc(var(--pg-push) - 1px);
@@ -533,6 +536,9 @@
   /* 위아래만 자른다 (쪽에 걸친 블록). 가로는 열어 두어 본문 폭에 꼭 맞는 표의 오른쪽 테두리가 잘리지 않게 */
   overflow: visible;
   clip-path: inset(0 -100vw);
+  /* 쪽마다 편집 화면의 블록을 통째로 놓고 잘라 보인다: 인쇄할 때 브라우저가 쪽 경계에서 이 안을 다시 조각내지 않게 한다
+     (조각나면 여러 쪽에 걸친 표 줄의 칸 세로 맞춤이 화면과 달라진다) */
+  contain: size;
 }
 .print-page .print-body > .kdoc-content > * {
   position: absolute;
@@ -651,8 +657,8 @@
 }
 /* 한글은 칸 테두리 두께를 글자 영역에서 빼지 않는다 (글자 폭 = 칸 너비 - 안 여백). 겹친 테두리의 절반만큼 안 여백을 줄여 맞춘다 */
 :is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th) {
-  padding-left: max(0px, calc(var(--cm-l, var(--cell-px, 1.8mm)) - 0.75px));
-  padding-right: max(0px, calc(var(--cm-r, var(--cell-px, 1.8mm)) - 0.75px));
+  padding-left: max(0px, calc(var(--cm-l, var(--cell-px, 1.8mm)) - 0.5px));
+  padding-right: max(0px, calc(var(--cm-r, var(--cell-px, 1.8mm)) - 0.5px));
 }
 /* 세로도 같다: 한글의 줄 높이(칸 높이)에는 테두리 두께가 들지 않는다. 위아래 테두리의 절반씩만큼 안 여백을 줄인다
    (굵은 선은 칸 속성이 그 절반을 --bh-t / --bh-b 로 준다. 없으면 1px 선) */
@@ -997,6 +1003,11 @@ p[data-cell-tail]:is(:empty, :has(> br:only-child)):not(.k-caret-here) {
   vertical-align: calc(var(--kh, 0px) * -0.15);
 }
 
+/* 그림뿐인 줄: 줄 간격은 그림 아래에 온다 (그림은 줄 위쪽에. 한글이 적은 기준선이 그림 아래 끝인 줄이라 위의 15% 내림을 쓰지 않는다) */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) p.hwp-imgline > .k-image:not(.k-float),
+.kdoc-content p.hwp-imgline > .k-image {
+  vertical-align: top;
+}
 /* 한글이 놓은 줄: 줄 상자의 높이와 기준선을 줄 첫머리의 버팀대가 정한다 (문단 자체의 줄 높이는 0) */
 .kdoc-content .hwp-strut {
   display: inline-block;
@@ -1020,6 +1031,105 @@ p[data-cell-tail]:is(:empty, :has(> br:only-child)):not(.k-caret-here) {
   background-size: var(--dg-size, 100% 100%);
   background-position: var(--dg-pos, 0 0);
   background-repeat: no-repeat;
+}
+
+/* ----- 한글 문서: 칸 테두리를 실제 굵기로 -----
+   CSS 테두리는 인쇄(PDF)할 때 굵기가 px 단위로 맞춰져 0.12mm 선도 0.4mm 선도 1px(0.26mm)로 찍힌다. 한글 문서의 칸은
+   배치용 테두리를 투명한 1px 로 고르게 두고(한글처럼 선 굵기가 칸 크기에 끼어들지 않는다), 선은 칸 위에 얹은 겹의 그림자로
+   긋는다 — 그림자는 인쇄해도 굵기가 그대로다. 굵기·색은 칸이 넘긴다 (nodes.ts 의 hwpBorderVars).
+   겹(::before)의 가장자리는 칸 경계(겹친 1px 테두리의 가운데)에 두고, 선은 그 가장자리에서 위·왼쪽으로 굵기만큼 차지한다:
+   위·왼쪽 선은 겹 밖으로(바깥 그림자), 아래·오른쪽 선은 겹 안으로(안쪽 그림자). 이웃한 두 칸의 겹 가장자리가 같은 자리로
+   맞춰지므로(쪽 단위 맞춤) 두 칸이 그은 선이 정확히 포개지고, 1px 선은 화면의 배치용 테두리 자리에 또렷하게 온다 */
+@property --bwt { syntax: '*'; inherits: false; }
+@property --bwb { syntax: '*'; inherits: false; }
+@property --bwl { syntax: '*'; inherits: false; }
+@property --bwr { syntax: '*'; inherits: false; }
+@property --bct { syntax: '*'; inherits: false; }
+@property --bcb { syntax: '*'; inherits: false; }
+@property --bcl { syntax: '*'; inherits: false; }
+@property --bcr { syntax: '*'; inherits: false; }
+@property --nt { syntax: '*'; inherits: false; }
+@property --nb { syntax: '*'; inherits: false; }
+@property --nl { syntax: '*'; inherits: false; }
+@property --nr { syntax: '*'; inherits: false; }
+@property --dg1 { syntax: '*'; inherits: false; }
+@property --dg2 { syntax: '*'; inherits: false; }
+@property --dg-size { syntax: '*'; inherits: false; }
+@property --dg-pos { syntax: '*'; inherits: false; }
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th) {
+  border: 1px solid transparent !important;
+  /* 그리는 굵기: 화면에서는 가는 선도 화면 점 하나보다 가늘지 않게 (--k-hair: 편집 화면이 배율에 맞춰 준다. 인쇄는 0).
+     선 없는 쪽·겹 그림으로 그리는 쪽(점선·이중선)은 0 (--n? 가 0) */
+  --dt: calc(max(var(--bwt, 0.12mm), var(--k-hair, 0px)) * var(--nt, 1));
+  --db: calc(max(var(--bwb, 0.12mm), var(--k-hair, 0px)) * var(--nb, 1));
+  --dl: calc(max(var(--bwl, 0.12mm), var(--k-hair, 0px)) * var(--nl, 1));
+  --dr: calc(max(var(--bwr, 0.12mm), var(--k-hair, 0px)) * var(--nr, 1));
+  /* 칸이 넘긴 값(--bc?·--dg?)은 안에 든 표의 칸으로 이어지지 않게 상속을 꺼 두었다. 겹(::before)이 받도록 여기서 옮겨 담는다 */
+  --ct: var(--bct, #000);
+  --cb: var(--bcb, #000);
+  --cl: var(--bcl, #000);
+  --cr: var(--bcr, #000);
+  --g1: var(--dg1, none);
+  --g2: var(--dg2, none);
+  --gs: var(--dg-size, 100% 100%);
+  --gp: var(--dg-pos, 0 0);
+}
+/* 선 없는 쪽: 긋지 않는다 (편집 화면에서는 '투명 선'을 연한 점선으로) */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th)[data-border~='l'] { --nl: 0; border-left: 1px dotted var(--k-transparent-line, #c9c9f4) !important; }
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th)[data-border~='r'] { --nr: 0; border-right: 1px dotted var(--k-transparent-line, #c9c9f4) !important; }
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th)[data-border~='t'] { --nt: 0; border-top: 1px dotted var(--k-transparent-line, #c9c9f4) !important; }
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th)[data-border~='b'] { --nb: 0; border-bottom: 1px dotted var(--k-transparent-line, #c9c9f4) !important; }
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) table[data-borderless='true'] > tbody > tr > :is(td, th) {
+  --nt: 0;
+  --nb: 0;
+  --nl: 0;
+  --nr: 0;
+  border: 1px dotted var(--k-transparent-line, #c9c9f4) !important;
+}
+@media print {
+  :is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th),
+  :is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th)[data-border],
+  :is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) table[data-borderless='true'] > tbody > tr > :is(td, th) {
+    border-color: transparent !important;
+  }
+}
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th)::before {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+  z-index: 1;
+  inset: -0.5px;
+  padding: 0.5px;
+  box-shadow:
+    0 calc(-1 * var(--dt)) 0 0 var(--ct),
+    calc(-1 * var(--dl)) 0 0 0 var(--cl),
+    inset 0 calc(-1 * var(--db)) 0 0 var(--cb),
+    inset calc(-1 * var(--dr)) 0 0 0 var(--cr),
+    calc(-1 * var(--dl)) calc(-1 * var(--dt)) 0 0 var(--ct);
+  /* 대각선 (칸 안쪽 기준) */
+  background-image: var(--g1), var(--g2);
+  background-size: var(--gs);
+  background-position: var(--gp);
+  background-repeat: no-repeat;
+  background-origin: content-box;
+  background-clip: content-box;
+}
+/* 다음 쪽으로 넘긴 줄: 칸은 앞 쪽에서부터 이어지지만(넘긴 만큼 위 안 여백) 테두리는 넘긴 자리에서부터 긋는다 */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) tr.pg-push-row > :is(td, th)::before {
+  top: calc(var(--pg-push) - 0.5px);
+}
+:is(.workspace.hwp-metrics .ProseMirror.pg-measuring, .workspace.hwp-metrics .ProseMirror .pg-measuring) tr.pg-push-row > :is(td, th)::before {
+  top: -0.5px;
+}
+/* 점선·이중선 테두리: 그림(SVG)으로 그린다 (그림 규칙은 nodes.ts 가 칸의 data-bx 값마다 만든다). 겹은 경계에서 4px 밖까지 */
+:is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th)[data-bx]::after {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+  z-index: 1;
+  inset: -4.5px;
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
 }
 
 /* 칸 안에서 나뉜 표 줄: 자연 높이에 끼운 공간만큼 더한 높이 (칸 아래 남는 자리를 지킨다). 재는 동안은 자연 높이 */

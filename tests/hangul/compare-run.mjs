@@ -12,7 +12,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const S = process.env.CMP_DIR || path.dirname(here);
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;
-env.CMP_ARGS = JSON.stringify(['http://localhost:5183/', path.join(S, 'samples'), path.join(S, 'ref'), path.join(S, 'out'), repo, ...process.argv.slice(2)]);
+env.CMP_ARGS = JSON.stringify(['http://localhost:5183/', path.join(S, 'samples'), path.join(S, 'ref'), path.join(S, process.env.CMP_OUT || 'out'), repo, ...process.argv.slice(2)]);
 // 소스를 고친 직후에는 개발 서버가 화면을 다시 불러와 첫 실행이 멈출 수 있다: 한 번 더 해 본다
 let r;
 for (let attempt = 0; attempt < 2; attempt++) {

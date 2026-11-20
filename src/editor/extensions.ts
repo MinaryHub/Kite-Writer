@@ -30,6 +30,7 @@ import {
   CellNoWrap,
   TextBox,
   TabStop,
+  ParaHeadMark,
 } from './extensions/nodes';
 import { Search } from './extensions/search';
 import { installFastForChild } from './decoSet';
@@ -134,6 +135,7 @@ export function getExtensions(): AnyExtension[] {
     TextBox,
     TabStop,
     Shape,
+    ParaHeadMark,
     // 검토: 변경 내용(넣음/지움)과 메모
     Insertion,
     Deletion,

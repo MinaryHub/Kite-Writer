@@ -4,7 +4,7 @@ import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
 import type { PageSetup } from '../types';
 import { useApp, usePinchZoom } from '../app/hooks';
-import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, pageHidesOf, pagePaintHtml, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
+import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, pageHidesOf, pagePaintHtml, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown, pageNumHtml, pageNumStyle } from '../print';
 import { sectionsKey } from '../editor/extensions/sections';
 import { formatPageNumber, splitExt } from '../formats/common';
 import { applyFormatPainter, insertImagesFromFiles } from '../app/commands';
@@ -212,10 +212,12 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     );
     // 쪽 경계 가리개 (본문 끝 → 다음 쪽 본문 시작). 다음 쪽의 용지가 다를 수 있다
     const maskTop = top + g.mt + g.contentH;
+    // 표 줄이 본문 끝 아래로 나온 쪽(한글처럼 글이 다 들어간 줄은 넘기지 않는다): 그 높이만큼은 가리지 않는다
+    const over = Math.min(g.mb, Math.max(0, ...(tab.layout.overs || []).filter((o) => o.page === k).map((o) => o.h)));
     chrome.push(
       <div key={'m' + k} className="mask" style={{ top: maskTop, width: W, height: next ? next.top + next.g.mt - maskTop : g.mb }}>
-        <div className="m-paper" style={{ top: 0, left, width: g.W, height: g.mb, ...(pageBackgroundStyle(s, k, g.mt + g.contentH) || {}) }}>
-          {paint && <div className="pg-paint-host" style={{ top: -(g.mt + g.contentH) }} dangerouslySetInnerHTML={{ __html: paint }} />}
+        <div className="m-paper" style={{ top: over, left, width: g.W, height: g.mb - over, ...(pageBackgroundStyle(s, k, g.mt + g.contentH + over) || {}) }}>
+          {paint && <div className="pg-paint-host" style={{ top: -(g.mt + g.contentH + over) }} dangerouslySetInnerHTML={{ __html: paint }} />}
         </div>
         {next && <div className="m-gap" style={{ top: g.mb, height: g.gap }} />}
         {next && (
@@ -240,7 +242,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     const ft = hide.includes('f') ? null : hfAt(ps, 'footer', k);
     const hRich = hd ? hfRichHtml(hd) : null;
     const fRich = ft ? hfRichHtml(ft) : null;
-    const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: layoutTabsHtml(hfText(html, num, total, ps.pageNumber.format), g.contentW) }} />;
+    const rich = (html: string) => <div className={'kdoc-content hf-rich' + (ps.hwpMetrics ? ' hwp-metrics' : '')} dangerouslySetInnerHTML={{ __html: layoutTabsHtml(hfText(html, num, total, ps.pageNumber.format), g.contentW) }} />;
     chrome.push(
       <div
         key={'h' + k}
@@ -278,12 +280,12 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
             justifyContent: h === 'left' ? 'flex-start' : h === 'right' ? 'flex-end' : 'center',
           }}
         >
-          {formatPageNumber(num, ps.pageNumber.format)}
+          <span style={pageNumStyle(ps, v === 'top')} dangerouslySetInnerHTML={{ __html: pageNumHtml(ps, num) }} />
         </div>,
       );
     }
     // 표가 이어지는 쪽 맨 위의 제목 줄 (쪽 나누기가 비워 둔 자리)
-    if (tab.layout.repeats?.some((r) => r.page === k) || tab.layout.cuts?.some((c) => c.page === k) || tab.layout.colLines?.some((c) => c.page === k)) {
+    if (tab.layout.repeats?.some((r) => r.page === k) || tab.layout.cuts?.some((c) => c.page === k || c.page === k - 1) || tab.layout.colLines?.some((c) => c.page === k)) {
       chrome.push(<div key={'rh' + k} className="pg-repeat-layer" style={{ position: 'absolute', left, top, width: g.W, height: g.H, pointerEvents: 'none' }} dangerouslySetInnerHTML={{ __html: repeatHeadsHtml(tab, g, k) }} />);
     }
     const fns = tab.layout.footnotes.filter((f) => f.page === k);
@@ -325,7 +327,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       onScroll={() => window.dispatchEvent(new Event('kite:scroll'))}
     >
       <div className="stage-wrap" style={{ width: W * zoom, height: stageH * zoom + 64 }}>
-        <div className="stage" ref={stageRef} style={{ width: W, height: stageH, transform: `scale(${zoom})` }} onMouseDown={onStageMouseDown}>
+        <div className="stage" ref={stageRef} style={{ width: W, height: stageH, transform: `scale(${zoom})`, ['--k-hair' as any]: `${(1 / (zoom || 1)).toFixed(3)}px` }} onMouseDown={onStageMouseDown}>
           {/* 쪽 수가 바뀌면 용지·쪽 장식 묶음을 새로 만든다: 형제 앞에 수천 개를 하나씩 끼우면 React 가 끼울 때마다
               뒤 형제를 끝까지 훑어(getHostSibling) 쪽 수의 제곱만큼 걸린다 (1만 6천 쪽 문서) */}
           <div className="pages-layer" key={'p' + pageCount}>

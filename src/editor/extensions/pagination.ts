@@ -62,6 +62,14 @@ export interface PageBreakInfo {
   head?: RepeatHead;
   /** 표의 줄이 칸 안에서 나뉜 자리: 그 쪽에서 표가 끝나는 곳에 닫는 선을 긋는다 (한글처럼) */
   cut?: TableCut;
+  /** 이 표 줄이 본문 끝 아래로 나온 높이 (한글처럼 글이 다 들어간 줄은 넘기지 않는다): 그 쪽은 그만큼 더 보인다 */
+  over?: PageOver;
+}
+
+/** 본문 끝 아래로 나온 표 줄: 쪽 번호(0부터), 본문 끝에서 줄 아래 끝까지(px) */
+export interface PageOver {
+  page: number;
+  h: number;
 }
 
 /** 쪽 경계에서 나뉜 표: 표 위치, 표가 끊긴 쪽(0부터), 그 쪽 본문 맨 위에서 끊긴 자리까지(px) */
@@ -120,6 +128,8 @@ export interface LayoutResult {
   repeats?: RepeatHead[];
   /** 쪽 경계에서 칸이 나뉜 표의 닫는 선 */
   cuts?: TableCut[];
+  /** 표 줄이 본문 끝 아래로 나온 쪽과 그 높이 (그 쪽은 본문 아래 여백을 그만큼 더 보인다) */
+  overs?: PageOver[];
   /** 쪽마다의 편집 용지 (구역마다 용지가 다른 문서만. null 은 문서 용지) */
   pageSetups?: (PageSetup | null)[];
   /** 쪽마다 그 쪽이 든 구역의 머리말·꼬리말(구역 나누기의 sectionHf)과 그 구역이 시작한 쪽. 구역마다 다른 머리말이 있는 문서에만 */
@@ -214,6 +224,59 @@ function buildDecos(doc: PMNode, breaks: PageBreakInfo[]): DecorationSet {
     );
   }
   return decorationSet(doc, decos);
+}
+
+/** 칸 안 말단 블록 하나가 한글에서 다음 쪽으로 넘어간 자리: block 은 블록째(그 줄 자리 px), lines 는 줄 번호와 그 줄 자리 */
+interface HwpLeafBreak {
+  block: number | null;
+  lines: { i: number; v: number }[];
+}
+
+/**
+ * 칸의 말단 블록들(문단·표)에서 한글이 다음 쪽으로 넘긴 자리를 찾는다: 한글은 칸이 쪽에 걸쳐 나뉘면 다음 쪽의 줄 자리를
+ * 칸 위에서부터 다시 센다 (줄 자리가 되돌아간다). 줄 정보가 없는 블록이 있으면 알 수 없으므로 null.
+ * 돌려주는 것은 블록마다의 넘김 자리 (없으면 null) 와, 하나라도 있는가
+ */
+function hwpCellBreaks(leaves: { node: PMNode }[]): { list: (HwpLeafBreak | null)[]; any: boolean } | null {
+  const list: (HwpLeafBreak | null)[] = [];
+  let prev = -Infinity;
+  /** 앞 블록 마지막 줄의 높이 (높이 없는 줄 뒤에는 같은 자리에 다음 줄이 올 수 있다) */
+  let prevH = 0;
+  let any = false;
+  for (const { node } of leaves) {
+    const name = node.type.name;
+    // 떠 있는 글상자의 자리 표시는 높이가 없다
+    if (name === 'textBox' && node.attrs?.float) {
+      list.push(null);
+      continue;
+    }
+    const vs = node.attrs?.hwpVs as number[][] | null;
+    if (!Array.isArray(vs) || !vs.length) return null;
+    if (name === 'paragraph') {
+      if (node.attrs?.hwpLen !== node.content.size) return null;
+      const lines = node.attrs?.hwpLines as [number, number][] | null;
+      if (vs.length > 1 && !(Array.isArray(lines) && lines.length === vs.length)) return null;
+    } else if (name !== 'table') return null;
+    const b: HwpLeafBreak = { block: null, lines: [] };
+    // 같은 쪽에서 이어지는 줄은 앞줄보다 그 줄 높이만큼 아래다. 앞줄 자리 이하이면(칸 맨 위 0 에서 다시 0 으로 가는 것 포함) 넘어간 줄이다
+    if (vs[0][0] < prev + Math.min(0.5, +prevH || 0)) b.block = vs[0][0];
+    for (let i = 1; i < vs.length; i++) if (vs[i][0] < vs[i - 1][0] + Math.min(0.5, +vs[i - 1][1] || 0)) b.lines.push({ i, v: vs[i][0] });
+    prev = vs[vs.length - 1][0];
+    prevH = vs[vs.length - 1][1];
+    if (b.block != null || b.lines.length) {
+      list.push(b);
+      any = true;
+    } else list.push(null);
+  }
+  return { list, any };
+}
+
+/** 표가 이어지는 쪽에서의 위 바깥 여백(px): 위 바깥 여백에 더해 둔 세로 오프셋(hwpVOff: 문단에서 떨어진 거리)은 첫 쪽에서만 든다 */
+function contOmT(table: PMNode): number {
+  const om = table.attrs.outMargin as number[] | null;
+  if (!Array.isArray(om) || !(om[2] > 0) || !(om[2] < 200)) return 0;
+  const v = typeof table.attrs.hwpVOff === 'number' && table.attrs.hwpVOff > 0 ? table.attrs.hwpVOff : 0;
+  return Math.max(0, Math.round((om[2] - v) * 100) / 100);
 }
 
 /** 제목 칸으로만 된 줄인가 */
@@ -472,6 +535,11 @@ function computeLayout(
   let tableHead: { table: number; h: number } | null = null;
   /** 지금 배치하는 표의 위치 */
   let curTable = -1;
+  /** 지금 배치하는 표가 한글 배치를 따르는 중인가 (칸을 나누는 자리도 한글이 나눈 자리로) */
+  let fixedTable = false;
+  /** 지금 배치하는 (한글 배치를 따르는) 표의 위·아래 바깥 여백(px): 한글은 표가 이어지는 쪽에서도 본문 맨 위에서 그만큼 띄운다 */
+  let omT = 0;
+  let omB = 0;
   let breaks: PageBreakInfo[] = [];
   let footnotes: FootnoteInfo[] = [];
   let pageStarts: number[] = [0];
@@ -602,6 +670,8 @@ function computeLayout(
     getPos: () => number | null,
     kind: PageBreakInfo['kind'],
     docPos: number,
+    /** 아래 끝이 본문을 넘어도 넘기지 않는다 (글은 다 들어간 한글 표 줄) */
+    soft = false,
   ) => {
     if (!isFinite(top) || !isFinite(bottom)) return;
     top += shift;
@@ -628,7 +698,7 @@ function computeLayout(
     if (!cols) normalize(top);
     const pageTop = T(page);
     const colTop = pageTop + zTop();
-    const overflow = bottom > limitFor(fnH) + 0.5 || top > pageTop + CHof(page);
+    const overflow = (!soft && bottom > limitFor(fnH) + 0.5) || top > pageTop + CHof(page);
     if (!forceNext && !softNext && (forceCol || overflow) && mayCol) {
       if (forceCol || top > colTop + 0.5) {
         const pos = getPos();
@@ -1065,6 +1135,14 @@ function computeLayout(
     /** 내용이 가장 꽉 찬 칸에서 내용 아래로 남는 자리 (자연 배치의 줄 높이 - 칸 내용 높이의 최솟값): 나뉜 뒤에도 지킨다 */
     let minSlack = Infinity;
     let grew = false;
+    /** 한글 배치를 따르는 줄에서, 첫 쪽에 놓인 내용의 끝 (밀림 포함): 칸마다 '그 쪽에 남은 내용 + 칸 아래 여백'의 가장 아래 */
+    let fragEnd = -Infinity;
+    /** 한글 배치를 따르는 줄에서, 내용이 모두 첫 조각에 있는 가운데 맞춤 칸의 내용 끝 위치 */
+    const midCells: number[] = [];
+    /** 바깥 줄의 칸마다 (walkCell 이 적는다): 한글이 나눈 자리, 칸 아래 여백, 이 칸에서 처음 넘긴 자리 (첫 쪽에 남은 내용의 끝) */
+    let cellHw = null as ReturnType<typeof hwpCellBreaks>;
+    let padBottom = 0;
+    let firstCut = null as number | null;
     /**
      * 칸 하나의 내용을 쪽 경계에서 나눈다: 문단은 줄 사이에서, 그 밖의 블록은 통째로 다음 쪽으로.
      * 쪽 경계에 걸친 안쪽 표는 줄마다, 그 줄의 칸마다 따로 나눈다 (Word 처럼 안쪽 표의 줄도 쪽에 걸쳐 나뉜다).
@@ -1074,12 +1152,61 @@ function computeLayout(
       let cs = cs0;
       let pc = pc0;
       let last = -Infinity;
-      for (const lf of collectLeaves(cell, cellPos + 1)) {
+      const leaves = collectLeaves(cell, cellPos + 1);
+      // 한글 배치를 따르는 표(바깥 줄의 칸): 한글이 칸을 나눈 자리에서 나누고, 넘긴 줄은 다음 쪽의 한글 자리(칸 위 여백 + 줄 자리)에 놓는다
+      const hw = fixedTable && depth === 0 ? hwpCellBreaks(leaves) : null;
+      const cellEl = hw ? (nodeDom(cellPos) as HTMLElement | null) : null;
+      const cst = cellEl instanceof HTMLElement ? getComputedStyle(cellEl) : null;
+      const padTop = cst ? pxOf(cst.paddingTop) + pxOf(cst.borderTopWidth) / 2 : 0;
+      if (depth === 0) {
+        cellHw = hw;
+        padBottom = cst ? pxOf(cst.paddingBottom) + pxOf(cst.borderBottomWidth) / 2 : 0;
+        firstCut = null;
+      }
+      for (let k = 0; k < leaves.length; k++) {
+        const lf = leaves[k];
         const el = nodeDom(lf.pos) as HTMLElement | null;
         if (!(el instanceof HTMLElement)) continue;
         const r = el.getBoundingClientRect();
         const top = rel(r.top);
         const bottom = rel(r.bottom);
+        if (hw) {
+          const hb = hw.list[k];
+          if (hb) {
+            /** 넘김: 자연 배치에서의 자리 y(공간 제외)를 다음 쪽의 want(본문 맨 위 기준)로 */
+            const jump = (p: number, y: number, want: number, kind: 'block' | 'line') => {
+              const at = y + shift + cs;
+              const h = Math.round((T(pc + 1) + (tableHead?.h || 0) + omT + want - at) * 100) / 100;
+              if (h > 0) {
+                breaks.push({ pos: p, height: h, kind, ...headFor(pc + 1) });
+                noteCut(pc, at - T(pc));
+                if (firstCut == null && pc === startPage) firstCut = at;
+                cs += h;
+              }
+              pc++;
+            };
+            const sb = lf.node.isTextblock ? pxOf(getComputedStyle(el).paddingTop) : 0;
+            if (hb.block != null) jump(lf.pos, top, padTop + hb.block - sb, 'block');
+            if (hb.lines.length && lf.node.isTextblock) {
+              const boxes = hwpLineBoxes(lf.node, false);
+              const lines = lf.node.attrs.hwpLines as [number, number][] | null;
+              if (boxes && lines) {
+                let y = top + sb;
+                let n = 0;
+                for (let i = 0; i < boxes.length; i++) {
+                  if (n < hb.lines.length && hb.lines[n].i === i) {
+                    jump(lf.pos + 1 + lines[i][0], y, padTop + hb.lines[n].v, 'line');
+                    n++;
+                  }
+                  y += boxes[i].pitch;
+                }
+              }
+            }
+          }
+          last = Math.max(last, bottom + cs);
+          if (k === 0 && !hw.any && cst && cst.verticalAlign === 'middle') midCells.push(cellPos + cell.nodeSize - 1);
+          continue;
+        }
         const sT = top + shift + cs;
         pc = pageAtY(sT + 0.5, pc);
         if (lf.node.type.name === 'table' && depth < 6 && bottom + shift + cs > T(pc) + CHof(pc) + 0.5) {
@@ -1140,6 +1267,8 @@ function computeLayout(
       // 여러 줄을 합친 칸은 끼운 공간이 합친 줄들에 나뉘어 들어가므로 이 줄의 높이로 치지 않는다
       if ((cell.attrs.rowspan || 1) > 1) return;
       const h = cellContentHeight(nodeDom(cellPos) as HTMLElement | null);
+      if (firstCut != null) fragEnd = Math.max(fragEnd, firstCut + padBottom);
+      else if (cellHw && h != null && cs === 0) fragEnd = Math.max(fragEnd, startTop + h);
       if (h != null) {
         rowBottom = Math.max(rowBottom, uTop + h + cs);
         minSlack = Math.min(minSlack, Math.max(0, uBottom - uTop - h));
@@ -1160,8 +1289,49 @@ function computeLayout(
       rowBottom += slack;
       for (const ref of cutRef.values()) if (ref.cut) ref.cut.y += slack;
     }
-    for (const ref of cutRef.values()) if (ref.cut) ref.cut.y += 1;
-    if (grew && rowBottom - uBottom > 0.5) breaks.push({ pos: rowPos, height: Math.round((rowBottom - uTop) * 100) / 100, kind: 'grow' });
+    if (!fixedTable) for (const ref of cutRef.values()) if (ref.cut) ref.cut.y += 1;
+    /** 줄 상자가 (내용이 아니라 최소 높이 때문에) 넘어간 쪽들 */
+    const crossed: number[] = [];
+    if (fixedTable) {
+      // 한글은 줄 상자가 쪽 끝을 넘으면 넘는 만큼을 다음 쪽 맨 위에서 잇는다 (조각 높이의 합 = 줄 높이). 편집기에서는 쪽 사이
+      // 거리만큼 줄을 늘려야 다음 쪽의 조각이 제 높이로 보인다
+      let p = startPage;
+      let yS = startTop;
+      let rest = Math.max(minH, uBottom - uTop);
+      while (p < MAX_PAGES - 1 && rest > T(p) + CHof(p) - omB - yS + 0.5) {
+        rest -= Math.max(0, T(p) + CHof(p) - omB - yS);
+        crossed.push(p);
+        p++;
+        yS = T(p) + (tableHead?.h || 0) + omT;
+      }
+      // 내용이 넘어간 칸이 없을 때만: 내용이 넘어갔으면 줄의 끝은 그 내용이 정한다 (위에서 셈했다)
+      if (crossed.length && !cutRef.size) {
+        rowBottom = Math.max(rowBottom, yS + rest - shift);
+        grew = true;
+      }
+      // 닫는 선: 그 쪽 본문 끝에서 표의 아래 바깥 여백만큼 위. 적힌 줄 높이가 쪽 끝을 넘지 않는 줄(한글이 내용 높이로 셈한 줄)의
+      // 첫 조각은 그 쪽에 놓인 내용까지다: 다 들어간 칸의 내용 높이, 나뉜 칸은 남은 줄들 + 칸 아래 여백 (한글 PDF 의 표 선 자리로 확인)
+      const boxCross = startTop + minH > T(startPage) + CHof(startPage) - omB + 0.5;
+      for (const ref of cutRef.values())
+        if (ref.cut) {
+          const lim = CHof(ref.cut.page) - omB;
+          ref.cut.y = ref.cut.page === startPage && !boxCross && fragEnd > -Infinity ? Math.min(lim, Math.round((fragEnd - T(startPage)) * 100) / 100) : lim;
+        }
+    }
+    if (grew && rowBottom - uBottom > 0.5) {
+      const gb: PageBreakInfo = { pos: rowPos, height: Math.round((rowBottom - uTop) * 100) / 100, kind: 'grow' };
+      // 내용은 넘어가지 않고 줄 상자만 넘어간 쪽에도 닫는 선을 긋는다
+      const bare = crossed.find((pg) => !cutRef.has(pg));
+      if (bare != null && curTable >= 0) gb.cut = { table: curTable, page: bare, y: CHof(bare) - omB };
+      breaks.push(gb);
+      // 가운데 맞춤 칸의 내용이 모두 첫 조각에 있으면 한글은 그 조각 안에서 가운데에 놓는다. 편집기의 칸은 늘어난 줄 전체의
+      // 가운데에 놓으므로, 첫 조각 밖의 높이만큼 내용 끝에 공간을 끼워 내용이 첫 조각의 가운데로 오게 한다
+      if (fixedTable) {
+        const frag1 = T(startPage) + CHof(startPage) - omB - startTop;
+        const pad = Math.round((rowBottom - uTop - frag1) * 100) / 100;
+        if (pad > 0.5 && frag1 > 0) for (const p of midCells) breaks.push({ pos: p, height: pad, kind: 'block' });
+      }
+    }
     // 이 줄이 늘어난 만큼 뒤 내용도 밀린다
     const extra = rowBottom - uBottom;
     shift += extra;
@@ -1174,6 +1344,73 @@ function computeLayout(
       markPageStart(rowPos);
     }
     lastBottom = Math.max(lastBottom, endS);
+  };
+
+  /** 줄의 칸마다 글(말단 블록들)이 limit(편집기 좌표, 밀림 포함) 안에 드는가 */
+  const rowTextFits = (rowNode: PMNode, rowPos: number, limit: number): boolean => {
+    let ok = true;
+    rowNode.forEach((cell, off) => {
+      if (!ok) return;
+      for (const lf of collectLeaves(cell, rowPos + 1 + off + 1)) {
+        const el = nodeDom(lf.pos) as HTMLElement | null;
+        if (!(el instanceof HTMLElement)) continue;
+        if (rel(el.getBoundingClientRect().bottom) + shift > limit + 0.5) ok = false;
+      }
+    });
+    return ok;
+  };
+
+  /**
+   * 한글 문서의 표 줄에서 글(줄마다 글자 높이까지)과 적힌 줄 높이가 limit(편집기 좌표, 밀림 포함) 안에 드는가. 마지막 줄 아래의
+   * 줄 간격·문단 아래 간격·칸 아래 여백은 세지 않는다. 한글의 줄 정보가 없는 글이 있으면 false
+   */
+  const rowInkFits = (rowNode: PMNode, rowPos: number, uTop: number, limit: number): boolean => {
+    const rowEl = nodeDom(rowPos) as HTMLElement | null;
+    if (!(rowEl instanceof HTMLElement)) return false;
+    const minH = parseFloat(getComputedStyle(rowEl).getPropertyValue('--row-h')) || 0;
+    if (uTop + shift + minH > limit + 0.5) return false;
+    let ok = true;
+    let n = 0;
+    rowNode.forEach((cell, off) => {
+      if (!ok) return;
+      if ((cell.attrs.rowspan || 1) > 1) {
+        ok = false;
+        return;
+      }
+      // 한글이 쪽에 걸쳐 나눈 줄(칸 안 줄 자리가 되돌아간다)이나 줄 정보를 모르는 줄은 해당하지 않는다
+      const hb = hwpCellBreaks(collectLeaves(cell, 0));
+      if (!hb || hb.any) {
+        ok = false;
+        return;
+      }
+      for (const lf of collectLeaves(cell, rowPos + 1 + off + 1)) {
+        const el = nodeDom(lf.pos) as HTMLElement | null;
+        if (!(el instanceof HTMLElement)) {
+          ok = false;
+          return;
+        }
+        const r = el.getBoundingClientRect();
+        let bottom = rel(r.bottom);
+        if (lf.node.isTextblock) {
+          const boxes = hwpLineBoxes(lf.node, false);
+          const vs = lf.node.attrs.hwpVs as number[][] | null;
+          if (!boxes || !Array.isArray(vs)) {
+            ok = false;
+            return;
+          }
+          let y = rel(r.top) + pxOf(getComputedStyle(el).paddingTop);
+          for (let i = 0; i < boxes.length - 1; i++) y += boxes[i].pitch;
+          bottom = y + vs[vs.length - 1][1];
+        }
+        // 한글은 글자 높이가 본문 끝을 0.3pt 넘는 줄도 그 쪽에 둔다 (쪽 끝에 남은 표 제목 줄로 확인): 1.5px 까지는 들어간 것으로 본다
+        if (bottom + shift > limit + 1.5) {
+          ok = false;
+          return;
+        }
+        n++;
+      }
+    });
+    return ok && n > 0;
   };
 
   const handleTable = (node: PMNode, pos: number) => {
@@ -1229,7 +1466,43 @@ function computeLayout(
       // '셀 단위로 나눔'인 표는 줄을 쪼개지 않고 통째로 넘긴다 (한 쪽보다 긴 줄만 어쩔 수 없이 나눈다)
       const pp = pageAtY(uTop + shift + 0.5, page);
       const whole = (split === 'row' || split === 'none') && uBottom - uTop <= CHof(pp) - (tableHead ? tableHead.h : 0);
-      if (!whole && uBottom + shift > T(pp) + CHof(pp) + 0.5 && uBottom - uTop > 60) {
+      const bodyEnd = T(pp) + CHof(pp);
+      // 앞 줄이 본문 아래로 나와 있다(아래의 '그대로 두는 줄'): 이 줄은 통째로 다음 쪽에서 시작한다
+      const below = uTop + shift > bodyEnd + 0.5;
+      // 한글 문서의 표 줄: 글은 모두 이 쪽에 들어가고 줄 상자의 아랫부분(마지막 줄 간격·문단 아래 간격·칸 아래 여백)만 본문 끝을
+      // 넘으면 한글은 줄을 나누지도 넘기지도 않는다 — 줄이 본문 아래 여백으로 조금 나온다 (한글 PDF 의 표 선 자리로 확인).
+      // 적힌 줄 높이가 들어가지 않는 줄은 해당하지 않는다 (그런 줄은 아래에서 줄 상자를 나눈다)
+      const over = uBottom + shift - (bodyEnd - omB);
+      if (!below && over > 0.5 && !forceNext && !softNext && fnUsed === 0) {
+        const pg = pp < pgs.length ? pgs[pp] : curPg;
+        if (over < pg.H - pg.mt - pg.CH + omB - 1 && !collectFootnotes(row.el, pos).length && rowInkFits(node.child(i), row.pos, uTop, bodyEnd - omB)) {
+          const h = Math.round((over - omB) * 100) / 100;
+          // 줄 높이는 그대로(자연 높이) 두고, 본문 아래로 나온 높이만 알린다
+          if (h > 0.5) breaks.push({ pos: row.pos, height: Math.round((uBottom - uTop) * 100) / 100, kind: 'grow', over: { page: pp, h } });
+          if (i === 0) place(uTop, uBottom, 0, () => pos, 'block', pos, true);
+          else place(uTop, uBottom, 0, () => row.pos, 'row', row.pos, true);
+          return;
+        }
+      }
+      // 한글 배치를 따르는 표: 줄을 나눌지는 한글이 정했다 (칸 안 줄 자리가 되돌아가는 줄만 나눈다. 줄 정보가 모자라면 재서 정한다)
+      let hwSplit: boolean | null = null;
+      if (fixedTable && !below) {
+        let known = true;
+        let any = false;
+        node.child(i).forEach((cell) => {
+          const hb = hwpCellBreaks(collectLeaves(cell, 0));
+          if (!hb) known = false;
+          else if (hb.any) any = true;
+        });
+        if (any) hwSplit = true;
+        else if (known) {
+          hwSplit = false;
+          // 줄 정보로는 나뉘지 않았지만 줄 상자가 쪽 끝을 넘는다: '셀 단위로 나눔' 표는 줄 상자를 나눠 넘는 만큼을 다음 쪽에서 잇는다
+          // (내용은 이 쪽에 남는다). 내용의 첫 줄부터 들어가지 않으면 줄째 넘긴다
+          if (node.attrs.hwpSplit === 'cell' && uBottom + shift > T(pp) + CHof(pp) - omB + 0.5 && rowTextFits(node.child(i), row.pos, T(pp) + CHof(pp) - omB)) hwSplit = true;
+        }
+      }
+      if (!below && (hwSplit === true || (hwSplit == null && !whole && uBottom + shift > T(pp) + CHof(pp) + 0.5 && uBottom - uTop > 60))) {
         const rowNode = node.child(i);
         splitRow(rowNode, row.pos, uTop, uBottom);
         return;
@@ -1256,6 +1529,13 @@ function computeLayout(
         b.head = { table: tableHead.table, page, h: tableHead.h };
         shift += tableHead.h;
         lastBottom += tableHead.h;
+      }
+      // 한글은 표가 이어지는 쪽에서도 본문 맨 위에서 표의 위 바깥 여백만큼 띄운다
+      if (fixedTable && omT > 0 && i > 0 && breaks.length > nb && page > pg0) {
+        const b = breaks[breaks.length - 1];
+        b.height = Math.round((b.height + omT) * 100) / 100;
+        shift += omT;
+        lastBottom += omT;
       }
       pushFootnotes(rowFns);
     });
@@ -1405,8 +1685,34 @@ function computeLayout(
       softNext = !!a!.hwpPage && page === prevStartPage;
       snapTo(el, pos, a!.hwpTop, a!.hwpSeq, +a!.hwpCol || 0);
       if (child.isTextblock) handleFixedTextblock(child, pos, el);
-      else if (child.type.name === 'table') handleTable(child, pos);
-      else handleOther(pos);
+      else if (child.type.name === 'table') {
+        fixedTable = true;
+        const om = child.attrs.outMargin as number[] | null;
+        omT = contOmT(child);
+        omB = Array.isArray(om) && om[3] > 0 && om[3] < 200 ? om[3] : 0;
+        try {
+          handleTable(child, pos);
+        } finally {
+          fixedTable = false;
+          omT = 0;
+          omB = 0;
+        }
+      } else handleOther(pos);
+    } else if (chain && child.type.name === 'table' && el instanceof HTMLElement) {
+      // 한글 자리를 모르는 표(글을 밀어낸 표: 표가 놓인 문단의 줄은 표 뒤에 있다)는 앞 블록 뒤에 자연 배치로 놓는다. 문서가 한글
+      // 그대로이므로 줄을 나눌 자리는 한글의 줄 정보를 따른다 (칸 안 줄 자리가 되돌아가는 줄만 나누고, 나머지는 통째로)
+      softNext = !!a!.hwpPage && page === prevStartPage;
+      fixedTable = true;
+      const om = child.attrs.outMargin as number[] | null;
+      omT = contOmT(child);
+      omB = Array.isArray(om) && om[3] > 0 && om[3] < 200 ? om[3] : 0;
+      try {
+        handleTable(child, pos);
+      } finally {
+        fixedTable = false;
+        omT = 0;
+        omB = 0;
+      }
     } else handleChild(child, pos);
     // 다단: 이 블록을 제 단의 자리와 폭으로 (자리는 가로로 옮기기만 하므로, 오른쪽 여백 = 블록 자신의 것 + 본문 폭에서 단 폭을 뺀 나머지)
     if (blockCols && blockCol >= 0 && child.type.name !== 'pageBreak') {
@@ -1459,7 +1765,8 @@ function computeLayout(
   if (pageStarts.length > pageCount) pageStarts = pageStarts.slice(0, pageCount);
   const repeats = breaks.filter((b) => b.head).map((b) => b.head!);
   const cuts = breaks.filter((b) => b.cut).map((b) => b.cut!);
-  const result: LayoutResult = { pageCount, footnotes, pageStarts, ...(repeats.length ? { repeats } : {}), ...(cuts.length ? { cuts } : {}) };
+  const overs = breaks.filter((b) => b.over).map((b) => b.over!);
+  const result: LayoutResult = { pageCount, footnotes, pageStarts, ...(repeats.length ? { repeats } : {}), ...(cuts.length ? { cuts } : {}), ...(overs.length ? { overs } : {}) };
   // 단 구분선: 단 사이 한가운데에, 그 쪽에서 다단이 차지한 높이만큼 (다음 쪽으로 이어지는 다단은 본문 끝까지)
   const colLines: ColLine[] = [];
   for (const z of zones.values()) {

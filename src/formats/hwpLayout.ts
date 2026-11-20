@@ -120,6 +120,124 @@ export function sideBySide(paras: JNode[], line: { x: number; w: number }, align
   return { table, anchor };
 }
 
+/**
+ * 글자처럼 취급하는 표는 문단의 첫 줄에 놓인 글자다: 문단의 왼쪽 여백과 첫 줄 들여쓰기만큼 오른쪽에서 시작한다
+ * (내어쓰기 문단의 첫 줄은 왼쪽 여백에서 시작). 가운데·오른쪽 정렬 표는 부르는 쪽에서 가른다
+ */
+export function indentByPara(table: JNode, pp: { indentLeft: number; textIndent: number }) {
+  if (table.type !== 'table' || !table.attrs?.inline || table.attrs?.align) return;
+  const pt = (pp.indentLeft || 0) + Math.max(0, pp.textIndent || 0);
+  if (pt > 0.05 && pt < 400) table.attrs = { ...table.attrs, indent: r2((+table.attrs?.indent || 0) + pt) };
+}
+
+/**
+ * 칸·글상자 안에서 자리를 차지하는 그림(글자처럼 취급하지 않는 그림)만 든 문단: 한글에서 그림은 문단 상자의 맨 위에서 시작하고
+ * 문단의 빈 글 줄은 그림에 덮인다 — 칸의 내용 높이는 그림 높이다. Kite 는 그림을 줄 안에 놓으므로 문단 위·아래 간격을 없앤다
+ */
+export function flowPicturePara(para: JNode) {
+  if (para.type !== 'paragraph') return;
+  const kids = para.content || [];
+  if (!kids.length || !kids.every((n) => n.type === 'image' && !n.attrs?.float)) return;
+  if (!para.attrs || (para.attrs.spaceBefore == null && para.attrs.spaceAfter == null)) return;
+  const a = { ...para.attrs };
+  delete a.spaceBefore;
+  delete a.spaceAfter;
+  para.attrs = a;
+}
+
+/**
+ * 자리를 차지하는(위아래로 글을 밀어내는) 문단 기준 표가 앞 쪽에 남았는가: 글이 있는 문단이 쪽 나누기 없이 새 쪽 맨 위에서
+ * 시작했는데(첫 줄이 밀리지 않았다) 표의 세로 자리가 그 첫 줄에 걸친다. 글과 표는 겹칠 수 없으므로 표는 앞 쪽 끝에 놓이고
+ * 글만 다음 쪽으로 넘어온 것이다 (한글 PDF 로 확인). 빈 문단은 한글 판에 따라 표가 줄을 덮을 수 있어 해당하지 않는다
+ */
+export function leftOnPrevPage(
+  segV: number[][],
+  wrap: string,
+  vRel: string,
+  vOff: number,
+  o: { inSub: boolean; hwpPage: boolean; pageBreak: boolean; hasText?: boolean },
+): boolean {
+  if (o.inSub || !o.hwpPage || o.pageBreak || !o.hasText || !segV.length) return false;
+  return wrap === 'TOP_AND_BOTTOM' && vRel === 'PARA' && segV[0][0] <= 4 && vOff < Math.max(4, segV[0][1]);
+}
+
+/**
+ * 글자처럼 취급하는 표가 문단의 첫 줄을 차지하고 같은 문단의 글이 그 아래 줄들에 이어지는 문단 ([표, 글 문단]으로 나뉜다):
+ * 글 문단에 한글의 줄 자리(둘째 줄부터)를 단다. 표가 놓인 줄은 글자 위치 0 에서, 글의 첫 줄은 표 바로 뒤(컨트롤 글자 8개)에서
+ * 시작해야 한다. lineSegs: 줄마다 [한글 글자 위치, 줄 폭], at: 한글 글자 위치 → 글 문단 안 위치. 해당하면 true
+ */
+export function tableThenText(paras: JNode[], segV: number[][], lineSegs: number[][], at: Map<number, number>): boolean {
+  if (paras.length !== 2 || paras[0].type !== 'table' || paras[0].attrs?.inline !== true || paras[1].type !== 'paragraph') return false;
+  if (segV.length < 2 || lineSegs.length !== segV.length || lineSegs[0][0] !== 0 || lineSegs[1][0] !== 8) return false;
+  const rest = lineSegs.slice(1);
+  if (at.get(8) !== 0 || !rest.every((s) => at.has(s[0]))) return false;
+  // 글의 줄들은 표 줄 아래로 같은 쪽에서 이어져야 한다 (쪽을 넘는 문단은 쪽 나누기가 줄 자리로 가린다)
+  if (!(segV[1][0] > segV[0][0])) return false;
+  const q = paras[1];
+  q.attrs = { ...q.attrs, hwpLen: jsonContentSize(q), hwpLines: rest.map((s) => [at.get(s[0])!, r2(s[1])]), hwpVs: segV.slice(1) };
+  return true;
+}
+
+/**
+ * [표, 글 문단]으로 나뉜 문단의 쪽 안 자리: 표는 첫 줄 자리에, 글 문단은 그다음 줄 자리에 (문단 위 간격은 표가 놓인 줄 앞에
+ * 이미 들었으므로 글 문단에서는 뺀다)
+ */
+export function placeTableThenText(paras: JNode[], segV: number[][]) {
+  const [t, q] = paras;
+  t.attrs = { ...t.attrs, hwpTop: r2(segV[0][0] + (+(t.attrs?.outMargin?.[2] || 0))) };
+  const qa: Record<string, any> = { ...q.attrs, hwpTop: r2(segV[1][0]) };
+  delete qa.spaceBefore;
+  q.attrs = qa;
+}
+
+/**
+ * 줄 정보가 낡은 그림 줄인가: 한 줄 문단인데 줄 안에 놓인(글자처럼 취급하는) 그림이 적힌 줄 높이보다 높다. 그림을 붙여 넣은 뒤
+ * 한글이 다시 배치하지 않은 채 저장된 문서에서 본다 (한글은 열 때 다시 배치한다). 돌려주는 값은 그 그림의 높이(px), 아니면 0
+ */
+export function staleImageLine(para: JNode, segV: number[][]): number {
+  if (para.type !== 'paragraph' || segV.length !== 1) return 0;
+  let h = 0;
+  for (const n of para.content || []) if (n.type === 'image' && !n.attrs?.float && !n.attrs?.pad) h = Math.max(h, +n.attrs?.height || 0);
+  return h > segV[0][1] + 1.5 ? h : 0;
+}
+
+/**
+ * 떠 있는 표(글자처럼 취급하지 않는 표)의 가로 자리: 문단 정렬이 아니라 개체의 가로 기준·맞춤·오프셋을 따른다.
+ * 왼쪽 맞춤이면 기준(문단: 문단 왼쪽 여백, 종이: 용지 왼쪽 끝, 쪽·단: 본문 왼쪽)에서 오프셋만큼, 가운데·오른쪽은 표 정렬로.
+ * 길이는 pt (marginLeft: 본문 왼쪽 여백)
+ */
+export function floatTableX(table: JNode, p: { hAl: string; hRel: string; hOff: number }, pp: { indentLeft: number }, marginLeft: number) {
+  if (table.type !== 'table' || table.attrs?.inline) return;
+  if (p.hAl === 'CENTER') table.attrs = { ...table.attrs, align: 'center' };
+  else if (p.hAl === 'RIGHT' || p.hAl === 'OUTSIDE') table.attrs = { ...table.attrs, align: 'right' };
+  else {
+    const pt = (p.hRel === 'PARA' ? pp.indentLeft || 0 : p.hRel === 'PAPER' ? -marginLeft : 0) + p.hOff;
+    if (Math.abs(pt) > 0.05 && Math.abs(pt) < 190) table.attrs = { ...table.attrs, indent: r2((+table.attrs?.indent || 0) + pt) };
+  }
+}
+
+/**
+ * 문단 머리(글머리표·문단 번호)의 모양: 한글의 '문단 번호 모양'.
+ * 머리의 폭 = 머리 글자의 폭 + 너비 조정(adj) + 본문과의 거리(글자 크기의 pct%, 또는 gap).
+ * auto(자동 내어쓰기)면 둘째 줄부터 머리 폭만큼 들어가 첫 줄의 본문 시작과 나란하다
+ */
+export interface ParaHead {
+  align: 'left' | 'center' | 'right';
+  auto: boolean;
+  /** 너비 조정 (pt) */
+  adj: number;
+  /** 본문과의 거리: 글자 크기에 대한 비율(%) 또는 값(pt) */
+  pct: number | null;
+  gap: number | null;
+  /** 머리 글자의 글자 모양 (없으면 문단 첫 글자의 모양) */
+  charPr?: string | number | null;
+}
+
+/** 머리 글자에 붙이는 마크 (hwpMetrics 가 머리의 폭과 내어쓰기를 만든다). 길이는 px */
+export function headMark(h: ParaHead): { type: string; attrs: Record<string, any> } {
+  return { type: 'paraHead', attrs: { align: h.align, auto: h.auto, adj: r2(h.adj * PT2PX), pct: h.pct, gap: h.gap == null ? null : r2(h.gap * PT2PX) } };
+}
+
 /** 개체의 자리 정보 (px) */
 export interface ObjPos {
   /** 글자처럼 취급 */
@@ -214,6 +332,8 @@ export class ParaLayout {
       /** 첫 줄의 가로 자리 (본문·칸 왼쪽에서, px)와 문단 정렬: 한 줄에 나란히 놓인 표와 글·그림을 그 자리에 놓는 데 쓴다 */
       line0?: { x: number; w: number };
       align?: string | null;
+      /** 문단에 글이 있다 (빈칸·컨트롤뿐이 아니다) */
+      hasText?: boolean;
     },
   ) {
     this.prevEnd = o.hwpPage || o.pageBreak ? 0 : o.state.prevEndV;
@@ -238,7 +358,8 @@ export class ParaLayout {
 
   /** 떠 있는 개체의 자리: x 는 본문(칸) 왼쪽, y 는 문단 상자 위쪽 기준 px. 흐름 안에 둘 개체면 null */
   floatPos(p: ObjPos): FloatAt | null {
-    if (p.inline || !(p.w > 0) || !(p.h > 0)) return null;
+    // 가로선·세로선은 한쪽 크기가 0 이다
+    if (p.inline || (!(p.w > 0) && !(p.h > 0))) return null;
     const { inSub, pp } = this.o;
     // 칸·글상자 안에서 자리를 차지하는 개체는 칸의 내용 높이에 든다: 흐름 안에 둔다
     if (inSub && p.wrap === 'TOP_AND_BOTTOM') return null;
@@ -250,7 +371,9 @@ export class ParaLayout {
     const vRel = inSub && !origin ? 'PARA' : p.vRel;
     let y: number;
     let py: number | null = null;
-    if (vRel === 'PARA') y = p.wrap === 'TOP_AND_BOTTOM' && this.pushed(p.h, p.omB, p.vOff) ? sb - p.omB - p.h : sb + p.vOff + p.omT;
+    // 문단 기준의 세로 자리는 문단 위 간격 앞(문단 상자의 위쪽)에서 잰다: 위 간격을 주면 줄은 내려가도 개체는 제자리다 (한글 PDF 로 확인).
+    // 쪽 맨 위에서 위 간격이 빠진 문단(줄 자리가 위 간격보다 작다)은 줄 자리가 기준이다
+    if (vRel === 'PARA') y = p.wrap === 'TOP_AND_BOTTOM' && this.pushed(p.h, p.omB, p.vOff) ? sb - p.omB - p.h : (v0 != null && v0 < sb - 0.5 ? sb : 0) + p.vOff + p.omT;
     else {
       const refH = vRel === 'PAPER' ? g.H : g.bodyH;
       const top = vRel === 'PAPER' ? -g.mt : 0;
@@ -293,13 +416,20 @@ export class ParaLayout {
    */
   placeTable(blocks: JNode[], table: JNode, p: ObjPos): boolean {
     if (!this.segV.length || p.inline) return false;
+    if (leftOnPrevPage(this.segV, p.wrap, this.o.inSub ? 'PARA' : p.vRel, p.vOff, this.o)) {
+      // 표는 앞 쪽 끝에 남고 글만 새 쪽으로 넘어왔다: 표를 글 앞에 흐르게 둔다 (앞 블록 바로 뒤)
+      this.before.push(...blocks);
+      return true;
+    }
     if (this.pushed(p.h, p.omB, p.vOff)) {
       this.before.push(...blocks);
       this.leadTables.push({ node: table, h: p.h, omB: p.omB, omT: p.omT });
     } else {
       this.after.push(...blocks);
       const rel = this.o.inSub ? 'PARA' : p.vRel;
-      if (p.vAl === 'TOP') this.tableTops.set(table, rel === 'PARA' ? this.segV[0][0] + p.vOff + p.omT : rel === 'PAPER' ? p.vOff + p.omT - this.o.geom().mt : p.vOff + p.omT);
+      // 문단 기준: 문단 위 간격 앞에서 잰다 (floatPos 와 같다)
+      const org = Math.max(0, this.segV[0][0] - this.o.pp.spaceBefore * PT2PX);
+      if (p.vAl === 'TOP') this.tableTops.set(table, rel === 'PARA' ? org + p.vOff + p.omT : rel === 'PAPER' ? p.vOff + p.omT - this.o.geom().mt : p.vOff + p.omT);
     }
     return true;
   }
@@ -308,7 +438,7 @@ export class ParaLayout {
    * 마무리: blocks(흐름 안 블록, 쪽 나누기 포함)에 줄 자리·쪽 안 위치·차례를 달고 떠 있는 블록을 앞뒤에 놓는다.
    * lines: 줄 첫 자리 목록([문단 안 위치, 줄 폭]) — 모두 찾았을 때만. floating: 자리를 모르는 떠 있는 그림이 줄 안에 있다
    */
-  finish(blocks: JNode[], lines: [number, number][] | null, floating: boolean): { blocks: JNode[]; lead: JNode | null } {
+  finish(blocks: JNode[], lines: [number, number][] | null, floating: boolean, tail?: { lineSegs: number[][]; at: Map<number, number> }): { blocks: JNode[]; lead: JNode | null } {
     const { segV } = this;
     const { inSub, pp, state } = this.o;
     let paras = blocks.filter((b) => !isBreakBlock(b));
@@ -331,11 +461,15 @@ export class ParaLayout {
       }
     }
     const one = paras.length === 1 ? paras[0] : null;
-    if (one && one.type === 'paragraph' && segV.length && !floating) {
+    // 줄 정보가 낡은 그림 줄: 칸 안에서는 줄 높이를 그림 높이로 바로잡고(한글이 다시 배치하면 줄 간격까지 칸 높이에 든다),
+    // 본문에서는 한글 자리를 따르지 않고 자연 배치로 흐르게 한다 (뒤 문단의 자리도 낡았다)
+    const stale = one ? staleImageLine(one, segV) : 0;
+    if (one && one.type === 'paragraph' && segV.length && !floating && !(stale && !inSub)) {
       const a: Record<string, any> = { ...one.attrs, hwpLen: jsonContentSize(one) };
       if (lines) a.hwpLines = lines;
       else delete a.hwpLines;
-      if (a.hwpLines || segV.length === 1) a.hwpVs = segV;
+      if (a.hwpLines || segV.length === 1) a.hwpVs = stale ? [[segV[0][0], stale, segV[0][2], r2(stale * 0.85)]] : segV;
+      if (stale) a.hwpTrail = true;
       one.attrs = a;
     }
     // 칸·글상자 안에서 글자처럼 취급하는 표 하나뿐인 문단: 표 아래에 그 줄의 아래 간격과 문단 아래 간격을 둔다 (HWPX 와 같게)
@@ -344,8 +478,13 @@ export class ParaLayout {
       one.attrs = { ...one.attrs, hwpVs: segV, ...(after > 0.3 && after < 400 ? { hwpAfter: r2(after) } : {}) };
     }
     const breaks = blocks.filter(isBreakBlock);
+    // 글자처럼 취급하는 표(첫 줄) + 같은 문단의 글(나머지 줄): 글 문단에 한글의 줄 자리를 단다
+    const tq = !one && !floating && !!tail && tableThenText(paras, segV, tail.lineSegs, tail.at);
+    if (tq && inSub) paras[0].attrs = { ...paras[0].attrs, hwpVs: [segV[0]] };
+    // 칸 안에서 자리를 차지하는 그림만 든 문단: 문단 위·아래 간격 없이 그림 높이만 차지한다
+    if (inSub && floating && one) flowPicturePara(one);
     if (inSub) return { blocks: [...this.before, ...paras, ...this.after], lead: null };
-    const v0 = segV.length ? segV[0][0] : null;
+    const v0 = segV.length && !stale ? segV[0][0] : null;
     let lead: JNode | null = null;
     if (one && v0 != null) {
       const sb = one.type === 'paragraph' ? pp.spaceBefore * PT2PX : 0;
@@ -366,11 +505,16 @@ export class ParaLayout {
         if (y >= this.prevEnd - 2) this.leadTables.forEach((t, k) => (t.node.attrs = { ...t.node.attrs, hwpTop: r2(Math.max(0, tops[k])) }));
       }
       lead = [...this.before.filter((x) => x.attrs?.float), one].find((x) => x.attrs?.hwpTop != null) || one;
+    } else if (tq) {
+      placeTableThenText(paras, segV);
+      lead = paras[0];
     }
     for (const [t, top] of this.tableTops) if (top > -1) t.attrs = { ...t.attrs, hwpTop: r2(Math.max(0, top)) };
     const group = [...breaks, ...this.before, ...paras, ...this.after];
     for (const b of group) {
       if (isBreakBlock(b)) continue;
+      // 줄 정보가 낡은 문단은 차례를 달지 않는다: 그 쪽의 나머지는 자연 배치로 흐른다
+      if (stale && b === one) continue;
       b.attrs = { ...b.attrs, hwpSeq: ++state.seq };
       if (b.attrs.hwpLen == null) b.attrs.hwpLen = jsonContentSize(b);
     }
@@ -396,8 +540,13 @@ export function gapInBox(groups: JNode[][]) {
       if (gap > 0.5 && gap < 4000) one.attrs!.hwpGap = r2(gap);
       const last = vs[vs.length - 1];
       prevEnd = last[0] + last[1] + last[2] + (+one.attrs!.spaceAfter || 0) * PT2PX;
-    } else if (tvs && tvs.length === 1) prevEnd = tvs[0][0] + tvs[0][1] + (+paras[0].attrs!.hwpAfter || 0);
-    else prevEnd = null;
+    } else if (tvs && tvs.length === 1) {
+      // 글자처럼 취급하는 표: 앞 블록보다 더 벌어져 있으면(표가 놓인 문단의 위 간격 등) 그만큼 표 위를 띄운다.
+      // 표가 놓인 줄의 아래 간격·문단 아래 간격(hwpAfter)은 표 아래에 둔다
+      const tg: number = prevEnd == null ? 0 : tvs[0][0] - prevEnd;
+      if (tg > 0.5 && tg < 4000) paras[0].attrs!.hwpGap = r2(tg);
+      prevEnd = tvs[0][0] + tvs[0][1] + (+paras[0].attrs!.hwpAfter || 0);
+    } else prevEnd = null;
   }
   // 칸·글상자의 마지막 줄 아래 간격은 칸 높이에 들지 않는다: 마지막 블록이 표면 그 아래 간격을 지운다
   for (let g = groups.length - 1; g >= 0; g--) {
@@ -425,6 +574,27 @@ export function cellContentNeed(content: JNode[], cellHeightPx: number, vMarginP
   const l = vs[vs.length - 1];
   const textOnly = l[0] + l[1] + vMarginPx;
   return cellHeightPx >= textOnly - 1 ? 0 : textOnly;
+}
+
+/**
+ * 칸의 내용 높이 (한글 PDF 의 표 줄 높이로 확인한 규칙). 적힌 칸 높이가 글(마지막 줄의 글자 높이까지 + 위아래 안 여백)보다
+ * 작으면 한글은 칸을 내용 높이로 늘린다. 그 내용 높이는 칸의 세로 맞춤에 따라 다르다:
+ *  - 위 맞춤 칸: 마지막 줄 아래의 줄 간격과 문단 아래 간격까지 든다 (글을 다 놓은 자리까지: hwpTrail)
+ *  - 가운데·아래 맞춤 칸: 마지막 줄의 글자 높이까지만 (가운데에 놓을 글 덩어리의 높이)
+ * 적힌 칸 높이가 글보다 크면 그 높이를 지킨다. 돌려주는 값은 내용이 요구하는 높이(px), 적힌 높이를 지키거나 알 수 없으면 0
+ */
+export function markCellTrail(content: JNode[], cellHeightPx: number, vMarginPx: number, top: boolean): number {
+  const lastP = content[content.length - 1];
+  const vs = lastP && lastP.type === 'paragraph' ? (lastP.attrs?.hwpVs as number[][] | undefined) : undefined;
+  if (!vs || !vs.length) return 0;
+  // 빈 문단 하나뿐인 칸은 적힌 높이를 지킨다 (한글은 빈 칸을 글자 높이보다 낮게 둘 수 있다)
+  if (content.length === 1 && !(lastP.content && lastP.content.length)) return 0;
+  const l = vs[vs.length - 1];
+  const textOnly = l[0] + l[1] + vMarginPx;
+  if (cellHeightPx >= textOnly - 1) return 0;
+  if (!top) return textOnly;
+  lastP.attrs = { ...lastP.attrs, hwpTrail: true };
+  return textOnly + l[2] + (+lastP.attrs.spaceAfter || 0) * PT2PX;
 }
 
 /**

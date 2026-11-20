@@ -1,6 +1,49 @@
 import { DOMSerializer, type Schema } from '@tiptap/pm/model';
 import { sanitizeDoc } from './sanitize';
 import type { JNode } from '../formats/common';
+import { hwpTextStyles } from './extensions/hwpMetrics';
+
+/**
+ * 한글 문서의 문단: 글자 묶음마다 한글 방식의 폭(자간·장평·빈칸 폭·언어별 글꼴)을 입힌다 (편집기에서는 hwpMetrics 의 꾸밈).
+ * 문단의 글자 묶음과 DOM 의 글자 노드는 차례가 같다. 어긋나면 그만둔다
+ */
+function applyHwpWidths(para: any, el: HTMLElement) {
+  const doc = el.ownerDocument;
+  const texts: Text[] = [];
+  const walker = doc.createTreeWalker(el, 4 /* NodeFilter.SHOW_TEXT */);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) texts.push(n as Text);
+  let i = 0;
+  para.forEach((child: any) => {
+    if (!child.isText) return;
+    const dom = texts[i++];
+    if (!dom || dom.data !== child.text) return;
+    const styles = hwpTextStyles(child, para);
+    if (!styles.length) return;
+    // 뒤에서부터 잘라 감싼다 (앞쪽 자리가 밀리지 않게)
+    for (const st of [...styles].sort((a, b) => b.from - a.from)) {
+      if (st.from < 0 || st.to > dom.data.length || st.to <= st.from) continue;
+      const tail = dom.splitText(st.from);
+      if (st.to - st.from < tail.data.length) tail.splitText(st.to - st.from);
+      const span = doc.createElement('span');
+      span.setAttribute('style', st.style);
+      tail.parentNode!.replaceChild(span, tail);
+      span.appendChild(tail);
+    }
+  });
+  // 줄 끝 빈칸은 폭 0 (한글은 줄 끝 빈칸을 줄 폭에 넣지 않는다: 오른쪽·가운데 정렬이 글자 끝에 맞는다)
+  const all: Text[] = [];
+  const w2 = doc.createTreeWalker(el, 4);
+  for (let n = w2.nextNode(); n; n = w2.nextNode()) all.push(n as Text);
+  const lastText = all[all.length - 1];
+  const trail = lastText ? lastText.data.length - lastText.data.replace(/[ \u00a0]+$/, '').length : 0;
+  if (lastText && trail > 0) {
+    const sp = trail < lastText.data.length ? lastText.splitText(lastText.data.length - trail) : lastText;
+    const span = doc.createElement('span');
+    span.setAttribute('style', 'font-size: 0; letter-spacing: 0; word-spacing: 0');
+    sp.parentNode!.replaceChild(span, sp);
+    span.appendChild(sp);
+  }
+}
 
 /**
  * 한글이 놓은 줄 자리(hwpVs: [줄 위쪽, 줄 높이, 줄 간격, 기준선] px)가 있는 한 줄 문단의 줄 상자를 그 값으로 만든다
@@ -20,6 +63,13 @@ export function applyHwpLines(frag: { forEach(f: (n: any, offset: number, index:
       return;
     }
     const vs = n.attrs.hwpVs as number[][] | null;
+    if (Array.isArray(vs)) {
+      try {
+        applyHwpWidths(n, el);
+      } catch {
+        /* 폭 보정 없이 그린다 */
+      }
+    }
     if (!Array.isArray(vs) || vs.length !== 1 || !(vs[0][1] > 0)) return;
     const v = vs[0];
     const last = i === (parent.children.length - 1);
