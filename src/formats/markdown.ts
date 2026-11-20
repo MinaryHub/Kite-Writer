@@ -40,6 +40,8 @@ export function writeMarkdown(doc: KDocument): string {
     cell.innerHTML = parts.join('<br>');
   });
   dom.body.querySelectorAll('colgroup').forEach((c) => c.remove());
+  // 비어 있는 누름틀의 안내문은 자리 표시일 뿐이다
+  dom.body.querySelectorAll('.k-field[data-empty]').forEach((c) => c.remove());
   // 첫 줄이 제목 줄이 아니면 GFM 표 변환을 위해 th로 바꾼다
   dom.body.querySelectorAll('table').forEach((t) => {
     const first = t.querySelector('tr');

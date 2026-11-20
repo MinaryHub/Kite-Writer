@@ -1180,3 +1180,20 @@ p[data-cell-tail]:is(:empty, :has(> br:only-child)):not(.k-caret-here) {
   background-clip: content-box;
   background-origin: content-box;
 }
+
+/* ----- 누름틀: 입력 칸 (화면에서만 옅은 바탕. 비어 있으면 안내문을 빨간 기울임 글씨로 — 한글과 같게) ----- */
+.kdoc-content .k-field {
+  background: rgba(255, 196, 0, 0.13);
+  border-radius: 2px;
+}
+.kdoc-content .k-field[data-empty] {
+  color: #d23 !important;
+  font-style: italic;
+}
+.print-page .k-field {
+  background: none;
+}
+.print-page .k-field[data-empty] {
+  visibility: hidden;
+}
+

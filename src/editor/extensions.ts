@@ -48,6 +48,7 @@ import { Sections } from './extensions/sections';
 import { Shape } from './extensions/shape';
 import { FloatWrap } from './extensions/floatWrap';
 import { ObjectPick } from './extensions/objectPick';
+import { ClickHere } from './extensions/clickHere';
 import { Compose, KStrike, KUnderline, Ruby } from './extensions/charMarks';
 
 /** 문서 스키마를 구성하는 확장 (편집기 없이 변환에도 사용) */
@@ -65,6 +66,7 @@ export function getExtensions(): AnyExtension[] {
     KStrike,
     Ruby,
     Compose,
+    ClickHere,
     TextStyle,
     Color,
     // 글꼴 이름은 그대로 저장하고, 화면에는 대체 글꼴 목록을 붙여 그린다

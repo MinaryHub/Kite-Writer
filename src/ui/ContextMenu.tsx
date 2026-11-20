@@ -45,6 +45,7 @@ export function showContextMenu(x: number, y: number, tab: DocTab) {
       '-',
     );
   }
+  if (editor.isActive('clickHere')) items.push({ label: '누름틀 고치기...', icon: 'TextCursorInput', run: () => app.openDialog('clickHere') }, '-');
   const sel = editor.state.selection as { node?: { type: { name: string } } };
   if (sel.node && /^(image|shape|textBox)$/.test(sel.node.type.name)) items.push('object.props');
   if (editor.isActive('image')) {

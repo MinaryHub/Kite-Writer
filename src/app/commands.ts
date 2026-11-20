@@ -331,6 +331,7 @@ export const commands: Record<string, Command> = {
     enabled: hasDoc,
   },
   'image.crop': { label: '그림 자르기...', icon: 'Crop', run: () => app.openDialog('imageCrop'), enabled: () => isImageSelected() },
+  'insert.clickHere': { label: '누름틀...', icon: 'TextCursorInput', run: () => app.openDialog('clickHere'), enabled: hasDoc },
   'insert.hanja': {
     label: '한자로 바꾸기...',
     icon: 'Languages',

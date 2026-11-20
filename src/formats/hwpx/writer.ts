@@ -2,7 +2,8 @@ import JSZip from 'jszip';
 import type { Columns, HeaderFooter, KDocument } from '../../types';
 import { type JNode, mmToHwp, pxToHwp, ptToHwp, xmlEscape, parseBorderCss, paraBorderToFill, normColor, safeIsoDate, cleanColumns, FIXED_SPACE } from '../common';
 import type { PicLook } from '../picLook';
-import { type CharStyle, type FlatBlock, type FlatFloat, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, type FlatBox } from '../flatten';
+import { type CharStyle, type FlatBlock, type FlatFloat, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, type FlatBox, type FlatField, type FlatInline, fieldKey } from '../flatten';
+import { clickHereCommand } from '../clickHere';
 import { prepareImage } from '../imageUtil';
 import { shapeImageSrcs, shapeXml } from './shapeWriter';
 
@@ -268,7 +269,31 @@ class SectionWriter {
       openT();
       xml += `<hp:${chTag}Begin Id="${chId}" TcId="${chId}"/>`;
     };
+    // 누름틀: 이어진 같은 누름틀 글을 fieldBegin(CLICK_HERE) ~ fieldEnd 로 감싼다. 비어 있으면(안내문 자리 표시) 글은 쓰지 않는다
+    let curField = '';
+    let fieldNo = 0;
+    const endField = () => {
+      if (!curField) return;
+      if (!open) ensureRun(this.reg.char(p.baseChar), null);
+      closeT();
+      xml += `<hp:ctrl><hp:fieldEnd beginIDRef="${fieldNo}" fieldid="${fieldNo}"/></hp:ctrl>`;
+      curField = '';
+    };
+    const toField = (it: FlatInline) => {
+      const f = it.type === 'text' ? it.field : undefined;
+      const key = fieldKey(f);
+      if (key === curField) return;
+      endField();
+      if (!f) return;
+      ensureRun(this.reg.char((it as { style: CharStyle }).style), null);
+      closeT();
+      fieldNo = nextId();
+      xml += `<hp:ctrl>${clickHereBegin(fieldNo, f)}</hp:ctrl>`;
+      curField = key;
+    };
     for (const it of p.inlines) {
+      toField(it);
+      if (it.type === 'text' && it.field?.empty) continue;
       if (it.type === 'text' && it.math && it.math.hwp.trim()) {
         // 수식: 한글 수식 개체로 (글자처럼 취급)
         ensureRun(this.reg.char({ ...it.style, italic: false }), it.link);
@@ -325,6 +350,7 @@ class SectionWriter {
         xml += this.footnote(it.text);
       }
     }
+    endField();
     if (chKey) {
       if (!open) ensureRun(this.reg.char(p.baseChar), null);
       endChange();
@@ -841,6 +867,15 @@ function richHF(def: HeaderFooter): FlatBlock[] | null {
   } catch {
     return null;
   }
+}
+
+/** 누름틀의 fieldBegin (한글 2014 이후 HWPX 와 같은 꼴: 안내문 Direction, 메모 HelpState) */
+function clickHereBegin(id: number, f: FlatField): string {
+  return (
+    `<hp:fieldBegin id="${id}" type="CLICK_HERE" name="${xmlEscape(f.name)}" editable="1" dirty="${f.empty ? 0 : 1}" zorder="-1" fieldid="${id}">` +
+    `<hp:parameters cnt="3" name=""><hp:integerParam name="Prop">9</hp:integerParam><hp:stringParam name="Command">${xmlEscape(clickHereCommand(f))}</hp:stringParam>` +
+    `<hp:stringParam name="Direction">${xmlEscape(f.guide)}</hp:stringParam><hp:stringParam name="HelpState">${xmlEscape(f.memo)}</hp:stringParam></hp:parameters></hp:fieldBegin>`
+  );
 }
 
 export async function writeHwpx(doc: KDocument, opts: { pageCount?: number } = {}): Promise<Uint8Array> {

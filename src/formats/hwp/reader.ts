@@ -1,5 +1,6 @@
 import { LineSegStats, ParaLayout, dropHwpLayout, wrapFromHw, bodyPxOf, estimateMissingLines, floatOverhang, floatTableX, gapInBox, headMark, indentByPara, isBreakBlock, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx, type ParaHead } from '../hwpLayout';
 import { aes128EcbDecrypt } from './aes';
+import { applyClickHere, fieldNameFromCtrlData, parseClickHereCommand } from '../clickHere';
 import { cleanLook, type PicLook } from '../picLook';
 import { olePreview } from '../olePreview';
 import { isMetafileExt, metafileToSvg } from '../metafile';
@@ -438,6 +439,8 @@ class HwpConverter {
   /** 지금 읽는 구역의 편집 용지 (구역 정의에서 처음 읽은 것) */
   sectionPage: PageSetup | null = null;
   private linkHref: string | null = null;
+  /** 열린 필드 (끝 표시가 어느 필드를 닫는지): 하이퍼링크 또는 누름틀(시작 자리·안내문) */
+  private fieldStack: ({ kind: 'hlk' } | { kind: 'clk'; inline: JNode[]; start: number; f: { guide: string; memo: string; name: string }; shape: number } | { kind: 'other' })[] = [];
   /** 이 문단에서 읽은 감추기 (첫 블록에 단다) */
   private pageHide: string | null = null;
   /** 지금 읽는 문단이 놓인 쪽 (0 부터; 쪽 나누기와 줄 정보로 센다) */
@@ -711,7 +714,9 @@ class HwpConverter {
             if (t) inline.push(t);
           } else if (c === 4) {
             pushText();
-            this.linkHref = null;
+            const top = this.fieldStack.pop();
+            if (top?.kind === 'clk') applyClickHere(top.inline === inline ? [[inline, top.start]] : [[top.inline, top.start], [inline, 0]], top.f, charMarks(this.charPr(top.shape), this.linkHref));
+            else this.linkHref = null;
           }
           i += 8;
           continue;
@@ -797,6 +802,8 @@ class HwpConverter {
   /** 확장 컨트롤 처리. 블록을 반환하면 문단을 끊고 삽입 */
   private handleCtrl(ctrl: Rec, shapeId: number, inline: JNode[], captions?: Captions, lay?: ParaLayout): JNode[] {
     const id = ctrlIdOf(ctrl);
+    // 끝 표시(글자 4)로 닫히는 다른 필드도 쌓아 둔다 (누름틀·하이퍼링크의 끝과 헷갈리지 않게)
+    if (id.startsWith('%') && id !== '%hlk' && id !== '%clk') this.fieldStack.push({ kind: 'other' });
     switch (id) {
       case 'secd':
         this.handleSecd(ctrl);
@@ -903,6 +910,15 @@ class HwpConverter {
       case '%hlk': {
         const cmd = wstr(ctrl, 9).s;
         this.linkHref = cmd.split(';')[0].replace(/\\:/g, ':') || null;
+        this.fieldStack.push({ kind: 'hlk' });
+        return [];
+      }
+      case '%clk': {
+        // 누름틀: 안내문·메모는 명령 글에, 이름은 CTRL_DATA 에. 끝 표시(글자 4)에서 그 사이 글에 누름틀 표시를 단다
+        const cmd = wstr(ctrl, 9).s;
+        const data = ctrl.children.find((c) => c.tag === T.CTRL_DATA);
+        const f = { ...parseClickHereCommand(cmd), name: data ? fieldNameFromCtrlData(data.data) : '' };
+        this.fieldStack.push({ kind: 'clk', inline, start: inline.length, f, shape: shapeId });
         return [];
       }
       case 'tdut': {

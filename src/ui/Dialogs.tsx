@@ -3,7 +3,7 @@ import { CharShapeDialog } from './dialogs/CharShapeDialog';
 import { ParaShapeDialog } from './dialogs/ParaShapeDialog';
 import { PageSetupDialog, HeaderFooterDialog, PageNumberDialog } from './dialogs/PageDialogs';
 import { ColumnsDialog, PageBorderDialog } from './dialogs/LayoutDialogs';
-import { RubyDialog, ComposeDialog, ShapeDialog } from './dialogs/InsertDialogs';
+import { RubyDialog, ComposeDialog, ShapeDialog, ClickHereDialog } from './dialogs/InsertDialogs';
 import {
   TableDialog,
   LinkDialog,
@@ -102,6 +102,9 @@ export function Dialogs() {
         break;
       case 'object':
         el = <ObjectDialog onClose={close} />;
+        break;
+      case 'clickHere':
+        el = <ClickHereDialog onClose={close} />;
         break;
       case 'hanja':
         el = <HanjaDialog onClose={close} from={d.props.from} text={d.props.text} />;

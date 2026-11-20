@@ -7,6 +7,24 @@ import { cleanShape, type ShapeData } from './shape';
 import type { FloatHw } from './hwpLayout';
 
 /** 떠 있는 개체의 자리 (px). hw 는 한글 문서에서 읽은 자리 값 (저장할 때 그대로 쓴다) */
+/** 누름틀 (한글의 입력 칸). empty: 글이 안내문 자리 표시 (저장할 때 글은 쓰지 않는다) */
+export interface FlatField {
+  guide: string;
+  memo: string;
+  name: string;
+  empty: boolean;
+}
+
+/** 누름틀 비교 열쇠 (이어진 글이 같은 누름틀인가) */
+export const fieldKey = (f: FlatField | null | undefined) => (f ? JSON.stringify([f.guide, f.memo, f.name, f.empty]) : '');
+
+function fieldOf(marks: JMark[] | undefined): FlatField | undefined {
+  const m = (marks || []).find((x) => x.type === 'clickHere');
+  if (!m) return undefined;
+  const s = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : '');
+  return { guide: s(m.attrs?.guide, 500), memo: s(m.attrs?.memo, 500), name: s(m.attrs?.name, 100), empty: m.attrs?.empty === true };
+}
+
 export interface FlatFloat {
   x: number;
   y: number;
@@ -141,7 +159,7 @@ export interface ReviewInfo {
 }
 
 export type FlatInline =
-  | { type: 'text'; text: string; style: CharStyle; link: string | null; tab?: TabInfo | null; review?: ReviewInfo; math?: { latex: string; hwp: string }; ruby?: { text: string; pos: string } | null; compose?: string | null }
+  | { type: 'text'; text: string; style: CharStyle; link: string | null; tab?: TabInfo | null; review?: ReviewInfo; math?: { latex: string; hwp: string }; ruby?: { text: string; pos: string } | null; compose?: string | null; field?: FlatField }
   | { type: 'break' }
   | { type: 'image'; src: string; width: number | null; height: number | null; style: CharStyle; crop: { t: number; r: number; b: number; l: number } | null; float?: FlatFloat | null; rotate?: number | null; look?: PicLook | null }
   | { type: 'shape'; width: number; height: number; d: ShapeData; float: FlatFloat | null; style: CharStyle }
@@ -645,10 +663,11 @@ function flattenPara(n: JNode, ctx: Ctx, level: number): FlatPara {
     if (c.type === 'text') {
       const { style: cs, link, tab, ruby, compose } = applyMarks(base, c.marks);
       const review = reviewOf(c.marks);
+      const field = fieldOf(c.marks);
       const prev = inlines[inlines.length - 1];
       // 탭 정보가 붙은 글자는 따로 둔다 (탭 하나짜리 텍스트). 덧말·글자 겹침이 붙은 글자도 따로
-      if (!tab && !ruby && !compose && prev && prev.type === 'text' && !prev.tab && !prev.math && !prev.ruby && !prev.compose && charKey(prev.style) === charKey(cs) && prev.link === link && reviewKey(prev.review) === reviewKey(review)) prev.text += c.text || '';
-      else inlines.push({ type: 'text', text: c.text || '', style: cs, link, tab, ...(review ? { review } : {}), ...(ruby ? { ruby } : {}), ...(compose ? { compose } : {}) });
+      if (!tab && !ruby && !compose && prev && prev.type === 'text' && !prev.tab && !prev.math && !prev.ruby && !prev.compose && charKey(prev.style) === charKey(cs) && prev.link === link && reviewKey(prev.review) === reviewKey(review) && fieldKey(prev.field) === fieldKey(field)) prev.text += c.text || '';
+      else inlines.push({ type: 'text', text: c.text || '', style: cs, link, tab, ...(review ? { review } : {}), ...(ruby ? { ruby } : {}), ...(compose ? { compose } : {}), ...(field ? { field } : {}) });
     } else if (c.type === 'hardBreak') inlines.push({ type: 'break' });
     else if (c.type === 'image') {
       const { style: cs } = applyMarks(base, c.marks);

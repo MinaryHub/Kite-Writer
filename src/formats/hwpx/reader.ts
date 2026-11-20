@@ -2,6 +2,7 @@ import { LineSegStats, cellContentNeed, dropHwpLayout, wrapFromHw, bodyPxOf, flo
 import { cleanLook, type PicLook } from '../picLook';
 import { olePreview } from '../olePreview';
 import { isMetafileExt, metafileToSvg } from '../metafile';
+import { applyClickHere, parseClickHereCommand } from '../clickHere';
 import { chartToSvg } from '../chart';
 import { hwpToLatex } from '../../math/hwpEq';
 import JSZip from 'jszip';
@@ -649,6 +650,8 @@ export class HwpxConverter {
   private pageHide: string | null = null;
   /** 필드 시작 id → 종류 (필드 끝이 어느 필드를 닫는지 알려고) */
   private fieldTypes = new Map<string, string>();
+  /** 열린 누름틀 (fieldBegin id → 시작 자리·안내문) */
+  private clickOpen = new Map<string, { inline: JNode[]; start: number; f: { guide: string; memo: string; name: string }; cp: CharPr | undefined }>();
   /** 메모 필드 시작 id → 메모 id, 지금 글에 걸린 메모들 */
   private memoIds = new Map<string, string>();
   private activeMemos: string[] = [];
@@ -1127,7 +1130,7 @@ export class HwpxConverter {
               }
               this.addCaption(child, captions, fp, before);
             } else if (name === 'fieldBegin' || name === 'fieldEnd') {
-              this.handleField(child);
+              this.handleField(child, inline, cp);
             } else if (name === 'dutmal') {
               // 덧말: 본말 위(아래)에 작은 글
               const sub = kid(child, 'subText')?.textContent || '';
@@ -1361,10 +1364,17 @@ export class HwpxConverter {
     }
   }
 
-  private handleField(el: Element) {
+  private handleField(el: Element, inline: JNode[] = [], cp?: CharPr) {
     if (localName(el) === 'fieldEnd') {
       const ref = attr(el, 'beginIDRef') || '';
       const type = this.fieldTypes.get(ref);
+      // 누름틀의 끝: 시작 뒤에 쌓인 글에 누름틀 표시 (비었으면 안내문 자리 표시)
+      if (type === 'CLICK_HERE') {
+        const open = this.clickOpen.get(ref);
+        this.clickOpen.delete(ref);
+        if (open) applyClickHere(open.inline === inline ? [[inline, open.start]] : [[open.inline, open.start], [inline, 0]], open.f, charMarks(open.cp, this.linkHref));
+        return;
+      }
       // 메모의 끝: 그 메모 표시만 닫는다
       if (type === 'MEMO') {
         const mid = this.memoIds.get(ref);
@@ -1388,6 +1398,13 @@ export class HwpxConverter {
       this.settings.comments = { ...(this.settings.comments || {}), [id]: { author: param('Author'), time: Number.isFinite(time) ? time : 0, text, replies: [] } };
       this.memoIds.set(attr(el, 'id') || '', id);
       this.activeMemos.push(id);
+      return;
+    }
+    if (ftype === 'CLICK_HERE') {
+      const param = (name: string) => descendants(el, 'stringParam').find((sp) => attr(sp, 'name') === name)?.textContent;
+      const fromCmd = parseClickHereCommand(param('Command') || '');
+      const f = { guide: param('Direction') ?? fromCmd.guide, memo: param('HelpState') ?? fromCmd.memo, name: attr(el, 'name') || '' };
+      this.clickOpen.set(attr(el, 'id') || '', { inline, start: inline.length, f, cp });
       return;
     }
     if (ftype !== 'HYPERLINK') return;
@@ -1499,7 +1516,7 @@ export class HwpxConverter {
         }
         case 'fieldBegin':
         case 'fieldEnd':
-          this.handleField(c);
+          this.handleField(c, inline, cp);
           break;
         case 'autoNum': {
           const t = attr(c, 'numType') === 'PAGE' ? (this.inHF ? '{{PAGE}}' : '') : attr(c, 'num') || '';

@@ -103,6 +103,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
       'insert.compose',
       '-',
       'insert.link',
+      'insert.clickHere',
       'insert.footnote',
       'insert.math',
       'insert.symbol',
