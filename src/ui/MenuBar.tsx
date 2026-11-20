@@ -95,6 +95,7 @@ const MENUS: { label: string; key: string; items: () => MenuEntry[] }[] = [
       'insert.table',
       'insert.image',
       'image.crop',
+      'object.props',
       'insert.shape',
       'insert.textBox',
       '-',

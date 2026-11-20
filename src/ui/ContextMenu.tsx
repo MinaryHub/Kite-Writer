@@ -45,6 +45,8 @@ export function showContextMenu(x: number, y: number, tab: DocTab) {
       '-',
     );
   }
+  const sel = editor.state.selection as { node?: { type: { name: string } } };
+  if (sel.node && /^(image|shape|textBox)$/.test(sel.node.type.name)) items.push('object.props');
   if (editor.isActive('image')) {
     items.push('image.crop', 'image.uncrop');
     items.push(

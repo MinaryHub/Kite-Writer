@@ -47,6 +47,7 @@ import { TabFill } from './extensions/tabFill';
 import { Sections } from './extensions/sections';
 import { Shape } from './extensions/shape';
 import { FloatWrap } from './extensions/floatWrap';
+import { ObjectPick } from './extensions/objectPick';
 import { Compose, KStrike, KUnderline, Ruby } from './extensions/charMarks';
 
 /** 문서 스키마를 구성하는 확장 (편집기 없이 변환에도 사용) */
@@ -145,7 +146,7 @@ export function getExtensions(): AnyExtension[] {
 
 /** 편집 화면용 확장 (스키마 + 편집 기능) */
 export function getEditorExtensions(): AnyExtension[] {
-  return [...getExtensions(), KeyboardExtras, CellNoWrap, Search, CharacterCount, Pagination, TableResize, CheckMarks, TrackChanges, HwpMetrics, Sections, TabFill, FloatWrap];
+  return [...getExtensions(), KeyboardExtras, CellNoWrap, Search, CharacterCount, Pagination, TableResize, CheckMarks, TrackChanges, HwpMetrics, Sections, TabFill, FloatWrap, ObjectPick];
 }
 
 let cachedSchema: Schema | null = null;

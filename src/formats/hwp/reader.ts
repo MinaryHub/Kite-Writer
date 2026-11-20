@@ -1,4 +1,4 @@
-import { LineSegStats, ParaLayout, dropHwpLayout, estimateMissingLines, floatOverhang, floatTableX, gapInBox, headMark, indentByPara, isBreakBlock, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx, type ParaHead } from '../hwpLayout';
+import { LineSegStats, ParaLayout, dropHwpLayout, wrapFromHw, bodyPxOf, estimateMissingLines, floatOverhang, floatTableX, gapInBox, headMark, indentByPara, isBreakBlock, jsonContentSize, markCellTrail, solveSpanRows, type LayoutState, type ObjPos, type PageGeomPx, type ParaHead } from '../hwpLayout';
 import { aes128EcbDecrypt } from './aes';
 import { cleanLook, type PicLook } from '../picLook';
 import { olePreview } from '../olePreview';
@@ -1882,7 +1882,7 @@ export async function readHwp(data: Uint8Array): Promise<LoadedDoc> {
   }
   while (blocks.length && blocks[0].type === 'pageBreak') blocks.shift();
   // 줄 정보가 형식뿐인 문서(한글이 배치하지 않은 파일)는 그 값을 따르지 않고 자연 배치로 흐르게 한다
-  const content = docNode(conv.segStats.fake ? blocks.map(dropHwpLayout) : blocks);
+  const content = docNode(conv.segStats.fake ? blocks.map((b) => wrapFromHw(dropHwpLayout(b), bodyPxOf(conv.settings.page))) : conv.segStats.none ? blocks.map((b) => wrapFromHw(b, bodyPxOf(conv.settings.page))) : blocks);
   // 한글이 줄 정보를 적지 않은 문단의 줄 높이를 같은 모양의 다른 문단에서 빌린다
   if (!conv.segStats.fake) estimateMissingLines(content);
   const out: LoadedDoc = { content, settings: conv.settings, meta: {}, warnings: [...new Set(warnings)].slice(0, 20) };

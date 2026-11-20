@@ -693,6 +693,34 @@ export function dropHwpLayout(n: JNode): JNode {
   return out;
 }
 
+/**
+ * 한글의 줄 배치 없이 흐르는 문서(줄 정보가 형식뿐인 파일 — Kite 가 저장한 것 등)에서는 어울림·자리 차지 개체 둘레로
+ * 글이 비켜 가도록 float.wrap 을 채운다 (한글이 배치한 문서는 줄 정보가 이미 개체를 비켜 있으므로 하지 않는다).
+ * 어울림은 개체가 본문 가운데보다 오른쪽이면 글을 왼쪽으로, 아니면 오른쪽으로 흘린다. bodyPx: 본문 폭
+ */
+/** 본문 폭 (px) */
+export function bodyPxOf(p: { width: number; height: number; marginLeft: number; marginRight: number; gutter?: number; landscape?: boolean }): number {
+  const w = p.landscape ? p.height : p.width;
+  return Math.max(50, ((w - p.marginLeft - p.marginRight - (p.gutter || 0)) * 96) / 25.4);
+}
+
+export function wrapFromHw(n: JNode, bodyPx: number): JNode {
+  let out = n;
+  const fl = n.attrs?.float;
+  const hw = fl?.hw as FloatHw | undefined;
+  if (hw && !fl.wrap && !fl.behind && (hw.wrap === 'SQUARE' || hw.wrap === 'TOP_AND_BOTTOM')) {
+    const d = (hw.om || [0, 0, 0, 0]).map((v) => Math.max(0, Math.min(500, (v * 96) / 7200)));
+    // om: 왼·오른·위·아래 → wrap.d: 위·오른·아래·왼
+    const wd = [d[2], d[1], d[3], d[0]];
+    const w = +n.attrs!.width || 0;
+    const right = hw.ha === 'RIGHT' || (hw.ha !== 'CENTER' && +fl.x + w / 2 > bodyPx / 2);
+    const s = hw.wrap === 'TOP_AND_BOTTOM' || hw.ha === 'CENTER' ? 'tb' : right ? 'l' : 'r';
+    out = { ...n, attrs: { ...n.attrs, float: { ...fl, wrap: { s, d: wd } } } };
+  }
+  if (out.content) out = { ...out, content: out.content.map((c) => wrapFromHw(c, bodyPx)) };
+  return out;
+}
+
 /** 본문 문단들의 줄 정보가 형식뿐인가: 줄 정보가 있는 문단이 둘 이상인데 모두 '세로 위치 0 인 줄 하나'일 때 */
 export class LineSegStats {
   private paras = 0;
@@ -705,6 +733,10 @@ export class LineSegStats {
   }
   get fake(): boolean {
     return this.paras >= 2 && this.zero === this.paras;
+  }
+  /** 줄 정보가 있는 본문 문단이 하나도 없다 (한글이 배치하지 않은 파일) */
+  get none(): boolean {
+    return this.paras === 0;
   }
 }
 

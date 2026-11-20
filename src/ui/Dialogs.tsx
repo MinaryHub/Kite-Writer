@@ -26,6 +26,7 @@ import { CollabDialog } from './dialogs/CollabDialog';
 import { TemplateDialog } from './dialogs/TemplateDialog';
 import { LegalDialog } from './dialogs/LegalDialog';
 import { ContactDialog } from './dialogs/ContactDialog';
+import { ObjectDialog } from './dialogs/ObjectDialog';
 
 export function Dialogs() {
   const app = useApp();
@@ -97,6 +98,9 @@ export function Dialogs() {
         break;
       case 'imageCrop':
         el = <ImageCropDialog onClose={close} />;
+        break;
+      case 'object':
+        el = <ObjectDialog onClose={close} />;
         break;
       case 'about':
         el = <AboutDialog onClose={close} />;

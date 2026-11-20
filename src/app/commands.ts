@@ -331,6 +331,7 @@ export const commands: Record<string, Command> = {
     enabled: hasDoc,
   },
   'image.crop': { label: '그림 자르기...', icon: 'Crop', run: () => app.openDialog('imageCrop'), enabled: () => isImageSelected() },
+  'object.props': { label: '개체 속성 (배치·위치·크기)...', icon: 'Layers', run: () => app.openDialog('object'), enabled: () => isObjectSelected() },
   'image.uncrop': {
     label: '자르기 취소',
     run: () => {
@@ -603,6 +604,12 @@ export const commands: Record<string, Command> = {
   'tools.palette': { label: '명령 찾기', icon: 'Command', shortcut: 'Ctrl+Shift+P', keys: ['Ctrl+Shift+P'], run: () => app.set({ paletteOpen: true }) },
   'tools.overwrite': { label: '삽입/수정 모드 전환', shortcut: 'Insert', run: () => chain().toggleOverwrite().run(), enabled: hasDoc },
 };
+
+/** 그림·그리기 개체·글상자가 선택되어 있는가 */
+function isObjectSelected() {
+  const sel = ed()?.state.selection;
+  return sel instanceof NodeSelection && (sel.node.type.name === 'image' || sel.node.type.name === 'shape' || sel.node.type.name === 'textBox');
+}
 
 function isImageSelected() {
   const sel = ed()?.state.selection;

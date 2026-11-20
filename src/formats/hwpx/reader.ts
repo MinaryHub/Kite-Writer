@@ -1,4 +1,4 @@
-import { LineSegStats, cellContentNeed, dropHwpLayout, floatOverhang, floatTableX, flowPicturePara, headMark, indentByBlanks, indentByPara, leftOnPrevPage, markCellTrail, placeTableThenText, sideBySide, staleImageLine, tableThenText, type FloatHw, type ParaHead } from '../hwpLayout';
+import { LineSegStats, cellContentNeed, dropHwpLayout, wrapFromHw, bodyPxOf, floatOverhang, floatTableX, flowPicturePara, headMark, indentByBlanks, indentByPara, leftOnPrevPage, markCellTrail, placeTableThenText, sideBySide, staleImageLine, tableThenText, type FloatHw, type ParaHead } from '../hwpLayout';
 import { cleanLook, type PicLook } from '../picLook';
 import { olePreview } from '../olePreview';
 import { isMetafileExt, metafileToSvg } from '../metafile';
@@ -2453,7 +2453,7 @@ export async function readHwpx(data: Uint8Array): Promise<LoadedDoc> {
   }
   if (masters.length) settings.masterPages = masters;
   // 줄 정보가 형식뿐인 문서(한글이 배치하지 않은 파일)는 그 값을 따르지 않고 자연 배치로 흐르게 한다
-  return { content: docNode(conv.segStats.fake ? blocks.map(dropHwpLayout) : blocks), settings, meta, warnings: dedupe(warnings) };
+  return { content: docNode(conv.segStats.fake ? blocks.map((b) => wrapFromHw(dropHwpLayout(b), bodyPxOf(settings.page))) : conv.segStats.none ? blocks.map((b) => wrapFromHw(b, bodyPxOf(settings.page))) : blocks), settings, meta, warnings: dedupe(warnings) };
 }
 
 /** 쪽 번호의 글자 모양을 설정에 담는다 */
