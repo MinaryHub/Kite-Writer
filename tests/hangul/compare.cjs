@@ -77,9 +77,12 @@ app.whenReady().then(async () => {
       }
       return rows.sort((a, b) => a.y - b.y).map((r) => { r.parts.sort((a, b) => a[0] - b[0]); const last = r.parts[r.parts.length - 1]; return { y: Math.round(r.y * 10) / 10, x: Math.round(r.parts[0][0] * 10) / 10, x2: Math.round((last[0] + last[2]) * 10) / 10, t: r.parts.map((p) => p[1]).join('') }; });
     };
+    // CMP_CROP="x,y,w,h"(pt): 쪽의 그 부분만 크게 그린다 (CMP_SCALE 과 함께)
+    window.__crop = ${JSON.stringify(process.env.CMP_CROP ? process.env.CMP_CROP.split(',').map(Number) : null)};
     window.__canvas = async (page, scale) => {
-      const vp = page.getViewport({ scale });
-      const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+      const cr = window.__crop;
+      const vp = cr ? page.getViewport({ scale, offsetX: -cr[0] * scale, offsetY: -cr[1] * scale }) : page.getViewport({ scale });
+      const c = document.createElement('canvas'); c.width = Math.ceil(cr ? cr[2] * scale : vp.width); c.height = Math.ceil(cr ? cr[3] * scale : vp.height);
       const ctx = c.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
       await page.render({ canvasContext: ctx, viewport: vp, canvas: c }).promise;
       return c;
@@ -91,7 +94,8 @@ app.whenReady().then(async () => {
     const t0 = Date.now();
     try {
       // 문서 확장자 (CMP_EXT=.hwp 면 HWP 문서. 기준 PDF 이름은 그대로 name.hwpx.pdf)
-      const ext = process.env.CMP_EXT || '.hwpx';
+      // CMP_EXT 를 주지 않으면 samples 에 있는 쪽 (name.hwpx, 없으면 name.hwp)
+      const ext = process.env.CMP_EXT || (fs.existsSync(path.join(samples, name + '.hwpx')) ? '.hwpx' : '.hwp');
       const b64 = fs.readFileSync(path.join(samples, name + ext)).toString('base64');
       pdfData = null;
       const info = await js(`(async () => {
@@ -121,7 +125,10 @@ app.whenReady().then(async () => {
       if (process.env.CMP_SHOT) { await sleep(500); fs.writeFileSync(path.join(outDir, name + '-screen.png'), (await win.webContents.capturePage()).toPNG()); }
       const pdf = pdfData;
       fs.writeFileSync(path.join(outDir, name + '.kite.pdf'), pdf);
-      const ref = fs.readFileSync(path.join(refDir, name + '.hwpx.pdf')).toString('base64');
+      // 기준 PDF: hwpcheck.ps1 이 만든 이름(name.hwp.pdf / name.hwpx.pdf)
+      const refFile = [name + ext + '.pdf', name + '.hwpx.pdf'].map((f) => path.join(refDir, f)).find((f) => fs.existsSync(f));
+      if (!refFile) { log(name, 'ERROR', '기준 PDF 없음'); continue; }
+      const ref = fs.readFileSync(refFile).toString('base64');
       const counts = await js(`(async () => { window.__step = 'pdfload'; window.__ref = await __load(${JSON.stringify(ref)}); window.__kite = await __load(${JSON.stringify(pdf.toString('base64'))}); return [__ref.numPages, __kite.numPages]; })()`);
       const lines = { ref: [], kite: [] };
       const n = Math.max(counts[0], counts[1]);
@@ -141,11 +148,40 @@ app.whenReady().then(async () => {
             if (ca) ctx.drawImage(ca, 0, 0); else { ctx.fillStyle = '#888'; ctx.fillRect(0, 0, w, h); }
             if (cb) ctx.drawImage(cb, w + 6, 0); else { ctx.fillStyle = '#888'; ctx.fillRect(w + 6, 0, w, h); }
             out.png = c.toDataURL('image/png').split(',')[1];
+            // 겹쳐 보기: 한글에만 있는 것은 빨강, Kite 에만 있는 것은 청록, 둘 다 있으면 검정
+            const lum = (cv) => {
+              const t = document.createElement('canvas'); t.width = w; t.height = h;
+              const x = t.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, w, h);
+              if (cv) x.drawImage(cv, 0, 0);
+              const d = x.getImageData(0, 0, w, h).data; const o = new Uint8Array(w * h);
+              for (let i = 0; i < o.length; i++) o[i] = (d[i * 4] * 3 + d[i * 4 + 1] * 6 + d[i * 4 + 2]) / 10;
+              return o;
+            };
+            const la = lum(ca), lb = lum(cb);
+            const oc = document.createElement('canvas'); oc.width = w; oc.height = h;
+            const ox = oc.getContext('2d'); const od = ox.createImageData(w, h);
+            for (let i = 0; i < la.length; i++) { od.data[i * 4] = lb[i]; od.data[i * 4 + 1] = la[i]; od.data[i * 4 + 2] = la[i]; od.data[i * 4 + 3] = 255; }
+            ox.putImageData(od, 0, 0);
+            out.overlay = oc.toDataURL('image/png').split(',')[1];
+            // 어긋남 점수: 한쪽에만 있는 어두운 점(2px 안에 짝이 없는 것)의 비율
+            const mask = (l) => { const m = new Uint8Array(l.length); for (let i = 0; i < l.length; i++) m[i] = l[i] < 212 ? 1 : 0; return m; };
+            const dil = (m, r) => {
+              const t = new Uint8Array(m.length), o = new Uint8Array(m.length);
+              for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let v = 0; for (let k = Math.max(0, x - r); k <= Math.min(w - 1, x + r) && !v; k++) v = m[y * w + k]; t[y * w + x] = v; }
+              for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { let v = 0; for (let k = Math.max(0, y - r); k <= Math.min(h - 1, y + r) && !v; k++) v = t[k * w + x]; o[y * w + x] = v; }
+              return o;
+            };
+            const ma = mask(la), mb = mask(lb), dma = dil(ma, 2), dmb = dil(mb, 2);
+            let na = 0, nb = 0, ua = 0, ub = 0;
+            for (let i = 0; i < ma.length; i++) { if (ma[i]) { na++; if (!dmb[i]) ua++; } if (mb[i]) { nb++; if (!dma[i]) ub++; } }
+            out.mis = [na, nb, ua, ub];
           }
           return out;
         })()`);
         lines.ref.push(r.ref); lines.kite.push(r.kite);
         if (r.png) fs.writeFileSync(path.join(outDir, `${name}-p${String(p).padStart(2, '0')}.png`), Buffer.from(r.png, 'base64'));
+        if (r.overlay) fs.writeFileSync(path.join(outDir, `${name}-o${String(p).padStart(2, '0')}.png`), Buffer.from(r.overlay, 'base64'));
+        if (r.mis) (lines.mis = lines.mis || [])[p - 1] = r.mis;
       }
       fs.writeFileSync(path.join(outDir, name + '.lines.json'), JSON.stringify(lines));
       log(name, 'hangul pages', counts[0], 'kite pages', counts[1], 'warnings', JSON.stringify(info.warnings), 'fonts', JSON.stringify(info.fonts), ((Date.now() - t0) / 1000).toFixed(1) + 's');

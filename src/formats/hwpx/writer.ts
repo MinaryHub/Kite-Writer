@@ -427,7 +427,7 @@ class SectionWriter {
   pageCount = 1;
 }
 
-function headerXml(reg: Registry): string {
+function headerXml(reg: Registry, pageNumChar: number | null = null): string {
   const fontsXml = LANGS.map(
     (lang) =>
       `<hh:fontface lang="${lang}" fontCnt="${reg.fonts.length}">` +
@@ -529,7 +529,10 @@ function headerXml(reg: Registry): string {
     `<hh:tabProperties itemCnt="3"><hh:tabPr id="0" autoTabLeft="0" autoTabRight="0"/><hh:tabPr id="1" autoTabLeft="1" autoTabRight="0"/><hh:tabPr id="2" autoTabLeft="0" autoTabRight="1"/></hh:tabProperties>` +
     numbering +
     `<hh:paraProperties itemCnt="${reg.paras.length}">${paraXml}</hh:paraProperties>` +
-    `<hh:styles itemCnt="1"><hh:style id="0" type="PARA" name="바탕글" engName="Normal" paraPrIDRef="0" charPrIDRef="0" nextStyleIDRef="0" langID="1042" lockForm="0"/></hh:styles>` +
+    `<hh:styles itemCnt="${pageNumChar == null ? 1 : 2}"><hh:style id="0" type="PARA" name="바탕글" engName="Normal" paraPrIDRef="0" charPrIDRef="0" nextStyleIDRef="0" langID="1042" lockForm="0"/>` +
+    // 쪽 번호는 '쪽 번호' 스타일의 글자 모양으로 찍힌다 (한글도, Kite 도)
+    (pageNumChar == null ? '' : `<hh:style id="1" type="PARA" name="쪽 번호" engName="Page Number" paraPrIDRef="0" charPrIDRef="${pageNumChar}" nextStyleIDRef="1" langID="1042" lockForm="0"/>`) +
+    `</hh:styles>` +
     `</hh:refList><hh:compatibleDocument targetProgram="HWP201X"><hh:layoutCompatibility/></hh:compatibleDocument>` +
     `<hh:docOption><hh:linkinfo path="" pageInherit="0" footnoteInherit="0"/></hh:docOption><hh:trackchageConfig flags="56"/></hh:head>`
   );
@@ -611,7 +614,9 @@ export async function writeHwpx(doc: KDocument, opts: { pageCount?: number } = {
     else body += sw.table(b, false, i === 0);
   });
   const section = XML_DECL + `<hs:sec ${NS}>${body}</hs:sec>`;
-  const header = headerXml(reg);
+  const pn = doc.settings.pageNumber;
+  const pnChar = pn.fontSize && pn.fontSize > 0 ? reg.char({ ...defaultChar(), font: pn.fontFamily || '함초롬돋움', size: pn.fontSize, bold: !!pn.bold, italic: !!pn.italic, color: pn.color || '#000000' }) : null;
+  const header = headerXml(reg, pnChar);
 
   const meta = doc.meta;
   const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');

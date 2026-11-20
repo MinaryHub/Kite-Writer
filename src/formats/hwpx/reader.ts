@@ -1,5 +1,7 @@
-import { indentByBlanks } from '../hwpLayout';
+import { floatTableX, flowPicturePara, headMark, indentByBlanks, indentByPara, leftOnPrevPage, markCellTrail, placeTableThenText, staleImageLine, tableThenText, type ParaHead } from '../hwpLayout';
 import { hwpToLatex } from '../../math/hwpEq';
+import { shapeToImage, type ShapeGeom } from '../hwpShape';
+import { chartToSvg, svgDataUrl } from '../hwpChart';
 import JSZip from 'jszip';
 import { CELL_VMARGIN_HWP, FLOATING, HwpPageMarks, assembleTable, fitTableLines, placeCaptions, takeFloating, type Caption, type Captions } from '../hwp/reader';
 import type { DocMeta, DocSettings, LoadedDoc, PageSetup } from '../../types';
@@ -121,7 +123,25 @@ export function imgFillFit(mode: string): 'stretch' | 'tile' | 'center' {
 }
 
 export interface Numbering {
-  levels: { text: string; format: string; start: number }[];
+  levels: { text: string; format: string; start: number; head?: ParaHead }[];
+}
+
+/** hh:paraHead 의 모양 (정렬·자동 내어쓰기·너비 조정·본문과의 거리·글자 모양) */
+function parseParaHead(ph: Element): ParaHead {
+  const al = attr(ph, 'align');
+  const percent = (attr(ph, 'textOffsetType') || 'PERCENT') === 'PERCENT';
+  const off = numAttr(ph, 'textOffset', 50);
+  const cp = attr(ph, 'charPrIDRef');
+  let adj = numAttr(ph, 'widthAdjust', 0);
+  if (adj > 0x7fffffff) adj -= 0x100000000;
+  return {
+    align: al === 'CENTER' ? 'center' : al === 'RIGHT' ? 'right' : 'left',
+    auto: attr(ph, 'autoIndent') === '1',
+    adj: hwpToPt(adj),
+    pct: percent ? off : null,
+    gap: percent ? null : hwpToPt(off),
+    charPr: cp && cp !== '4294967295' ? cp : null,
+  };
 }
 
 export interface HeaderInfo {
@@ -131,6 +151,8 @@ export interface HeaderInfo {
   borderFills: Map<string, BorderFill>;
   numberings: Map<string, Numbering>;
   bullets: Map<string, string>;
+  /** 글머리표의 머리 모양 */
+  bulletHeads?: Map<string, ParaHead>;
   styles: Map<string, { name: string; paraPr: string; charPr: string }>;
 }
 
@@ -324,11 +346,16 @@ export function parseHeader(doc: Document): HeaderInfo {
     const levels: Numbering['levels'] = [];
     for (const ph of kids(nb, 'paraHead')) {
       const lv = numAttr(ph, 'level', levels.length + 1) - 1;
-      levels[lv] = { text: ph.textContent || '', format: attr(ph, 'numFormat') || 'DIGIT', start: numAttr(ph, 'start', 1) };
+      levels[lv] = { text: ph.textContent || '', format: attr(ph, 'numFormat') || 'DIGIT', start: numAttr(ph, 'start', 1), head: parseParaHead(ph) };
     }
     info.numberings.set(id, { levels });
   }
-  for (const b of descendants(doc, 'bullet')) info.bullets.set(attr(b, 'id') || '', attr(b, 'char') || '•');
+  info.bulletHeads = new Map();
+  for (const b of descendants(doc, 'bullet')) {
+    info.bullets.set(attr(b, 'id') || '', attr(b, 'char') || '•');
+    const ph = kid(b, 'paraHead');
+    if (ph) info.bulletHeads.set(attr(b, 'id') || '', parseParaHead(ph));
+  }
   for (const st of descendants(doc, 'style')) {
     info.styles.set(attr(st, 'id') || '', {
       name: attr(st, 'name') || '',
@@ -397,12 +424,14 @@ function i32Attr(el: Element | null, name: string, def = 0): number {
 }
 
 /** 개체 크기(HWPUNIT): hp:sz(문서에 놓인 크기)부터, 없으면 curSz. 뒤집힌 개체의 음수 크기는 절댓값으로 */
-function objSize(el: Element): { w: number; h: number } {
+function objSize(el: Element, thin = false): { w: number; h: number } {
   for (const tag of ['sz', 'curSz', 'orgSz']) {
     const e = kid(el, tag);
     const w = Math.abs(i32Attr(e, 'width', 0));
     const h = Math.abs(i32Attr(e, 'height', 0));
     if (w > 0 && h > 0 && w < 4000000 && h < 4000000) return { w, h };
+    // 가로선·세로선은 한쪽 크기가 0 이다
+    if (thin && (w > 0 || h > 0) && w < 4000000 && h < 4000000) return { w, h };
   }
   return { w: 0, h: 0 };
 }
@@ -426,7 +455,7 @@ const r2 = (v: number) => Math.round(v * 100) / 100;
  * 편집기 밖에서 그리는 블록(머리말·꼬리말)용 사본: 편집기의 쪽 나누기·줄 바꿈이 쓰는 배치 정보는 빼고,
  * 줄 높이·기준선(hwpVs)과 문단 사이 간격(hwpGap)만 남긴다 (hfRich 가 한 줄 문단의 줄 상자를 그 값으로 만든다)
  */
-function stripLayout(n: JNode): JNode {
+export function stripLayout(n: JNode): JNode {
   const out: JNode = { ...n };
   if (n.attrs) {
     const a: Record<string, any> = {};
@@ -494,6 +523,8 @@ export class HwpxConverter {
   private seq = 0;
   /** 머리말·꼬리말을 읽는 중 (쪽 번호 필드를 {{PAGE}} 로) */
   private inHF = 0;
+  /** 쪽 번호 매기기를 이미 만났다 */
+  private pageNumSeen = false;
   /** 지금 문단이 놓인 쪽 (0부터; 쪽 나누기·한글의 새 쪽 표시로 센 어림값) */
   private pageNo = 0;
   /** 앞 본문 문단의 마지막 줄이 끝난 자리 (px, 쪽 본문 기준) */
@@ -526,8 +557,8 @@ export class HwpxConverter {
   private floatPos(el: Element, pp: ParaPr, segV: number[][], ctx: Ctx, pushed: (h: number, omB: number, vOff: number) => boolean): FloatPos | null {
     const pos = kid(el, 'pos');
     if (!pos || attr(pos, 'treatAsChar') === '1') return null;
-    const sz = objSize(el);
-    if (!sz.w || !sz.h) return null;
+    const sz = objSize(el, true);
+    if (!sz.w && !sz.h) return null;
     const w = hwpToPx(sz.w);
     const h = hwpToPx(sz.h);
     const omB = hwpToPx(numAttr(kid(el, 'outMargin'), 'bottom', 0));
@@ -546,7 +577,8 @@ export class HwpxConverter {
     let y: number;
     if (vRel === 'PARA') {
       // 자리를 차지하는 개체가 문단 첫 줄 자리에 걸치면 한글은 글을 개체 아래로 민다: 개체는 밀린 첫 줄 바로 위에 있다
-      y = wrap === 'TOP_AND_BOTTOM' && pushed(h, omB, vOff) ? sb - omB - h : sb + vOff;
+      // 문단 기준의 세로 자리는 문단 위 간격 앞(문단 상자의 위쪽)에서 잰다 (hwpLayout 의 floatPos 와 같다)
+      y = wrap === 'TOP_AND_BOTTOM' && pushed(h, omB, vOff) ? sb - omB - h : (v0 != null && v0 < sb - 0.5 ? sb : 0) + vOff;
     } else {
       // 쪽(본문)·종이 기준: 문단 첫 줄의 쪽 안 위치를 알아야 한다
       if (v0 == null) return null;
@@ -594,6 +626,13 @@ export class HwpxConverter {
           if (gap > 0.5 && gap < 4000) one.attrs!.hwpGap = r2(gap);
           const last = vs[vs.length - 1];
           prevEnd = last[0] + last[1] + last[2] + (+one.attrs!.spaceAfter || 0) * PT2PX;
+        } else if (paras.length === 1 && paras[0].type === 'table' && Array.isArray(paras[0].attrs?.hwpVs) && paras[0].attrs!.hwpVs.length === 1) {
+          // 글자처럼 취급하는 표: 표가 놓인 줄의 높이까지가 표의 자리다. 그 줄의 아래 간격은 뒤 문단의 위 간격으로 넘어간다.
+          // 앞 블록보다 더 벌어져 있으면(표가 놓인 문단의 위 간격 등) 그만큼 표 위를 띄운다
+          const v = paras[0].attrs!.hwpVs[0] as number[];
+          const tg = prevEnd == null ? 0 : v[0] - prevEnd;
+          if (tg > 0.5 && tg < 4000) paras[0].attrs!.hwpGap = r2(tg);
+          prevEnd = v[0] + v[1];
         } else prevEnd = null;
       }
       out.push(...blocks);
@@ -601,15 +640,45 @@ export class HwpxConverter {
     return out;
   }
 
+  /** 차트 정의 (꾸러미 안 경로 → XML). readHwpx 가 채운다 */
+  charts = new Map<string, string>();
+
+  /** 차트(hp:chart) → 벡터 그림 노드. 그릴 수 없으면 null */
+  private chartImage(el: Element): JNode | null {
+    const ref = (attr(el, 'chartIDRef') || '').replace(/^\//, '');
+    const xml = this.charts.get(ref.toLowerCase());
+    const sz = objSize(el);
+    if (!xml || !sz.w || !sz.h) return null;
+    try {
+      const w = hwpToPx(sz.w);
+      const h = hwpToPx(sz.h);
+      const svg = chartToSvg(parseXml(xml), w, h);
+      if (!svg) return null;
+      const img: JNode = { type: 'image', attrs: { src: svgDataUrl(svg), width: Math.round(w), height: Math.round(h), alt: '차트' } };
+      if (attr(kid(el, 'pos'), 'treatAsChar') !== '1') img.attrs = { ...img.attrs, [FLOATING]: true };
+      return img;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 방금 만든 머리 글자의 모양 (numberPrefix 가 채운다) */
+  private prefixHead: ParaHead | null = null;
+
   private numberPrefix(pp: ParaPr): string | null {
+    this.prefixHead = null;
     if (pp.headingType === 'NONE') return null;
-    if (pp.headingType === 'BULLET') return (this.h.bullets.get(pp.headingIdRef) || '•') + ' ';
+    if (pp.headingType === 'BULLET') {
+      this.prefixHead = this.h.bulletHeads?.get(pp.headingIdRef) || null;
+      return (this.h.bullets.get(pp.headingIdRef) || '•') + ' ';
+    }
     const numId = pp.headingType === 'OUTLINE' ? this.outlineNumId : pp.headingIdRef;
     const nb = this.h.numberings.get(numId);
     if (!nb) return null;
     const lvl = Math.max(0, Math.min(9, pp.headingLevel));
     const def = nb.levels[lvl];
     if (!def || !def.text) return null;
+    this.prefixHead = def.head || null;
     const vals = this.counter.next(numId, lvl, def.start || 1);
     const fmts = nb.levels.map((l) => (l ? l.format : 'DIGIT'));
     return applyNumFormat(def.text, vals, fmts) + ' ';
@@ -676,6 +745,7 @@ export class HwpxConverter {
     const track = new LineTrack(new Set(lineSegs.map((s) => s[0])), inlineSize);
 
     const prefix = this.numberPrefix(pp);
+    const head = this.prefixHead;
     const flush = () => {
       if (!inline.length) return;
       blocks.push(paragraph({ ...pAttrs, fontSize: firstSize && firstSize !== 10 ? firstSize : null }, inline));
@@ -688,7 +758,9 @@ export class HwpxConverter {
       const cp = this.h.charPrs.get(attr(run, 'charPrIDRef') || '0');
       if (firstSize == null && cp) firstSize = cp.fontSize;
       if (!prefixDone) {
-        const t = textNode(prefix!, charMarks(cp));
+        // 머리 글자: 제 글자 모양이 있으면 그것으로, 없으면 문단 첫 글자의 모양으로. 폭·내어쓰기는 마크가 전한다
+        const hcp = head?.charPr != null ? this.h.charPrs.get(String(head.charPr)) || cp : cp;
+        const t = textNode(prefix!, head ? [...charMarks(hcp), headMark(head)] : charMarks(cp));
         if (t) inline.push(t);
         prefixDone = true;
       }
@@ -701,17 +773,24 @@ export class HwpxConverter {
             break;
           case 'tbl': {
             const t = this.convertTable(child);
-            if (pAttrs.textAlign === 'center' || pAttrs.textAlign === 'right') t.attrs = { ...t.attrs, align: pAttrs.textAlign };
+            const tpos = kid(child, 'pos');
+            if (attr(tpos, 'treatAsChar') !== '1') {
+              // 떠 있는 표: 문단 정렬이 아니라 개체의 가로 기준·맞춤을 따른다
+              floatTableX(t, { hAl: attr(tpos, 'horzAlign') || 'LEFT', hRel: attr(tpos, 'horzRelTo') || 'COLUMN', hOff: hwpToPt(i32Attr(tpos, 'horzOffset', 0)) }, pp, ctx.inSub ? 0 : this.pageGeom().ml / PT2PX);
+            } else if (pAttrs.textAlign === 'center' || pAttrs.textAlign === 'right') t.attrs = { ...t.attrs, align: pAttrs.textAlign };
+            else indentByPara(t, pp);
             const cap = this.caption(child);
             const tb = cap ? (cap.top ? [...cap.blocks, t] : [t, ...cap.blocks]) : [t];
-            const tpos = kid(child, 'pos');
             if (segV.length && tpos && attr(tpos, 'treatAsChar') !== '1') {
               // 떠 있는 표는 문단의 글을 쪼개지 않는다. 글이 있는 문단의 첫 줄 자리에 걸친 표는 글을 아래로 밀어내므로 글보다 먼저 온다
               const tOff = hwpToPx(i32Attr(tpos, 'vertOffset', 0));
               const omT = hwpToPx(numAttr(kid(child, 'outMargin'), 'top', 0));
               const tH = hwpToPx(objSize(child).h);
               const tOmB = hwpToPx(numAttr(kid(child, 'outMargin'), 'bottom', 0));
-              if (pushed(tH, tOmB, tOff)) {
+              if (leftOnPrevPage(segV, attr(child, 'textWrap') || '', ctx.inSub ? 'PARA' : attr(tpos, 'vertRelTo') || 'PARA', tOff, { inSub: !!ctx.inSub, hwpPage, pageBreak, hasText })) {
+                // 표는 앞 쪽 끝에 남고 글만 새 쪽으로 넘어왔다: 표를 글 앞에 흐르게 둔다 (앞 블록 바로 뒤)
+                before.push(...tb);
+              } else if (pushed(tH, tOmB, tOff)) {
                 before.push(...tb);
                 leadTables.push({ node: t, h: tH, omB: tOmB, omT });
               } else {
@@ -719,7 +798,7 @@ export class HwpxConverter {
                 after.push(...tb);
                 const rel = ctx.inSub ? 'PARA' : attr(tpos, 'vertRelTo') || 'PARA';
                 if (attr(tpos, 'vertAlign') === 'TOP' || !attr(tpos, 'vertAlign'))
-                  tableTops.set(t, rel === 'PARA' ? segV[0][0] + tOff + omT : rel === 'PAPER' ? tOff + omT - this.pageGeom().mt : tOff + omT);
+                  tableTops.set(t, rel === 'PARA' ? Math.max(0, segV[0][0] - pp.spaceBefore * PT2PX) + tOff + omT : rel === 'PAPER' ? tOff + omT - this.pageGeom().mt : tOff + omT);
               }
             } else {
               flush();
@@ -753,8 +832,17 @@ export class HwpxConverter {
           case 'secPr':
             this.handleSecPr(child);
             break;
+          case 'switch':
+          case 'chart': {
+            // 차트: hp:switch 의 case 에 차트(hp:chart)가, default 에 같은 차트의 OLE 개체가 들어 있다
+            const chart = name === 'chart' ? child : descendant(child, 'chart');
+            const img = chart ? this.chartImage(chart) : null;
+            const ole = img ? null : descendant(child, 'ole');
+            if (img) inline.push(img);
+            else if (ole) inline.push(this.sizedPlaceholder(ole, 'OLE 개체'));
+            break;
+          }
           case 'container':
-          case 'chart':
             flush();
             blocks.push(...this.convertContainer(child));
             this.addCaption(child, captions);
@@ -763,6 +851,17 @@ export class HwpxConverter {
           default:
             if (SHAPES.has(name)) {
               const fp = this.floatPos(child, pp, segV, ctx, pushed);
+              // 글이 없는 선·다각형·곡선·호, 글자처럼 놓인 빈 사각형·타원: 벡터 그림으로 (줄 안에, 또는 떠 있는 자리에)
+              if (!kid(child, 'drawText') && ((name !== 'rect' && name !== 'ellipse') || !fp)) {
+                const img = this.shapeImage(child);
+                if (img) {
+                  if (fp) img.attrs = { ...img.attrs, float: { ...fp, x: r2(fp.x - (pp.indentLeft + Math.max(0, -pp.textIndent)) * PT2PX) } };
+                  else if (attr(kid(child, 'pos'), 'treatAsChar') !== '1') img.attrs = { ...img.attrs, [FLOATING]: true };
+                  inline.push(img);
+                }
+                this.addCaption(child, captions);
+                break;
+              }
               const sub = this.convertShape(child, !!fp);
               if (sub.length && fp) {
                 // 떠 있는 글상자·도형: 문단 앞에 높이 없는 블록으로 두고 그 자리에 띄운다
@@ -804,16 +903,27 @@ export class HwpxConverter {
     }
     /** 한글의 줄 정보가 가리키는 블록: 글 문단 하나이거나, 글자처럼 취급하는 표·글상자 하나 */
     const one = paras.length === 1 ? paras[0] : null;
-    if (one && one.type === 'paragraph' && segV.length && !floating) {
+    // 줄 정보가 낡은 그림 줄 (줄 높이가 줄 안 그림보다 낮다: hwpLayout 의 staleImageLine): 칸 안에서는 줄 높이를 그림 높이로
+    // 바로잡고, 본문에서는 한글 자리를 따르지 않고 자연 배치로 흐르게 한다
+    const stale = one ? staleImageLine(one, segV) : 0;
+    if (one && one.type === 'paragraph' && segV.length && !floating && !(stale && !ctx.inSub)) {
       const a: Record<string, any> = { ...one.attrs, hwpLen: jsonContentSize(one) };
       if (lineSize && lineSegs.every((s) => track.at.has(s[0]))) a.hwpLines = lineSegs.map((s) => [track.at.get(s[0])!, r2(s[1])]);
       // 줄 높이·기준선: 줄 자리를 모두 알거나 한 줄뿐인 문단 (빈 문단 포함)
-      if (a.hwpLines || segV.length === 1) a.hwpVs = segV;
+      if (a.hwpLines || segV.length === 1) a.hwpVs = stale ? [[segV[0][0], stale, segV[0][2], r2(stale * 0.85)]] : segV;
+      if (stale) a.hwpTrail = true;
       one.attrs = a;
     }
+    // 글자처럼 취급하는 표(첫 줄) + 같은 문단의 글(나머지 줄): 글 문단에 한글의 줄 자리를 단다 (hwpLayout 의 tableThenText)
+    const tq = !one && !floating && tableThenText(paras, segV, lineSegs, track.at);
+    if (tq && ctx.inSub) paras[0].attrs = { ...paras[0].attrs, hwpVs: [segV[0]] };
+    // 칸 안에서 자리를 차지하는 그림만 든 문단: 문단 위·아래 간격 없이 그림 높이만 차지한다
+    if (ctx.inSub && floating && one) flowPicturePara(one);
+    // 칸 안의 표(글자처럼 취급): 표가 놓인 줄의 자리 (칸이 쪽에 걸쳐 나뉜 자리를 쪽 나누기가 안다)
+    if (ctx.inSub && one && one.type === 'table' && segV.length === 1) one.attrs = { ...one.attrs, hwpVs: segV };
     if (!ctx.inSub) {
       // 본문: 블록의 쪽 안 세로 위치(테두리 상자의 위쪽). 쪽 나누기가 그 자리에 맞춘다
-      const v0 = segV.length ? segV[0][0] : null;
+      const v0 = segV.length && !stale ? segV[0][0] : null;
       let lead: JNode | null = null;
       if (one && v0 != null) {
         const sb = one.type === 'paragraph' ? pp.spaceBefore * PT2PX : 0;
@@ -836,11 +946,16 @@ export class HwpxConverter {
           if (y >= prevEnd - 2) leadTables.forEach((t, k) => (t.node.attrs = { ...t.node.attrs, hwpTop: r2(Math.max(0, tops[k])) }));
         }
         lead = [...before.filter((x) => x.attrs?.float), one].find((x) => x.attrs?.hwpTop != null) || one;
+      } else if (tq) {
+        placeTableThenText(paras, segV);
+        lead = paras[0];
       }
       for (const [t, top] of tableTops) if (top > -1) t.attrs = { ...t.attrs, hwpTop: r2(Math.max(0, top)) };
       const group = placeCaptions([...blocks.filter((b) => b.type === 'pageBreak'), ...before, ...paras, ...after], captions);
       for (const b of group) {
         if (b.type === 'pageBreak') continue;
+        // 줄 정보가 낡은 문단은 차례를 달지 않는다: 그 쪽의 나머지는 자연 배치로 흐른다
+        if (stale && b === one) continue;
         b.attrs = { ...b.attrs, hwpSeq: ++this.seq };
         if (b.attrs.hwpLen == null) b.attrs.hwpLen = jsonContentSize(b);
       }
@@ -1001,8 +1116,9 @@ export class HwpxConverter {
           this.settings.pageNumber.pos = (pos === 'none' ? 'none' : valid.includes(pos) ? pos : pos.startsWith('top') ? 'top-center' : 'bottom-center') as any;
           this.settings.pageNumber.format =
             ft === 'ROMAN_SMALL' ? 'roman' : ft === 'ROMAN_CAPITAL' ? 'ROMAN' : side === '-' ? 'dash' : 'digit';
-          // 쪽 번호 매기기가 뒤 구역에서 시작하면 앞 쪽들에는 찍지 않는다
-          if (this.pageNo > 0 && pos !== 'none') this.settings.pageNumber.from = this.pageNo;
+          // 쪽 번호 매기기가 뒤쪽에서 시작하면 앞 쪽들에는 찍지 않는다 (처음 나온 자리가 시작 쪽)
+          if (!this.pageNumSeen && this.pageNo > 0 && pos !== 'none') this.settings.pageNumber.from = this.pageNo;
+          this.pageNumSeen = true;
           break;
         }
         case 'footNote':
@@ -1095,7 +1211,82 @@ export class HwpxConverter {
     }
     // 돌린 그림 (한글은 사진의 방향 정보를 따르지 않고 개체를 돌려 둔다)
     const angle = ((Math.round(numAttr(kid(pic, 'rotationInfo'), 'angle', 0)) % 360) + 360) % 360;
-    return { type: 'image', attrs: { src, width: w || null, height: h || null, crop, ...(angle ? { rotate: angle } : {}) } };
+    // 그림 테두리: 선 종류가 '없음'이 아니면 긋는다 (굵기 0 은 가장 가는 선)
+    const ls = kid(pic, 'lineShape');
+    const lst = attr(ls, 'style');
+    const border = ls && lst && lst !== 'NONE' ? { w: Math.max(0.12, round(hwpToMm(numAttr(ls, 'width', 0)), 2)), c: normColor(attr(ls, 'color')) || '#000000' } : null;
+    return { type: 'image', attrs: { src, width: w || null, height: h || null, crop, ...(angle ? { rotate: angle } : {}), ...(border ? { border } : {}) } };
+  }
+
+  /** 글이 없는 그리기 개체(선·사각형·타원·다각형·곡선·호·연결선) → 벡터 그림 노드. 그릴 수 없으면 null */
+  private shapeImage(el: Element): JNode | null {
+    const name = localName(el);
+    const sz = objSize(el, true);
+    const w = hwpToPx(sz.w);
+    const h = hwpToPx(sz.h);
+    const org = kid(el, 'orgSz');
+    const ow = Math.abs(i32Attr(org, 'width', 0)) || sz.w || 1;
+    const oh = Math.abs(i32Attr(org, 'height', 0)) || sz.h || 1;
+    const flip = kid(el, 'flip');
+    const fx = attr(flip, 'horizontal') === '1';
+    const fy = attr(flip, 'vertical') === '1';
+    /** 원래 크기 좌표 → 지금 상자 안 px (뒤집기 반영) */
+    const P = (e: Element | null, xn = 'x', yn = 'y'): [number, number] => {
+      const x = (i32Attr(e, xn, 0) / ow) * w;
+      const y = (i32Attr(e, yn, 0) / oh) * h;
+      return [fx ? w - x : x, fy ? h - y : y];
+    };
+    const ls = kid(el, 'lineShape');
+    const lst = attr(ls, 'style') || 'SOLID';
+    const fillEl = kid(el, 'fillBrush');
+    const st = {
+      stroke: ls && lst !== 'NONE' ? normColor(attr(ls, 'color')) || '#000000' : null,
+      sw: Math.max(0.45, hwpToPx(numAttr(ls, 'width', 33))),
+      line: lst,
+      fill: fillEl ? normColor(attr(kid(fillEl, 'winBrush'), 'faceColor')) : null,
+      headStart: !!ls && (attr(ls, 'headStyle') || 'NORMAL') !== 'NORMAL',
+      headEnd: !!ls && (attr(ls, 'tailStyle') || 'NORMAL') !== 'NORMAL',
+    };
+    let g: ShapeGeom | null = null;
+    if (name === 'line' || name === 'connectLine') {
+      const a = kid(el, 'startPt');
+      const b = kid(el, 'endPt');
+      g = { kind: 'line', pts: a && b ? [P(a), P(b)] : [[0, 0], [w, h]] };
+      st.fill = null;
+    } else if (name === 'rect') {
+      const ratio = numAttr(el, 'ratio', 0);
+      g = { kind: 'rect', rx: ratio > 0 ? (Math.min(w, h) * Math.min(50, ratio)) / 100 : 0 };
+    } else if (name === 'ellipse') g = { kind: 'ellipse' };
+    else if (name === 'polygon') {
+      const pts = kids(el, 'pt').map((p) => P(p));
+      if (pts.length >= 2) g = { kind: 'polyline', pts, closed: true };
+    } else if (name === 'curve') {
+      const segs = kids(el, 'seg');
+      const pts: [number, number][] = [];
+      segs.forEach((s, i) => {
+        if (i === 0) pts.push(P(s, 'x1', 'y1'));
+        pts.push(P(s, 'x2', 'y2'));
+      });
+      if (pts.length >= 2) {
+        const closed = Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][1] - pts[pts.length - 1][1]) < 0.5;
+        g = { kind: 'polyline', pts, closed, smooth: segs.some((s) => attr(s, 'type') === 'CURVE') };
+        if (!closed) st.fill = null;
+      }
+    } else if (name === 'arc') {
+      const c = P(kid(el, 'center'));
+      const a1 = P(kid(el, 'ax1'));
+      const a2 = P(kid(el, 'ax2'));
+      const rx = Math.max(Math.abs(a1[0] - c[0]), Math.abs(a2[0] - c[0]), 0.5);
+      const ry = Math.max(Math.abs(a1[1] - c[1]), Math.abs(a2[1] - c[1]), 0.5);
+      const type = attr(el, 'type') || 'NORMAL';
+      g = { kind: 'arc', cx: c[0], cy: c[1], rx, ry, a0: Math.atan2((a1[1] - c[1]) / ry, (a1[0] - c[0]) / rx), a1: Math.atan2((a2[1] - c[1]) / ry, (a2[0] - c[0]) / rx), pie: type === 'PIE', chord: type === 'CHORD' };
+      if (type === 'NORMAL') st.fill = null;
+    }
+    if (!g) return null;
+    const im = shapeToImage(w, h, g, st);
+    if (!im) return null;
+    const angle = ((Math.round(numAttr(kid(el, 'rotationInfo'), 'angle', 0)) % 360) + 360) % 360;
+    return { type: 'image', attrs: { src: im.src, width: im.width, height: im.height, pad: im.pad, alt: '도형', ...(angle ? { rotate: angle } : {}) } };
   }
 
   /** 글상자 등 도형 → 글상자 노드 (크기·테두리·배경을 가진 상자 안의 문단) */
@@ -1119,8 +1310,8 @@ export class HwpxConverter {
     const ls = kid(shape, 'lineShape');
     const lineStyle = attr(ls, 'style');
     const borderColor = ls && lineStyle !== 'NONE' && numAttr(ls, 'width', 1) > 0 ? normColor(attr(ls, 'color')) || '#000000' : null;
-    // 선 굵기 단위는 0.01mm
-    const borderWidth = borderColor ? Math.max(0.75, Math.min(8, numAttr(ls, 'width', 12) * 0.0378)) : null;
+    // 선 굵기 단위는 HWPUNIT (33 = 0.12mm)
+    const borderWidth = borderColor ? Math.max(0.5, Math.min(12, hwpToPx(numAttr(ls, 'width', 33)))) : null;
     const tm = kid(dt, 'textMargin');
     const padding = tm ? ['top', 'right', 'bottom', 'left'].map((k) => Math.round(hwpToPx(numAttr(tm, k, 283)))) : null;
     let radius: string | null = null;
@@ -1154,7 +1345,7 @@ export class HwpxConverter {
     const rowCnt = numAttr(tbl, 'rowCnt', 0);
     const rowH: number[] = [];
     /** 여러 줄을 합친 칸: 첫 줄, 줄 수, 칸 높이(HWPUNIT). 낱칸이 없는 줄의 높이를 여기서 거꾸로 셈한다 */
-    const spans: { row: number; rs: number; h: number; need: number; last: JNode | null }[] = [];
+    const spans: { row: number; rs: number; h: number; need: number }[] = [];
     kids(tbl, 'tr').forEach((tr, ri) => {
       kids(tr, 'tc').forEach((tc, ci) => {
         const addr = kid(tc, 'cellAddr');
@@ -1167,33 +1358,19 @@ export class HwpxConverter {
         const rs = Math.max(1, Math.min(4096, numAttr(span, 'rowSpan', 1)));
         const w = hwpToPx(numAttr(sz, 'width', 0));
         if (rs === 1) rowH[row] = Math.max(rowH[row] || 0, hwpToPx(numAttr(sz, 'height', 0) - CELL_VMARGIN_HWP));
-        else spans.push({ row, rs, h: numAttr(sz, 'height', 0), need: 0, last: null });
+        else spans.push({ row, rs, h: numAttr(sz, 'height', 0), need: 0 });
         const bf = this.h.borderFills.get(attr(tc, 'borderFillIDRef') || '');
         const cmw = kid(tc, 'cellMargin');
         let content = this.convertParagraphs(kids(sub, 'p'), { inSub: true, width: w - hwpToPx(numAttr(cmw, 'left', 510) + numAttr(cmw, 'right', 510)) });
         content = content.filter((n) => n.type !== 'pageBreak');
         if (!content.length) content = [paragraph()];
-        // 적힌 칸 높이가 글(마지막 줄의 글자 높이까지)보다 작으면 한글은 칸 높이를 내용으로 새로 셈하고, 그때는 마지막 줄 간격과
-        // 문단 아래 간격까지 넣는다. 칸 높이가 유효하면 그 높이를 지키고 마지막 줄 뒤 간격은 세지 않는다
-        {
-          const lastP = content[content.length - 1];
-          const vs = lastP.type === 'paragraph' ? (lastP.attrs?.hwpVs as number[][] | undefined) : undefined;
-          if (vs && vs.length) {
-            const l = vs[vs.length - 1];
-            const vm = hwpToPx(numAttr(cmw, 'top', 141) + numAttr(cmw, 'bottom', 141));
-            const textOnly = l[0] + l[1] + vm;
-            if (hwpToPx(numAttr(sz, 'height', 0)) < textOnly - 1) {
-              lastP.attrs = { ...lastP.attrs, hwpTrail: true };
-              // 여러 줄을 합친 칸: 내용이 요구하는 높이 (마지막 줄 간격·문단 아래 간격 포함). 모자란 만큼은 합친 마지막 줄이 늘어난다
-              if (rs > 1) {
-                const sp = spans[spans.length - 1];
-                sp.need = textOnly + l[2] + (+lastP.attrs.spaceAfter || 0) * PT2PX;
-                sp.last = lastP;
-              }
-            }
-          }
-        }
+        // 칸의 내용이 요구하는 높이 (위 맞춤 칸은 마지막 줄 간격·문단 아래 간격까지 든다: hwpLayout 의 markCellTrail).
+        // 여러 줄을 합친 칸: 내용이 덮은 줄들보다 크면 모자란 만큼 합친 마지막 줄이 늘어난다
         const va = attr(sub, 'vertAlign');
+        {
+          const need = markCellTrail(content, hwpToPx(numAttr(sz, 'height', 0)), hwpToPx(numAttr(cmw, 'top', 141) + numAttr(cmw, 'bottom', 141)), va === 'TOP');
+          if (rs > 1 && need > 0) spans[spans.length - 1].need = need;
+        }
         const attrs: Record<string, any> = { colspan: cs, rowspan: rs, colwidth: null };
         if (bf?.bg) attrs.backgroundColor = bf.bg;
         if (bf?.gradient) attrs.bgGradient = bf.gradient;
@@ -1283,6 +1460,8 @@ export class HwpxConverter {
     if (inM) tAttrs.cellPadding = Math.round(hwpToPx((numAttr(inM, 'left', 510) + numAttr(inM, 'right', 510)) / 2) * 10) / 10;
     const pos = kid(tbl, 'pos');
     if (attr(pos, 'treatAsChar') === '1') tAttrs.inline = true;
+    const pb = attr(tbl, 'pageBreak');
+    tAttrs.hwpSplit = pb === 'CELL' ? 'cell' : pb === 'NONE' ? 'none' : 'row';
     const outM = kid(tbl, 'outMargin');
     if (outM) tAttrs.outMargin = ['left', 'right', 'top', 'bottom'].map((k) => Math.round(hwpToPx(numAttr(outM, k, 283)) * 10) / 10);
     // 떠 있는 표(글자처럼 취급 아님)가 문단 기준으로 아래로 떨어져 있으면 그만큼 위 여백으로 (Kite 에는 떠 있는 개체가 없다)
@@ -1291,6 +1470,8 @@ export class HwpxConverter {
       if (vOff > 0.5) {
         const m = tAttrs.outMargin || [0, 0, 0, 0];
         tAttrs.outMargin = [m[0], m[1], Math.round((m[2] + vOff) * 10) / 10, m[3]];
+        // 표가 이어지는 쪽에서는 이 오프셋이 들지 않는다 (쪽 나누기가 뺀다)
+        tAttrs.hwpVOff = Math.round((tAttrs.outMargin[2] - m[2]) * 10) / 10;
       }
     }
     const out: JNode = { type: 'table', attrs: tAttrs, content: rows };
@@ -1394,7 +1575,15 @@ export async function readHwpx(data: Uint8Array): Promise<LoadedDoc> {
   }
   const settings = defaultSettings();
   settings.hwpMetrics = true;
+  // 쪽 번호는 '쪽 번호' 스타일의 글자 모양으로 찍힌다
+  applyPageNumStyle(settings, [...header.styles.values()].filter((s) => s.name === '쪽 번호' || s.name === 'Page Number').map((s) => header.charPrs.get(s.charPr)).find(Boolean));
   const conv = new HwpxConverter(header, images, settings, warnings);
+  // 차트 정의 (Chart/chartN.xml)
+  for (const name of Object.keys(zip.files)) {
+    if (!/^chart\/[^/]+\.xml$/i.test(name)) continue;
+    const xml = await zipText(zip, name);
+    if (xml && xml.length < 4_000_000) conv.charts.set(name.toLowerCase(), xml);
+  }
   const blocks: JNode[] = [];
   for (let i = 0; i < sectionPaths.length; i++) {
     const xml = await zipText(zip, sectionPaths[i]);
@@ -1409,6 +1598,17 @@ export async function readHwpx(data: Uint8Array): Promise<LoadedDoc> {
   }
   while (blocks.length && blocks[0].type === 'pageBreak') blocks.shift();
   return { content: docNode(blocks), settings, meta, warnings: dedupe(warnings) };
+}
+
+/** 쪽 번호의 글자 모양을 설정에 담는다 */
+export function applyPageNumStyle(settings: DocSettings, cp: CharPr | undefined) {
+  if (!cp) return;
+  const pn = settings.pageNumber;
+  if (cp.fontFamily) pn.fontFamily = cp.fontFamily;
+  if (cp.fontSize) pn.fontSize = cp.fontSize;
+  if (cp.bold) pn.bold = true;
+  if (cp.italic) pn.italic = true;
+  if (cp.color && cp.color !== '#000000') pn.color = cp.color;
 }
 
 function dedupe(a: string[]) {

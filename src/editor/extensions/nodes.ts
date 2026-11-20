@@ -11,7 +11,7 @@ import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } fro
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import { viewState } from '../viewState';
 import { cleanMargins } from '../../formats/flatten';
-import { normColor } from '../../formats/common';
+import { normColor, parseBorderCss, type BorderSide } from '../../formats/common';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -149,6 +149,51 @@ export const TabStop = Mark.create({
   },
 });
 
+// ---------------- 문단 머리 (글머리표·문단 번호) ----------------
+/**
+ * 한글 문서의 문단 머리 글자(글머리표·문단 번호)에 붙는 마크. 한글은 머리를 '머리 글자 폭 + 본문과의 거리' 폭의 상자에 놓고,
+ * 자동 내어쓰기면 둘째 줄부터 그 폭만큼 들인다. 폭과 내어쓰기는 hwpMetrics 가 화면에서 재서 만든다 (화면 전용)
+ */
+export const ParaHeadMark = Mark.create({
+  name: 'paraHead',
+  inclusive: false,
+  addAttributes() {
+    const num = (name: string, def: number | null) => ({
+      default: def,
+      parseHTML: (el: HTMLElement) => {
+        const v = parseFloat(el.getAttribute('data-' + name) || '');
+        return Number.isFinite(v) ? v : def;
+      },
+      renderHTML: (a: Record<string, any>) => (a[name] == null || !Number.isFinite(+a[name]) ? {} : { ['data-' + name]: String(+a[name]) }),
+    });
+    return {
+      /** 머리 상자 안 정렬 */
+      align: {
+        default: 'left',
+        parseHTML: (el: HTMLElement) => (['left', 'center', 'right'].includes(el.getAttribute('data-align') || '') ? el.getAttribute('data-align') : 'left'),
+        renderHTML: (a: Record<string, any>) => (a.align === 'center' || a.align === 'right' ? { 'data-align': a.align } : {}),
+      },
+      /** 자동 내어쓰기 */
+      auto: {
+        default: false,
+        parseHTML: (el: HTMLElement) => el.getAttribute('data-auto') === '1',
+        renderHTML: (a: Record<string, any>) => (a.auto ? { 'data-auto': '1' } : {}),
+      },
+      /** 너비 조정 (px) */
+      adj: num('adj', 0),
+      /** 본문과의 거리: 글자 크기의 % 또는 값(px) */
+      pct: num('pct', null),
+      gap: num('gap', null),
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'span.k-phead' }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ['span', mergeAttributes({ class: 'k-phead' }, HTMLAttributes), 0];
+  },
+});
+
 // ---------------- 그림 (크기 조절·자르기) ----------------
 export interface Crop {
   t: number;
@@ -189,6 +234,10 @@ export const KImage = Image.extend({
       float: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       /** 돌린 각도(도, 시계 방향). 한글 문서 화면 전용 */
       rotate: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 그림 둘레의 넉넉한 테(px): 자리는 테를 뺀 크기(도형 상자)이고 그림은 그 밖으로 테만큼 나간다 (한글 도형의 선). 화면 전용 */
+      pad: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 그림 테두리 { w: 굵기(mm), c: 색 } (한글 문서의 그림 테두리). 화면 전용 */
+      border: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       /** 잘라 낸 비율 (0~1): 위/오른쪽/아래/왼쪽 */
       crop: {
         default: null,
@@ -251,6 +300,25 @@ export const KImage = Image.extend({
         wrap.style.top = fl ? fl.y + 'px' : '';
         const rot = Number(n.attrs.rotate);
         wrap.style.transform = Number.isFinite(rot) && rot % 360 ? `rotate(${rot}deg)` : '';
+        // 도형 그림: 자리는 도형 상자 크기(테를 뺀 크기)만 차지하고, 그림은 상자 밖으로 테만큼 나간다 (선이 상자 경계에 걸친다).
+        // 글자처럼 놓일 때는 상자의 아래가 기준선에 온다 (높이 0 인 가로선은 기준선 위에)
+        const pad = Number(n.attrs.pad);
+        const padded = Number.isFinite(pad) && pad > 0 && pad < 200 && !cropOf(n.attrs.crop);
+        if (padded) {
+          wrap.style.width = Math.max(0, (Number(n.attrs.width) || 0) - 2 * pad) + 'px';
+          wrap.style.height = Math.max(0, (Number(n.attrs.height) || 0) - 2 * pad) + 'px';
+        }
+        wrap.style.verticalAlign = padded && !fl ? 'baseline' : '';
+        wrap.style.maxWidth = padded ? 'none' : '';
+        img.style.maxWidth = padded ? 'none' : '';
+        img.style.position = padded ? 'absolute' : '';
+        img.style.left = padded ? `-${pad}px` : '';
+        img.style.top = padded ? `-${pad}px` : '';
+        // 그림 테두리: 그림자로 긋는다 (인쇄해도 굵기가 그대로. 화면에서는 화면 점 하나보다 가늘지 않게)
+        const bd = n.attrs.border;
+        const bw = bd && typeof bd === 'object' ? Number(bd.w) : NaN;
+        const bc = bd && typeof bd === 'object' ? normColor(bd.c) : null;
+        wrap.style.boxShadow = Number.isFinite(bw) && bw > 0 && bw < 20 && bc ? `0 0 0 max(${bw}mm, var(--k-hair, 0px)) ${bc}` : '';
       };
       apply(node);
       // 그림이 로드되면 그 블록의 높이만 달라지므로 위치를 알려 그 부분만 다시 재게 한다
@@ -530,6 +598,87 @@ function cleanDiag(v: any): { slash: boolean; back: boolean; c: string; zw: numb
   return { slash: !!v.slash, back: !!v.back, c: normColor(v.c) || '#000000', zw: num(v.zw, 100, 100, 100000), zh: num(v.zh, 100, 100, 100000), px: num(v.px, 0, 0, 100), py: num(v.py, 0, 0, 100) };
 }
 
+/**
+ * 한글 문서의 칸 테두리 값 (editor.css 의 td::before 가 쓴다). CSS 테두리는 인쇄할 때 굵기가 px 단위로 맞춰져
+ * 0.12mm 선도 0.4mm 선도 1px 로 찍히므로, 한글 문서는 실제 굵기의 그림자로 선을 긋는다.
+ * 실선은 굵기(--bw?)·색(--bc?)을 넘기고, 점선·이중선은 그림자로 긋지 않고(--n?: 0) 그림으로 그린다 (hwpBorderImage)
+ */
+function hwpBorderVars(css: string): string {
+  const sides = parseBorderCss(css);
+  const out: string[] = [];
+  for (const k of ['t', 'b', 'l', 'r'] as const) {
+    const v: BorderSide | undefined = sides[k];
+    if (!v) continue;
+    if (v.s !== 'solid') {
+      out.push(`--n${k}: 0`);
+      continue;
+    }
+    out.push(`--bw${k}: ${Math.round(Math.max(0.05, Math.min(10, v.w)) * 1000) / 1000}mm`, `--bc${k}: ${v.c}`);
+  }
+  return out.join('; ');
+}
+
+let bxSheet: HTMLStyleElement | null = null;
+const bxKeys = new Map<string, string>();
+const BX_SCOPE = ':is(.workspace.hwp-metrics .ProseMirror, .kdoc-content.hwp-metrics) :is(td, th)';
+/**
+ * 점선·이중선 테두리 그림 (SVG) 규칙을 (값마다 한 번) 만들고 그 키를 돌려준다. 실선뿐이면 null.
+ * 그림은 칸 경계에서 4px 밖까지 덮는 겹(td::after)에 꼭 맞게 그려진다. 선은 실선처럼 경계에서 위·왼쪽으로 굵기만큼 차지한다.
+ * 화면용은 가는 선도 1px 보다 가늘지 않게, 인쇄용은 실제 굵기로
+ */
+function hwpBorderImage(css: string): string | null {
+  const sides = parseBorderCss(css);
+  const ks = (['t', 'b', 'l', 'r'] as const).filter((k) => sides[k] && sides[k]!.s !== 'solid');
+  if (!ks.length) return null;
+  const id = ks.map((k) => `${k}:${sides[k]!.w}:${sides[k]!.s}:${sides[k]!.c}`).join(';');
+  let key = bxKeys.get(id);
+  if (key) return key;
+  key = 'b' + bxKeys.size.toString(36);
+  bxKeys.set(id, key);
+  if (typeof document === 'undefined') return key;
+  const N = 4;
+  const n = (v: number) => String(Math.round(v * 1000) / 1000);
+  const svg = (minPx: number) => {
+    let body = '';
+    for (const k of ks) {
+      const v = sides[k]!;
+      const w = Math.max(minPx, Math.max(0.05, Math.min(5, v.w)) * (96 / 25.4));
+      // [경계에서 선 가운데까지, 선 굵기, 점선 무늬]
+      const strokes: [number, number, string][] =
+        v.s === 'double'
+          ? // 이중선: 한글은 굵기의 0.42배인 두 줄을 가운데 사이 1.27배로 긋는다 (한글 PDF 로 잰 값)
+            [
+              [-0.5 - 0.635 * w, Math.max(minPx, 0.42 * w), ''],
+              [-0.5 + 0.635 * w, Math.max(minPx, 0.42 * w), ''],
+            ]
+          : // 점선: 한글의 마디는 굵기의 4/3배, 틈은 2배 (한글 PDF 로 잰 값). 원형 점선은 마디와 틈을 굵기만큼
+            [[-w / 2, w, v.s === 'dashed' ? `${n((w * 4) / 3)} ${n(w * 2)}` : `${n(w)} ${n(w)}`]];
+      for (const [off, sw, dash] of strokes) {
+        const st = `stroke='${v.c}' stroke-width='${n(sw)}'` + (dash ? ` stroke-dasharray='${dash}'` : '');
+        if (k === 't') body += `<line x1='${2 * N}' y1='${n(N + off)}' x2='100%' y2='${n(N + off)}' transform='translate(${-N} 0)' ${st}/>`;
+        else if (k === 'b') body += `<line x1='${2 * N}' y1='100%' x2='100%' y2='100%' transform='translate(${-N} ${n(-N + off)})' ${st}/>`;
+        else if (k === 'l') body += `<line x1='${n(N + off)}' y1='${2 * N}' x2='${n(N + off)}' y2='100%' transform='translate(0 ${-N})' ${st}/>`;
+        else body += `<line x1='100%' y1='${2 * N}' x2='100%' y2='100%' transform='translate(${n(-N + off)} ${-N})' ${st}/>`;
+      }
+    }
+    const doc = `<svg xmlns='http://www.w3.org/2000/svg' width='100%' height='100%'>${body}</svg>`;
+    return `url("data:image/svg+xml,${encodeURIComponent(doc).replace(/'/g, '%27').replace(/"/g, '%22')}")`;
+  };
+  if (!bxSheet) {
+    bxSheet = document.createElement('style');
+    bxSheet.id = 'kite-cell-border-images';
+    document.head.appendChild(bxSheet);
+  }
+  bxSheet.appendChild(
+    document.createTextNode(
+      `${BX_SCOPE}[data-bx="${key}"]::after { background-image: ${svg(1)}; }
+@media print { ${BX_SCOPE}[data-bx="${key}"]::after { background-image: ${svg(0)}; } }
+`,
+    ),
+  );
+  return key;
+}
+
 const cellAttrs = {
   backgroundColor: {
     default: null,
@@ -567,8 +716,9 @@ const cellAttrs = {
       if (!d) return {};
       const line = (dir: string) => `linear-gradient(to ${dir}, transparent calc(50% - 0.5px), ${d.c} calc(50% - 0.5px), ${d.c} calc(50% + 0.5px), transparent calc(50% + 0.5px))`;
       // 모서리로 향하는 그러데이션의 50% 선은 나머지 두 모서리를 지난다: 'top right' → ＼, 'bottom right' → ／
-      const img = [d.back ? line('top right') : '', d.slash ? line('bottom right') : ''].filter(Boolean).join(', ');
-      return { 'data-diag': JSON.stringify(d), style: `--dg: ${img}; --dg-size: ${d.zw}% ${d.zh}%; --dg-pos: ${d.px}% ${d.py}%` };
+      const imgs = [d.back ? line('top right') : '', d.slash ? line('bottom right') : ''].filter(Boolean);
+      // --dg: 대각선 그림 모두(예전 방식의 규칙용), --dg1·--dg2: 한 겹씩 (한글 문서는 테두리 겹과 함께 그린다)
+      return { 'data-diag': JSON.stringify(d), style: `--dg: ${imgs.join(', ')}; --dg1: ${imgs[0]}; --dg2: ${imgs[1] || 'none'}; --dg-size: ${d.zw}% ${d.zh}%; --dg-pos: ${d.px}% ${d.py}%` };
     },
   },
   verticalAlign: {
@@ -591,7 +741,8 @@ const cellAttrs = {
         })
         .filter(Boolean)
         .join('; ');
-      return { 'data-border-css': a.borderCss, style };
+      const bx = hwpBorderImage(String(a.borderCss));
+      return { 'data-border-css': a.borderCss, ...(bx ? { 'data-bx': bx } : {}), style: [style, hwpBorderVars(String(a.borderCss))].filter(Boolean).join('; ') };
     },
   },
   /** 칸 자체 안 여백 [왼, 오른, 위, 아래] (px) — 한글 문서의 '칸 여백 지정'. 없으면 표 기본 */
@@ -774,8 +925,14 @@ class KTableView extends TableView {
     const om = cleanMargins(node.attrs.outMargin);
     const left = (indent ? indent * (96 / 72) : 0) + (om && !align ? om[0] : 0);
     t.style.marginLeft = align === 'center' || align === 'right' ? 'auto' : left ? left.toFixed(1) + 'px' : '';
-    t.style.marginRight = align === 'center' ? 'auto' : '';
-    t.style.marginTop = om && om[2] ? om[2] + 'px' : '';
+    // 오른쪽 정렬 표는 한글처럼 오른쪽 바깥 여백만큼 본문 끝에서 떨어진다
+    t.style.marginRight = align === 'center' ? 'auto' : align === 'right' && om && om[1] ? om[1] + 'px' : '';
+    const gap = typeof node.attrs.hwpGap === 'number' && node.attrs.hwpGap > 0 && node.attrs.hwpGap < 4000 ? node.attrs.hwpGap : 0;
+    t.style.marginTop = (om && om[2]) || gap ? ((om ? om[2] : 0) + gap).toFixed(2) + 'px' : '';
+    // 표가 이어지는 쪽에서의 위 바깥 여백 (되풀이하는 제목 줄·여는 선의 자리: 세로 오프셋과 칸 안 간격은 첫 쪽에서만 든다)
+    const vOff = typeof node.attrs.hwpVOff === 'number' && node.attrs.hwpVOff > 0 ? node.attrs.hwpVOff : 0;
+    if (om && om[2]) t.setAttribute('data-om-top', Math.max(0, om[2] - vOff).toFixed(2));
+    else t.removeAttribute('data-om-top');
     t.style.marginBottom = om && om[3] ? om[3] + 'px' : '';
   }
 }
@@ -823,6 +980,7 @@ export const KTable = Table.extend({
           // 한글처럼 위·아래 바깥 여백만큼 표를 띄운다 (왼쪽 여백은 정렬이 없을 때만: 가운데·오른쪽 정렬은 CSS 가 자리를 정한다)
           const st = [`margin-top: ${v[2]}px`, `margin-bottom: ${v[3]}px`];
           if (!a.align && v[0]) st.push(`margin-left: ${v[0]}px`);
+          if (a.align === 'right' && v[1]) st.push(`margin-right: ${v[1]}px`);
           return { 'data-out-margin': JSON.stringify(v), style: st.join('; ') };
         },
       },
@@ -832,6 +990,14 @@ export const KTable = Table.extend({
       hwpTop: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       hwpSeq: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       hwpLen: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 칸·글상자 안에서 앞 블록과 더 벌어진 간격(px): 표가 놓인 문단의 위 간격 등 (화면 전용) */
+      hwpGap: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 위 바깥 여백에 더해 둔 세로 오프셋(px: 떠 있는 표가 문단에서 떨어진 거리). 표가 이어지는 쪽에서는 들지 않는다 (화면 전용) */
+      hwpVOff: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 한글의 '쪽 경계에서': cell(셀 단위로 나눔: 칸 안에서도 나눈다) · row(나눔: 줄 단위) · none(나누지 않음) */
+      hwpSplit: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 칸 안의 표(글자처럼 취급): 표가 놓인 줄의 자리 [[줄 위쪽, 줄 높이, 줄 아래 간격, 기준선]] — 칸이 쪽에 걸쳐 나뉜 자리를 안다 */
+      hwpVs: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       borderless: {
         default: false,
         parseHTML: (el: HTMLElement) => el.getAttribute('data-borderless') === 'true',

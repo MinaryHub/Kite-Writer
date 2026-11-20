@@ -4,7 +4,7 @@ import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
 import type { PageSetup } from '../types';
 import { useApp } from '../app/hooks';
-import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown } from '../print';
+import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown, pageNumHtml, pageNumStyle } from '../print';
 import { sectionsKey } from '../editor/extensions/sections';
 import { formatPageNumber, splitExt } from '../formats/common';
 import { applyFormatPainter, insertImagesFromFiles } from '../app/commands';
@@ -198,9 +198,11 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     // 쪽 경계 가리개 (본문 끝 → 다음 쪽 본문 시작). 다음 쪽의 용지가 다를 수 있다
     const maskTop = top + g.mt + g.contentH;
     const next = plans[k + 1];
+    // 표 줄이 본문 끝 아래로 나온 쪽(한글처럼 글이 다 들어간 줄은 넘기지 않는다): 그 높이만큼은 가리지 않는다
+    const over = Math.min(g.mb, Math.max(0, ...(tab.layout.overs || []).filter((o) => o.page === k).map((o) => o.h)));
     chrome.push(
       <div key={'m' + k} className="mask" style={{ top: maskTop, width: W, height: next ? next.top + next.g.mt - maskTop : g.mb }}>
-        <div className="m-paper" style={{ top: 0, left, width: g.W, height: g.mb, ...(pageBackgroundStyle(s, k, g.mt + g.contentH) || {}) }} />
+        <div className="m-paper" style={{ top: over, left, width: g.W, height: g.mb - over, ...(pageBackgroundStyle(s, k, g.mt + g.contentH + over) || {}) }} />
         {next && <div className="m-gap" style={{ top: g.mb, height: g.gap }} />}
         {next && <div className="m-paper" style={{ top: next.top - maskTop, left: next.left, width: next.g.W, height: next.g.mt, ...(pageBackgroundStyle(s, k + 1) || {}) }} />}
       </div>,
@@ -218,7 +220,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
     const ft = hfAt(s, 'footer', k);
     const hRich = hd ? hfRichHtml(hd) : null;
     const fRich = ft ? hfRichHtml(ft) : null;
-    const rich = (html: string) => <div className="kdoc-content hf-rich" dangerouslySetInnerHTML={{ __html: hfText(html, num, total, s.pageNumber.format) }} />;
+    const rich = (html: string) => <div className={'kdoc-content hf-rich' + (s.hwpMetrics ? ' hwp-metrics' : '')} dangerouslySetInnerHTML={{ __html: hfText(html, num, total, s.pageNumber.format) }} />;
     chrome.push(
       <div
         key={'h' + k}
@@ -256,12 +258,12 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
             justifyContent: h === 'left' ? 'flex-start' : h === 'right' ? 'flex-end' : 'center',
           }}
         >
-          {formatPageNumber(num, s.pageNumber.format)}
+          <span style={pageNumStyle(s, v === 'top')} dangerouslySetInnerHTML={{ __html: pageNumHtml(s, num) }} />
         </div>,
       );
     }
     // 표가 이어지는 쪽 맨 위의 제목 줄 (쪽 나누기가 비워 둔 자리)
-    if (tab.layout.repeats?.some((r) => r.page === k) || tab.layout.cuts?.some((c) => c.page === k)) {
+    if (tab.layout.repeats?.some((r) => r.page === k) || tab.layout.cuts?.some((c) => c.page === k || c.page === k - 1)) {
       chrome.push(<div key={'rh' + k} className="pg-repeat-layer" style={{ position: 'absolute', left, top, width: g.W, height: g.H, pointerEvents: 'none' }} dangerouslySetInnerHTML={{ __html: repeatHeadsHtml(tab, g, k) }} />);
     }
     const fns = tab.layout.footnotes.filter((f) => f.page === k);
@@ -295,7 +297,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
       onScroll={() => window.dispatchEvent(new Event('kite:scroll'))}
     >
       <div className="stage-wrap" style={{ width: W * zoom, height: stageH * zoom + 64 }}>
-        <div className="stage" ref={stageRef} style={{ width: W, height: stageH, transform: `scale(${zoom})` }} onMouseDown={onStageMouseDown}>
+        <div className="stage" ref={stageRef} style={{ width: W, height: stageH, transform: `scale(${zoom})`, ['--k-hair' as any]: `${(1 / (zoom || 1)).toFixed(3)}px` }} onMouseDown={onStageMouseDown}>
           {pages}
           <div
             className="editor-host"

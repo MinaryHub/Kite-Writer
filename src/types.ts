@@ -54,6 +54,12 @@ export interface PageNumbering {
   base?: number;
   /** 이 쪽(0부터)부터 쪽 번호를 찍는다 (없으면 첫 쪽부터) */
   from?: number;
+  /** 쪽 번호의 글자 모양 (한글 문서의 '쪽 번호' 스타일). 없으면 기본 모양 */
+  fontFamily?: string;
+  fontSize?: number;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
 }
 
 export interface DocSettings {

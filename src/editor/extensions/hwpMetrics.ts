@@ -95,6 +95,8 @@ interface Piece {
   font: string | null;
   /** 줄 끝 빈칸: 폭 0 으로 (한글은 줄 끝 빈칸을 줄 폭에 넣지 않는다) */
   hang?: boolean;
+  /** 문단 머리(글머리표·문단 번호): width 폭의 상자에 놓는다. sb 는 머리 글자 뒤 빈칸의 폭(상자 안에서 없앤다) */
+  head?: { align: string; auto: boolean; sb: number };
 }
 
 /**
@@ -107,11 +109,13 @@ function piecesFor(node: PMNode, pos: number, parent: PMNode, cuts: number[]): P
   let ts: Record<string, any> | null = null;
   let bold = false;
   let italic = false;
+  let head: Record<string, any> | null = null;
   for (const m of node.marks) {
     const n = m.type.name;
     if (n === 'textStyle') ts = m.attrs;
     else if (n === 'bold') bold = true;
     else if (n === 'italic') italic = true;
+    else if (n === 'paraHead') head = m.attrs;
     else if (n === 'superscript' || n === 'subscript' || n === 'tab') return null;
   }
   // 제목 문단처럼 글자 크기를 문단 모양이 정하는 경우는 잴 수 없으므로 건드리지 않는다
@@ -123,6 +127,27 @@ function piecesFor(node: PMNode, pos: number, parent: PMNode, cuts: number[]): P
   const spacing = Math.max(-50, Math.min(50, +(ts?.letterSpacing || 0)));
   const f = (ratio / 100) * (1 + spacing / 100);
   const sizePx = sizePt * PT2PX;
+
+  // 문단 머리(글머리표·문단 번호): 한글은 '머리 글자의 폭 + 너비 조정 + 본문과의 거리' 폭의 상자에 머리를 놓는다.
+  // 머리 글자의 폭은 영문·숫자·문장 부호는 글꼴의 폭, 그 밖의 글자(기호·한글)는 전각이다 (한글 PDF 로 잰 값:
+  // 10pt '•' 머리의 폭 15pt = 전각 10 + 거리 50%, 12pt '-' 머리의 폭 12pt = 반각 6 + 거리 50%). 자간은 들지 않는다
+  if (head) {
+    const body = text.replace(/[ \u00a0]+$/, '');
+    const enFont = typeof lf.en === 'string' ? lf.en : family;
+    const font = `${italic ? 'italic ' : ''}normal ${sizePx}px ${fontStack(enFont, { canvas: true })}`;
+    let ascii = '';
+    let wide = 0;
+    for (const ch of body) {
+      if (ch.codePointAt(0)! < 0x80) ascii += ch;
+      else wide++;
+    }
+    const aw = ascii ? measure(font, ascii) : 0;
+    const sb = spaceWidth(`${italic ? 'italic ' : ''}${bold ? 'bold' : 'normal'} ${sizePx}px ${fontStack(family, { canvas: true })}`);
+    if (aw == null || sb == null) return null;
+    const gap = head.gap != null && Number.isFinite(+head.gap) ? +head.gap : (sizePx * (Number.isFinite(+head.pct) && head.pct != null ? +head.pct : 50)) / 100;
+    const w = Math.max(0, (ratio / 100) * (aw + wide * sizePx) + (+head.adj || 0) + gap);
+    return [{ from: pos, to: pos + text.length, ls: 0, ws: 0, n: 0, spaces: 0, width: w, font: null, head: { align: head.align === 'center' || head.align === 'right' ? head.align : 'left', auto: !!head.auto, sb } }];
+  }
 
   // 글꼴이 같은 글자끼리 조각으로 (빈칸은 앞 조각에 붙인다). cuts 에서는 늘 끊는다
   const segs: { from: number; to: number; font: string }[] = [];
@@ -188,9 +213,33 @@ function piecesFor(node: PMNode, pos: number, parent: PMNode, cuts: number[]): P
   return out;
 }
 
-function pieceDeco(p: Piece, first: boolean): Decoration | null {
+/** 조각에 입히는 CSS (없으면 null) */
+function pieceStyle(p: Piece): string | null {
+  // 문단 머리: 정해진 폭의 상자 (머리 글자 뒤 빈칸은 상자 안에서 폭 0)
+  if (p.head) return `display: inline-block; width: ${p.width.toFixed(2)}px; text-align: ${p.head.align}; text-indent: 0; white-space: pre; word-spacing: ${(-p.head.sb).toFixed(2)}px`;
   if (Math.abs(p.ls) < 0.005 && Math.abs(p.ws) < 0.005 && !p.font) return null;
-  const style = `letter-spacing: ${p.ls.toFixed(3)}px` + (p.spaces ? `; word-spacing: ${p.ws.toFixed(3)}px` : '') + (p.font ? `; font-family: ${fontStack(p.font)}` : '');
+  return `letter-spacing: ${p.ls.toFixed(3)}px` + (p.spaces ? `; word-spacing: ${p.ws.toFixed(3)}px` : '') + (p.font ? `; font-family: ${fontStack(p.font)}` : '');
+}
+
+/**
+ * 편집기 밖에서 그리는 글(머리말·꼬리말)용: 글자 묶음 하나의 한글 폭 보정 — [묶음 안 시작, 끝, CSS] 목록.
+ * 보정할 것이 없거나 잴 수 없으면 빈 목록
+ */
+export function hwpTextStyles(node: PMNode, parent: PMNode): { from: number; to: number; style: string }[] {
+  const ps = piecesFor(node, 0, parent, []);
+  if (!ps) return [];
+  const out: { from: number; to: number; style: string }[] = [];
+  for (const p of ps) {
+    const style = pieceStyle(p);
+    if (style) out.push({ from: p.from, to: p.to, style });
+  }
+  return out;
+}
+
+function pieceDeco(p: Piece, first: boolean): Decoration | null {
+  const style = pieceStyle(p);
+  if (!style) return null;
+  if (p.head) return Decoration.inline(p.from, p.to, { style }, { inclusiveStart: false, inclusiveEnd: false });
   // 앞뒤로 글자를 칠 때 꾸밈이 따라 늘어나게 (조각 사이에서는 앞 조각만)
   return Decoration.inline(p.from, p.to, { style }, { inclusiveStart: first, inclusiveEnd: true });
 }
@@ -226,8 +275,8 @@ export function hwpLineBoxes(node: PMNode, lastInBox: boolean): HwpLineBox[] | n
     let pitch = v[1] + (+v[2] || 0);
     // 같은 쪽에서 이어지는 줄은 다음 줄의 자리까지 (개체를 피해 밀린 줄 포함). 다음 줄이 새 쪽(자리가 되돌아감)이면 줄 높이 + 간격
     if (next && next[0] > v[0] + 0.5) pitch = next[0] - v[0];
-    // 칸의 마지막 줄 아래 간격은 칸 높이에 들지 않는다. 다만 한글이 칸 높이를 새로 셈해야 했던 칸(hwpTrail: 적힌 칸 높이가
-    // 내용보다 작다)은 마지막 줄 간격과 문단 아래 간격까지 넣어 줄 높이를 정한다
+    // 칸의 마지막 줄 아래 간격은 칸 높이에 들지 않는다. 다만 적힌 칸 높이가 글보다 작은 위 맞춤 칸(hwpTrail)은 한글이
+    // 마지막 줄 간격과 문단 아래 간격까지 칸의 내용 높이로 센다
     else if (!next && lastInBox && node.attrs?.hwpTrail !== true) pitch = v[1];
     // 기준선: 문단의 줄 안 세로 정렬이 '가운데'·'위'면 한글은 기준선 자리에 줄 가운데(높이의 절반)나 위를 적어 둔다.
     // 그 값은 글자의 기준선이 아니므로, 줄 높이의 0.6 에 못 미치면 한글 글꼴의 보통 기준선(높이의 0.85)으로 본다
@@ -255,7 +304,7 @@ function lineStartWidget(box: HwpLineBox): () => HTMLElement {
  * 줄 바꿈을 넣는다. 한글 글꼴이 없어 대신 그린 글꼴의 폭이 달라도 줄이 한글 폭에 맞도록, 넘치는 줄은 글자 사이를
  * 좁히고 양쪽 정렬 줄은 빈칸을 넓혀 한글의 줄 폭에 맞춘다.
  */
-function lineDecos(node: PMNode, pos: number, pieces: Piece[] | null, out: Decoration[], boxes: HwpLineBox[] | null = null): boolean {
+function lineDecos(node: PMNode, pos: number, pieces: Piece[] | null, out: Decoration[], boxes: HwpLineBox[] | null = null, headHang: number | null = null): boolean {
   const lines = node.attrs?.hwpLines as [number, number][] | null;
   if (!Array.isArray(lines) || !lines.length || node.attrs?.hwpLen !== node.content.size) return false;
   const start = pos + 1;
@@ -277,13 +326,14 @@ function lineDecos(node: PMNode, pos: number, pieces: Piece[] | null, out: Decor
     const w = ps.reduce((s, p) => s + p.width, 0);
     const chars = ps.reduce((s, p) => s + p.n + p.spaces, 0);
     const sp = ps.reduce((s, p) => s + p.spaces, 0);
-    const target = lines[k][1] - (k === 0 ? Math.max(0, indentPx) : Math.max(0, -indentPx));
+    // 자동 내어쓰기 머리: 둘째 줄부터 첫 줄의 시작 자리 + 머리 폭만큼 들어간다
+    const target = lines[k][1] - (k === 0 ? Math.max(0, indentPx) : headHang != null ? Math.max(0, indentPx) + headHang : Math.max(0, -indentPx));
     if (!(target > 0) || !chars) continue;
     // 문단 끝 줄과 줄 바꿈(Shift+Enter) 앞 줄은 양쪽 정렬하지 않는다
     const last = k === lines.length - 1 || node.childBefore(b - start).node?.type.name === 'hardBreak';
     if (w > target) {
       const e = (target - w) / chars;
-      for (const p of ps) p.ls += e;
+      for (const p of ps) if (!p.head) p.ls += e;
     } else if (align === 'distribute' && chars > 1) {
       const e = (target - w) / chars;
       for (const p of ps) p.ls += e;
@@ -347,11 +397,18 @@ function decosIn(doc: PMNode, from: number, to: number, out: Decoration[]) {
       else measurable = false;
     });
     const all = groups.flat();
-    for (const p of all) p.hang = hangs.some(([a, b]) => p.from >= a && p.to <= b);
+    for (const p of all) p.hang = !p.head && hangs.some(([a, b]) => p.from >= a && p.to <= b);
+    // 자동 내어쓰기 머리: 첫 줄은 제자리(왼쪽 여백 + 들여쓰기)에서 시작하고, 둘째 줄부터 머리 폭만큼 들인다
+    const headP = all.find((p) => p.head);
+    const headHang = headP && headP.head!.auto ? headP.width : null;
+    if (headHang != null) {
+      const first = ((+node.attrs?.indentLeft || 0) + Math.max(0, +node.attrs?.textIndent || 0)) * PT2PX;
+      out.push(Decoration.node(pos, pos + node.nodeSize, { style: `margin-left: ${(first + headHang).toFixed(2)}px; text-indent: ${(-headHang).toFixed(2)}px` }));
+    }
     // 한글이 놓은 줄 상자 (높이·기준선): 줄 첫머리마다 버팀대를 세우고 문단 자체의 줄 높이는 없앤다
     const inBox = !!parent && (parent.type.name === 'tableCell' || parent.type.name === 'tableHeader' || parent.type.name === 'textBox');
     const boxes = node.type.name === 'paragraph' ? hwpLineBoxes(node, inBox && index === parent!.childCount - 1) : null;
-    if (useLines) lineDecos(node, pos, measurable ? all : null, out, boxes);
+    if (useLines) lineDecos(node, pos, measurable ? all : null, out, boxes, headHang);
     // 앞뒤로 글자를 칠 때 꾸밈이 따라 늘어나게 (글자 묶음의 첫 조각만 앞으로)
     for (const g of groups)
       g.forEach((p, k) => {
@@ -364,7 +421,18 @@ function decosIn(doc: PMNode, from: number, to: number, out: Decoration[]) {
       const gap = +node.attrs?.hwpGap;
       // 칸의 마지막 문단: 문단 아래 간격도 칸 높이에 들지 않는다 (hwpTrail 인 칸은 든다)
       const noAfter = inBox && index === parent!.childCount - 1 && node.attrs?.hwpTrail !== true && +node.attrs?.spaceAfter > 0;
-      out.push(Decoration.node(pos, pos + node.nodeSize, { style: 'line-height: 0; white-space: pre' + (gap > 0 ? `; margin-top: ${gap.toFixed(2)}px` : '') + (noAfter ? '; padding-bottom: 0' : '') }));
+      // 줄 간격이 음수라 줄 높이(다음 줄까지)가 기준선 높이보다 작은 한 줄 문단: 글자가 줄 상자 밖(아래)으로 나가 줄 상자가
+      // 버팀대보다 커진다. 문단 높이를 한글의 줄 높이로 못박고 글자는 넘쳐 보이게 둔다 (한글도 뒤 문단이 겹쳐 놓인다)
+      const tight = boxes.length === 1 && boxes[0].pitch < boxes[0].base - 0.5;
+      // 빈 문단 하나뿐인 칸: 한글은 빈 칸을 글자 높이보다 낮게 둘 수 있다 (적힌 칸 높이 그대로: 상자 사이를 띄우는 얇은 줄 등).
+      // 빈 문단이 줄 높이를 차지하지 않게 해 표 줄이 적힌 높이를 지키게 한다
+      const emptyCell = inBox && parent!.type.name !== 'textBox' && parent!.childCount === 1 && node.content.size === 0;
+      // 그림뿐인 줄: 한글의 줄 간격은 그림 아래에 온다 (그림은 줄 위쪽에 맞춘다)
+      let imgOnly = node.childCount > 0;
+      node.forEach((c) => {
+        if (c.type.name !== 'image' || c.attrs?.float) imgOnly = false;
+      });
+      out.push(Decoration.node(pos, pos + node.nodeSize, { ...(imgOnly ? { class: 'hwp-imgline' } : {}), style: 'line-height: 0; white-space: pre' + (gap > 0 ? `; margin-top: ${gap.toFixed(2)}px` : '') + (noAfter ? '; padding-bottom: 0' : '') + (emptyCell ? '; height: 0' : tight ? `; height: ${boxes[0].pitch}px` : '') }));
       return false;
     }
     // 줄 높이 = 문단에서 가장 큰 글자 크기 × 줄 간격 (한글처럼). 글자 묶음은 줄 높이에 관여하지 않으므로(hwp-metrics CSS)
@@ -389,7 +457,9 @@ function decosIn(doc: PMNode, from: number, to: number, out: Decoration[]) {
     // 한글은 줄 간격의 여백을 모두 글자 아래에 둔다 (CSS 는 위아래로 반씩). 글자를 반만큼 올려 그리고,
     // 칸의 마지막 줄 아래 여백은 칸 높이에 넣지 않으므로 뺀다
     const lead = leadingPt(node.attrs?.lineHeight, size);
-    if (Math.abs(lead) > 0.05) {
+    // 글자 없이 그림만 든 문단은 줄 높이가 그림 높이다: 글자 줄 간격의 여백을 빼면 칸이 그림보다 낮아진다
+    const objOnly = node.childCount > 0 && maxPt === 0;
+    if (Math.abs(lead) > 0.05 && !objOnly) {
       styles.push(`transform: translateY(${(-lead / 2).toFixed(2)}pt)`);
       const inCell = parent && (parent.type.name === 'tableCell' || parent.type.name === 'tableHeader');
       if (inCell && index === parent!.childCount - 1) styles.push(`margin-bottom: ${(-lead).toFixed(2)}pt`);

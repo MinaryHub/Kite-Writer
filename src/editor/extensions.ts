@@ -30,6 +30,7 @@ import {
   CellNoWrap,
   TextBox,
   TabStop,
+  ParaHeadMark,
 } from './extensions/nodes';
 import { Search } from './extensions/search';
 import { Pagination } from './extensions/pagination';
@@ -118,6 +119,7 @@ export function getExtensions(): AnyExtension[] {
     MathInline,
     TextBox,
     TabStop,
+    ParaHeadMark,
     // 검토: 변경 내용(넣음/지움)과 메모
     Insertion,
     Deletion,

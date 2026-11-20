@@ -3,6 +3,7 @@ import type { DocSettings, HeaderFooter, PageSetup } from './types';
 import { hfRichHtml } from './hfRich';
 import type { DocTab } from './doc/docTab';
 import { PX_PER_MM, formatPageNumber, xmlEscape } from './formats/common';
+import { fontStack } from './fonts';
 import { FN_FONT_PX, FN_LINE, FN_SEP } from './editor/extensions/pagination';
 
 export const PAGE_GAP = 18;
@@ -119,6 +120,37 @@ export function pageNumAt(s: DocSettings, k: number): number {
   return Math.max(1, s.pageNumber.start + k - (s.pageNumber.base || 0));
 }
 
+/**
+ * 쪽 번호의 모양 (CSS)과 내용 (HTML). 한글 문서는 '쪽 번호' 스타일의 글꼴·크기로, 줄 높이는 글자 크기만큼 두고
+ * 영역 끝에서 글자 크기의 0.16배 띄운다 (한글 PDF 로 잰 자리: 기준선이 꼬리말 영역 아래에서 3.1pt 위 — 10pt 일 때).
+ * 빈칸은 한글처럼 글자 크기의 절반 폭
+ */
+export function pageNumStyle(s: DocSettings, top: boolean): Record<string, string> {
+  const pn = s.pageNumber;
+  if (!s.hwpMetrics || !(pn.fontSize && pn.fontSize > 0)) return { fontFamily: "'함초롬바탕','HCR Batang','바탕',serif", fontSize: '9pt' };
+  const size = Math.max(4, Math.min(72, pn.fontSize));
+  const color = pn.color && /^#[0-9A-Fa-f]{6}$/.test(pn.color) ? pn.color : '#000';
+  return {
+    fontFamily: fontStack(pn.fontFamily || '함초롬돋움'),
+    fontSize: `${size}pt`,
+    lineHeight: `${size}pt`,
+    color,
+    ...(pn.bold ? { fontWeight: 'bold' } : {}),
+    ...(pn.italic ? { fontStyle: 'italic' } : {}),
+    [top ? 'paddingTop' : 'paddingBottom']: '0.16em',
+    whiteSpace: 'pre',
+  };
+}
+export function pageNumCss(s: DocSettings, top: boolean): string {
+  return Object.entries(pageNumStyle(s, top))
+    .map(([k, v]) => `${k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase())}:${v}`)
+    .join(';');
+}
+export function pageNumHtml(s: DocSettings, num: number): string {
+  const t = xmlEscape(formatPageNumber(num, s.pageNumber.format));
+  return s.hwpMetrics ? t.replace(/ /g, '<span style="display:inline-block;width:0.5em"></span>') : t;
+}
+
 /** k 번째 쪽에 쪽 번호를 찍는가 */
 export function pageNumShown(s: DocSettings, k: number): boolean {
   return s.pageNumber.pos !== 'none' && k >= (s.pageNumber.from || 0) && !(k === 0 && s.hideFirst?.pageNum);
@@ -176,7 +208,7 @@ export function pageBackgroundStyle(s: DocSettings, k: number, dy = 0): Record<s
 export function repeatHeadsHtml(tab: DocTab, g: PageGeom, k: number): string {
   const reps = (tab.layout.repeats || []).filter((r) => r.page === k);
   const cuts = (tab.layout.cuts || []).filter((c) => c.page === k);
-  if (!reps.length && !cuts.length) return '';
+  if (!reps.length && !cuts.length && !(tab.layout.cuts || []).some((c) => c.page === k - 1)) return '';
   const cls = 'kdoc-content' + (tab.settings.hwpMetrics ? ' hwp-metrics' : '') + (tab.settings.fixedLines ? ' fixed-lines' : '');
   let html = '';
   for (const r of reps) {
@@ -197,6 +229,9 @@ export function repeatHeadsHtml(tab: DocTab, g: PageGeom, k: number): string {
     });
     clone.querySelectorAll('.pg-spacer, .table-handle, .column-resize-handle, .ProseMirror-separator, .ProseMirror-trailingBreak').forEach((e) => e.remove());
     clone.querySelectorAll('.pg-push-row, .selectedCell').forEach((e) => e.classList.remove('pg-push-row', 'selectedCell'));
+    // 이어지는 쪽에서는 표의 실제 위 바깥 여백만 든다 (문단 기준 세로 오프셋·칸 안 간격은 첫 쪽에서만)
+    const omc = parseFloat(table.getAttribute('data-om-top') || '');
+    if (isFinite(omc) && clone.style.marginTop) clone.style.marginTop = `${omc}px`;
     html += `<div class="${cls} pg-repeat-head" style="position:absolute;left:${g.ml}px;top:${g.mt}px;width:${g.contentW}px;pointer-events:none">${clone.outerHTML}</div>`;
   }
   // 쪽 경계에서 칸이 나뉜 표: 이 쪽에서 표가 끝나는 곳에 닫는 선 (한글은 나뉜 표의 아래를 선으로 닫는다)
@@ -212,7 +247,34 @@ export function repeatHeadsHtml(tab: DocTab, g: PageGeom, k: number): string {
     const wrap = table.parentElement as HTMLElement | null;
     const left = (wrap && wrap !== tab.editor.view.dom ? wrap.offsetLeft : 0) + table.offsetLeft;
     const y = Math.min(g.contentH, Math.max(0, c.y));
-    html += `<div class="pg-table-cut" style="position:absolute;left:${g.ml + left}px;top:${g.mt + y}px;width:${table.offsetWidth}px;height:${Math.max(0, g.contentH - y)}px;border-top:1px solid #000;background:#fff;box-sizing:border-box;pointer-events:none"></div>`;
+    html += `<div class="pg-table-cut" style="position:absolute;left:${g.ml + left}px;top:${g.mt + y}px;width:${table.offsetWidth}px;height:${Math.max(0, g.contentH - y)}px;box-shadow:inset 0 max(0.12mm, var(--k-hair, 0px)) 0 0 #000;background:#fff;box-sizing:border-box;pointer-events:none"></div>`;
+  }
+  // 앞 쪽에서 칸이 나뉘어 넘어온 표: 이 쪽에서 이어지는 자리의 맨 위(되풀이한 제목 줄 아래)에 여는 선 (한글은 나뉜 표의 위도 선으로 연다)
+  const opened = new Set<number>();
+  for (const c of (tab.layout.cuts || []).filter((x) => x.page === k - 1)) {
+    if (opened.has(c.table)) continue;
+    opened.add(c.table);
+    let dom: Node | null = null;
+    try {
+      dom = tab.editor.view.nodeDOM(c.table);
+    } catch {
+      continue;
+    }
+    const table = dom instanceof HTMLElement ? (dom.tagName === 'TABLE' ? dom : (dom.querySelector(':scope > table') as HTMLElement | null)) : null;
+    if (!table || table.getAttribute('data-borderless') === 'true') continue;
+    const wrap = table.parentElement as HTMLElement | null;
+    const left = (wrap && wrap !== tab.editor.view.dom ? wrap.offsetLeft : 0) + table.offsetLeft;
+    const headH = reps.find((r) => r.table === c.table)?.h || 0;
+    let omTop = 0;
+    try {
+      const om = JSON.parse(table.getAttribute('data-out-margin') || 'null');
+      if (Array.isArray(om) && om[2] > 0 && om[2] < 200) omTop = +om[2];
+    } catch {
+      /* 여백 없음 */
+    }
+    const omc = parseFloat(table.getAttribute('data-om-top') || '');
+    if (isFinite(omc) && omc >= 0 && omc < 200) omTop = omc;
+    html += `<div class="pg-table-open" style="position:absolute;left:${g.ml + left}px;top:${g.mt + headH + omTop}px;width:${table.offsetWidth}px;height:0;box-shadow:0 0 0 max(0.06mm, calc(var(--k-hair, 0px) / 2)) #000;pointer-events:none"></div>`;
   }
   return html;
 }
@@ -228,7 +290,7 @@ export function pageChromeHtml(tab: DocTab, g: PageGeom, k: number, pageCount: n
     if (rich) {
       // 영역 안 세로 맞춤 (아래·가운데면 영역 높이 안에서 맞춘다. 넘치는 내용은 자르지 않는다)
       const va = def.valign === 'bottom' ? 'flex-end' : def.valign === 'middle' ? 'center' : 'flex-start';
-      return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;flex-direction:column;justify-content:${va}"><div class="kdoc-content hf-rich">${hfText(rich, num, total, s.pageNumber.format)}</div></div>`;
+      return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;flex-direction:column;justify-content:${va}"><div class="kdoc-content hf-rich${s.hwpMetrics ? ' hwp-metrics' : ''}">${hfText(rich, num, total, s.pageNumber.format)}</div></div>`;
     }
     if (!def.text.trim()) return '';
     return `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${top}px;height:${height}px;display:flex;align-items:${valign};justify-content:${def.align === 'left' ? 'flex-start' : def.align === 'right' ? 'flex-end' : 'center'};font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:9pt;white-space:pre;overflow:hidden">${xmlEscape(hfText(def.text, num, total, s.pageNumber.format))}</div>`;
@@ -242,7 +304,7 @@ export function pageChromeHtml(tab: DocTab, g: PageGeom, k: number, pageCount: n
   if (pageNumShown(s, k)) {
     const [v, h] = s.pageNumber.pos.split('-');
     const zz = v === 'top' ? z.header : z.footer;
-    html += `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${zz.top}px;height:${zz.height}px;display:flex;align-items:${v === 'top' ? 'flex-start' : 'flex-end'};justify-content:${h === 'left' ? 'flex-start' : h === 'right' ? 'flex-end' : 'center'};font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:9pt">${xmlEscape(formatPageNumber(num, s.pageNumber.format))}</div>`;
+    html += `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${zz.top}px;height:${zz.height}px;display:flex;align-items:${v === 'top' ? 'flex-start' : 'flex-end'};justify-content:${h === 'left' ? 'flex-start' : h === 'right' ? 'flex-end' : 'center'}"><span style="${xmlEscape(pageNumCss(s, v === 'top'))}">${pageNumHtml(s, num)}</span></div>`;
   }
   const fns = tab.layout.footnotes.filter((f) => f.page === k);
   if (fns.length) {
@@ -291,6 +353,9 @@ export function buildPrintPage(tab: DocTab, plan: PagePlan, k: number, boxes: Pa
   const body = document.createElement('div');
   body.className = 'print-body';
   Object.assign(body.style, { left: `${g.ml}px`, top: `${g.mt}px`, width: `${g.contentW}px`, height: `${g.contentH}px` });
+  // 표 줄이 본문 끝 아래로 나온 쪽(한글처럼 글이 다 들어간 줄은 넘기지 않는다): 그 높이만큼 아래를 더 보인다
+  const over = Math.min(g.mb, Math.max(0, ...(tab.layout.overs || []).filter((o) => o.page === k).map((o) => o.h)));
+  if (over > 0) body.style.clipPath = `inset(0 -100vw ${-over}px -100vw)`;
   const content = document.createElement('div');
   content.className = 'kdoc-content' + (tab.settings.hwpMetrics ? ' hwp-metrics' : '') + (tab.settings.fixedLines ? ' fixed-lines' : '');
   Object.assign(content.style, { position: 'relative', width: `${g.contentW}px`, height: `${g.contentH}px` });

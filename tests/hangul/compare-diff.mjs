@@ -2,7 +2,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 const [dir, name, verbose] = process.argv.slice(2);
-const { ref, kite } = JSON.parse(fs.readFileSync(path.join(dir, name + '.lines.json'), 'utf8'));
+const { ref, kite, mis } = JSON.parse(fs.readFileSync(path.join(dir, name + '.lines.json'), 'utf8'));
+// 그림으로 본 어긋남 (한쪽에만 있는 어두운 점의 비율, %): 줄 위치로는 보이지 않는 선·그림·도형의 차이
+const misOf = (p) => { const m = mis && mis[p]; return m ? ` ink-diff ${(((m[2] + m[3]) / Math.max(1, m[0] + m[1])) * 100).toFixed(1)}% (한글만 ${m[2]}, Kite만 ${m[3]})` : ''; };
 const norm = (s) => s.replace(/\s+/g, '');
 let totalRef = 0, matched = 0, sumDy = 0, maxDy = 0, sumDx = 0, moved = 0;
 const n = Math.max(ref.length, kite.length);
@@ -23,7 +25,7 @@ for (let p = 0; p < n; p++) {
     matched++; pm++; pdy += Math.abs(dy); pmax = Math.max(pmax, Math.abs(dy)); sumDy += Math.abs(dy); sumDx += Math.abs(dx); maxDy = Math.max(maxDy, Math.abs(dy));
     if (Math.abs(dy) > 3 || Math.abs(dx) > 3) { moved++; if (verbose) console.log(`  p${p + 1} dy=${dy.toFixed(1)} dx=${dx.toFixed(1)} y=${l.y} | ${l.t.slice(0, 50)}`); }
   }
-  console.log(`p${p + 1}: hangul ${a.length} lines, kite ${b.length}, same-text ${pm}, avg|dy| ${(pm ? pdy / pm : 0).toFixed(1)}pt, max ${pmax.toFixed(1)}pt` + (a[0] ? `  first: "${a[0].t.slice(0, 24)}" / "${(b[0]?.t || '').slice(0, 24)}"` : ''));
+  console.log(`p${p + 1}: hangul ${a.length} lines, kite ${b.length}, same-text ${pm}, avg|dy| ${(pm ? pdy / pm : 0).toFixed(1)}pt, max ${pmax.toFixed(1)}pt` + misOf(p) + (a[0] ? `  first: "${a[0].t.slice(0, 24)}" / "${(b[0]?.t || '').slice(0, 24)}"` : ''));
   if (verbose) for (const l of miss.slice(0, 12)) console.log(`  p${p + 1} MISSING y=${l.y} x=${l.x} | ${l.t.slice(0, 60)}`);
 }
 console.log(`${name}: lines ${totalRef}, same text on same page ${matched} (${((matched / Math.max(1, totalRef)) * 100).toFixed(0)}%), off by >3pt ${moved}, avg|dy| ${(sumDy / Math.max(1, matched)).toFixed(2)}pt, avg|dx| ${(sumDx / Math.max(1, matched)).toFixed(2)}pt, max|dy| ${maxDy.toFixed(1)}pt`);
