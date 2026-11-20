@@ -331,6 +331,15 @@ export const commands: Record<string, Command> = {
     enabled: hasDoc,
   },
   'image.crop': { label: '그림 자르기...', icon: 'Crop', run: () => app.openDialog('imageCrop'), enabled: () => isImageSelected() },
+  'insert.hanja': {
+    label: '한자로 바꾸기...',
+    icon: 'Languages',
+    shortcut: 'F9',
+    keys: ['F9', 'HanjaMode'],
+    run: () => void startHanja(),
+    enabled: hasDoc,
+  },
+  'edit.hanjaToHangul': { label: '한자를 한글로', run: () => void hanjaSelectionToHangul(), enabled: hasDoc },
   'object.props': { label: '개체 속성 (배치·위치·크기)...', icon: 'Layers', run: () => app.openDialog('object'), enabled: () => isObjectSelected() },
   'image.uncrop': {
     label: '자르기 취소',
@@ -605,6 +614,67 @@ export const commands: Record<string, Command> = {
   'tools.overwrite': { label: '삽입/수정 모드 전환', shortcut: 'Insert', run: () => chain().toggleOverwrite().run(), enabled: hasDoc },
 };
 
+/**
+ * 한자로 바꾸기 (F9·한자 키): 고른 글(한글)이나 커서 앞 낱말의 한자 후보 창을 연다. 고른 글에 한자가 있으면 한글로 바꾼다
+ */
+async function startHanja() {
+  const e = ed();
+  if (!e) return;
+  const { from, to, empty, $from } = e.state.selection;
+  const { loadHanja, wordBeforeCursor, hasHanja } = await import('../hanja');
+  if (!empty) {
+    const text = e.state.doc.textBetween(from, to);
+    if (!text.trim()) return;
+    if (hasHanja(text)) return hanjaSelectionToHangul();
+    // 한 문단 안의 글만 (그림·줄 바꿈이 끼면 자리 계산이 어긋난다)
+    if (text.length !== to - from || text.length > 40) {
+      app.toast('한 문단 안의 글(40글자까지)을 골라 주세요.', 'warn');
+      return;
+    }
+    app.openDialog('hanja', { from, text });
+    return;
+  }
+  let d;
+  try {
+    d = await loadHanja();
+  } catch (err: any) {
+    app.toast(`한자 사전을 불러오지 못했습니다: ${err?.message || err}`, 'error');
+    return;
+  }
+  const before = $from.parent.textBetween(Math.max(0, $from.parentOffset - 8), $from.parentOffset, undefined, '\ufffc');
+  const w = wordBeforeCursor(d, before);
+  if (!w) {
+    app.toast('커서 앞에 한자로 바꿀 한글이 없습니다. 바꿀 글을 고르거나 낱말 뒤에 커서를 두세요.', 'info');
+    return;
+  }
+  app.openDialog('hanja', { from: $from.pos - w.length, text: w });
+}
+
+/** 고른 글의 한자를 한글 읽기로 바꾼다 */
+async function hanjaSelectionToHangul() {
+  const e = ed();
+  if (!e) return;
+  const { from, to, empty } = e.state.selection;
+  if (empty) {
+    app.toast('한글로 바꿀 한자를 고르세요.', 'info');
+    return;
+  }
+  const { loadHanja, hanjaToHangul } = await import('../hanja');
+  const d = await loadHanja();
+  const tr = e.state.tr;
+  // 글 조각마다 바꾼다 (서식·그림은 그대로)
+  e.state.doc.nodesBetween(from, to, (n, pos) => {
+    if (!n.isText) return true;
+    const a = Math.max(from, pos);
+    const b = Math.min(to, pos + n.nodeSize);
+    const t = n.text!.slice(a - pos, b - pos);
+    const out = hanjaToHangul(d, t);
+    if (out !== t) tr.insertText(out, tr.mapping.map(a), tr.mapping.map(b));
+    return false;
+  });
+  if (tr.docChanged) e.view.dispatch(tr);
+}
+
 /** 그림·그리기 개체·글상자가 선택되어 있는가 */
 function isObjectSelected() {
   const sel = ed()?.state.selection;
@@ -726,6 +796,17 @@ let chordTimer: any = null;
 
 export function installShortcuts() {
   const onKey = (e: KeyboardEvent) => {
+    // 한글을 조합하는 중에 F9: 조합 중인 글자를 확정한 뒤 한자로 바꾸기 ("가정" 을 치자마자 F9)
+    if ((e.isComposing || e.keyCode === 229) && e.key === 'F9') {
+      const v = ed()?.view;
+      if (v) {
+        e.preventDefault();
+        (v.dom as HTMLElement).blur();
+        v.focus();
+        setTimeout(() => runCommand('insert.hanja'), 30);
+      }
+      return;
+    }
     if (e.isComposing || e.keyCode === 229) return;
     const name = keyName(e);
     const target = e.target as HTMLElement;

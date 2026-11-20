@@ -27,6 +27,7 @@ import { TemplateDialog } from './dialogs/TemplateDialog';
 import { LegalDialog } from './dialogs/LegalDialog';
 import { ContactDialog } from './dialogs/ContactDialog';
 import { ObjectDialog } from './dialogs/ObjectDialog';
+import { HanjaDialog } from './dialogs/HanjaDialog';
 
 export function Dialogs() {
   const app = useApp();
@@ -101,6 +102,9 @@ export function Dialogs() {
         break;
       case 'object':
         el = <ObjectDialog onClose={close} />;
+        break;
+      case 'hanja':
+        el = <HanjaDialog onClose={close} from={d.props.from} text={d.props.text} />;
         break;
       case 'about':
         el = <AboutDialog onClose={close} />;
