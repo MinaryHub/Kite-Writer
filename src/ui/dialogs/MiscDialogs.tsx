@@ -190,22 +190,23 @@ export function SymbolDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-export function FootnoteDialog({ onClose, pos, text: init }: { onClose: () => void; pos: number | null; text: string }) {
+export function FootnoteDialog({ onClose, pos, text: init, kind = null }: { onClose: () => void; pos: number | null; text: string; kind?: 'end' | null }) {
   const [text, setText] = useState(init || '');
   const editor = app.active!.editor;
+  const what = kind === 'end' ? '미주' : '각주';
   const ok = () => {
     if (pos != null) {
       if (!text.trim()) editor.chain().focus().deleteRange({ from: pos, to: pos + 1 }).run();
       else editor.chain().focus().updateFootnote(pos, text.trim()).run();
-    } else if (text.trim()) editor.chain().focus().insertFootnote(text.trim()).run();
+    } else if (text.trim()) editor.chain().focus().insertFootnote(text.trim(), kind).run();
     onClose();
   };
   return (
-    <Modal title={pos != null ? '각주 고치기' : '각주 넣기'} onClose={onClose} width={480} footer={<OkCancel onOk={ok} onCancel={onClose} okLabel={pos != null ? '고치기' : '넣기'} />}>
+    <Modal title={pos != null ? `${what} 고치기` : `${what} 넣기`} onClose={onClose} width={480} footer={<OkCancel onOk={ok} onCancel={onClose} okLabel={pos != null ? '고치기' : '넣기'} />}>
       <textarea
         style={{ width: '100%', height: 110 }}
         value={text}
-        placeholder="각주 내용을 입력하세요. (Ctrl+Enter: 확인)"
+        placeholder={`${what} 내용을 입력하세요. ${kind === 'end' ? '미주는 문서 끝에 모아 보입니다. ' : ''}(Ctrl+Enter: 확인)`}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && e.ctrlKey) {
@@ -215,7 +216,7 @@ export function FootnoteDialog({ onClose, pos, text: init }: { onClose: () => vo
         }}
         data-autofocus
       />
-      {pos != null && <div className="unit">내용을 모두 지우고 확인하면 각주가 삭제됩니다.</div>}
+      {pos != null && <div className="unit">내용을 모두 지우고 확인하면 {what}가 삭제됩니다.</div>}
     </Modal>
   );
 }
@@ -237,6 +238,12 @@ export function GotoDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+const PX_MM = 96 / 25.4;
+const mm2 = (px: number) => Math.round((px / PX_MM) * 100) / 100;
+const px2 = (mm: number) => Math.round(mm * PX_MM * 100) / 100;
+/** 칸 테두리 선 (borderCss 한 변: '0.12mm solid #000000') */
+const LINE_RE = /^([\d.]+)mm (solid|dashed|dotted|double) (#[0-9A-Fa-f]{6})$/;
+
 export function CellPropsDialog({ onClose }: { onClose: () => void }) {
   const editor = app.active!.editor;
   const attrs = editor.getAttributes('tableCell').colspan !== undefined ? editor.getAttributes('tableCell') : editor.getAttributes('tableHeader');
@@ -244,20 +251,44 @@ export function CellPropsDialog({ onClose }: { onClose: () => void }) {
   const [bg, setBg] = useState<string | null>(attrs.backgroundColor || null);
   const [va, setVa] = useState<string>(attrs.verticalAlign || 'middle');
   const [sides, setSides] = useState({ t: !nb.includes('t'), b: !nb.includes('b'), l: !nb.includes('l'), r: !nb.includes('r') });
+  // 선 모양: 지금 칸의 첫 선 (없으면 0.12mm 검은 실선). 고치지 않으면 칸마다의 원래 선을 그대로 둔다
+  const firstLine = String(attrs.borderCss || '')
+    .split(';')
+    .map((p) => LINE_RE.exec((p.split(':')[1] || '').trim()))
+    .find(Boolean);
+  const [line, setLine] = useState({ style: firstLine ? firstLine[2] : 'solid', width: firstLine ? parseFloat(firstLine[1]) : 0.12, color: firstLine ? firstLine[3] : '#000000' });
+  const [lineTouched, setLineTouched] = useState(false);
+  const upLine = (p: Partial<typeof line>) => {
+    setLine({ ...line, ...p });
+    setLineTouched(true);
+  };
+  // 안 여백 (mm): 칸 자체 여백이 없으면 표 기본 (왼·오른 1.8mm, 위·아래 0.5mm)
+  const m0: number[] | null = Array.isArray(attrs.margins) && attrs.margins.length === 4 ? attrs.margins : null;
+  const [ownMargin, setOwnMargin] = useState(!!m0);
+  const [vertical, setVertical] = useState(attrs.vertical === true);
+  const [margin, setMargin] = useState<number[]>(m0 ? m0.map(mm2) : [1.8, 1.8, 0.5, 0.5]);
   const ok = () => {
     const none = (['l', 'r', 't', 'b'] as const).filter((s) => !sides[s]).join(' ') || null;
-    editor
+    const w = Math.max(0.1, Math.min(5, line.width));
+    const css = (['t', 'b', 'l', 'r'] as const)
+      .filter((s) => sides[s])
+      .map((s) => `${s}:${w}mm ${line.style} ${line.color}`)
+      .join(';');
+    let c = editor
       .chain()
       .focus()
       .setCellAttribute('backgroundColor', bg)
       .setCellAttribute('verticalAlign', va === 'middle' ? null : va)
       .setCellAttribute('borderStyle', none)
-      .run();
+      .setCellAttribute('margins', ownMargin ? margin.map((v) => px2(Math.max(0, Math.min(50, v)))) : null)
+      .setCellAttribute('vertical', vertical ? true : null);
+    if (lineTouched) c = c.setCellAttribute('borderCss', css || null);
+    c.run();
     onClose();
   };
   const all = (v: boolean) => setSides({ t: v, b: v, l: v, r: v });
   return (
-    <Modal title="셀 테두리/배경" onClose={onClose} width={420} onEnter={ok} footer={<OkCancel onOk={ok} onCancel={onClose} />}>
+    <Modal title="셀 속성" onClose={onClose} width={460} onEnter={ok} footer={<OkCancel onOk={ok} onCancel={onClose} />}>
       <Fieldset legend="테두리">
         <div className="row wrap" style={{ gap: 14 }}>
           {(
@@ -281,8 +312,45 @@ export function CellPropsDialog({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </Fieldset>
+      <Fieldset legend="선 모양">
+        <div className="form-grid">
+          <label>종류</label>
+          <select value={line.style} onChange={(e) => upLine({ style: e.target.value })}>
+            <option value="solid">실선</option>
+            <option value="dashed">파선</option>
+            <option value="dotted">점선</option>
+            <option value="double">이중 실선</option>
+          </select>
+          <label>굵기</label>
+          <NumberInput value={line.width} onChange={(v) => upLine({ width: v })} min={0.1} max={5} step={0.05} unit="mm" />
+          <label>색</label>
+          <ColorField value={line.color} onChange={(v) => upLine({ color: v || '#000000' })} />
+        </div>
+      </Fieldset>
       <Fieldset legend="배경">
         <ColorField value={bg} onChange={setBg} />
+      </Fieldset>
+      <Fieldset legend="안 여백">
+        <label className="check">
+          <input type="checkbox" checked={ownMargin} onChange={(e) => setOwnMargin(e.target.checked)} />
+          안 여백 지정 (끄면 표의 기본 여백)
+        </label>
+        {ownMargin && (
+          <div className="form-grid" style={{ gridTemplateColumns: 'auto 1fr auto 1fr', marginTop: 6 }}>
+            {(['왼쪽', '오른쪽', '위쪽', '아래쪽'] as const).map((label, i) => (
+              <span key={label} style={{ display: 'contents' }}>
+                <label>{label}</label>
+                <NumberInput value={margin[i]} onChange={(v) => setMargin(margin.map((x, k) => (k === i ? v : x)))} min={0} max={50} step={0.1} unit="mm" />
+              </span>
+            ))}
+          </div>
+        )}
+      </Fieldset>
+      <Fieldset legend="글 방향">
+        <label className="check">
+          <input type="checkbox" checked={vertical} onChange={(e) => setVertical(e.target.checked)} />
+          세로쓰기 (글자는 위에서 아래로, 줄은 오른쪽에서 왼쪽으로)
+        </label>
       </Fieldset>
       <Fieldset legend="세로 정렬">
         <Seg
@@ -296,6 +364,96 @@ export function CellPropsDialog({ onClose }: { onClose: () => void }) {
         />
       </Fieldset>
       <div className="unit">여러 셀을 블록으로 지정(F5 또는 끌기)하면 한꺼번에 바뀝니다.</div>
+    </Modal>
+  );
+}
+
+/** 커서가 든 표 (가장 안쪽)의 자리와 노드 */
+function tableAtCursor() {
+  const editor = app.active!.editor;
+  const $p = editor.state.selection.$from;
+  for (let d = $p.depth; d > 0; d--) {
+    const n = $p.node(d);
+    if (n.type.name === 'table') return { editor, pos: $p.before(d), node: n };
+  }
+  return null;
+}
+
+/** 표 속성: 위치(정렬·글자처럼 취급), 바깥 여백, 쪽 경계에서 나누기, 칸 간격 (한글의 표 고치기 → 표) */
+export function TablePropsDialog({ onClose }: { onClose: () => void }) {
+  const at = tableAtCursor();
+  const a = at?.node.attrs || {};
+  const om0: number[] | null = Array.isArray(a.outMargin) && a.outMargin.length === 4 ? a.outMargin : null;
+  const [s, setS] = useState({
+    align: (a.align as string) || 'left',
+    inline: !!a.inline,
+    split: (a.pageSplit as string) || 'split',
+    spacing: a.cellSpacing ? mm2(+a.cellSpacing) : 0,
+    om: om0 ? om0.map(mm2) : [0, 0, 0, 0],
+  });
+  const up = (p: Partial<typeof s>) => setS({ ...s, ...p });
+  const ok = () => {
+    if (!at) return onClose();
+    const { editor, pos, node } = at;
+    const om = s.om.map((v) => px2(Math.max(0, Math.min(100, v))));
+    const next = {
+      ...node.attrs,
+      align: s.align === 'left' ? null : s.align,
+      inline: s.inline,
+      pageSplit: s.split === 'split' ? null : s.split,
+      cellSpacing: s.spacing > 0 ? px2(Math.min(10, s.spacing)) : null,
+      outMargin: om.some((v) => v > 0) || om0 ? om : null,
+    };
+    editor.view.dispatch(editor.state.tr.setNodeMarkup(pos, undefined, next, node.marks));
+    editor.commands.focus();
+    onClose();
+  };
+  if (!at) return null;
+  return (
+    <Modal title="표 속성" onClose={onClose} width={440} onEnter={ok} footer={<OkCancel onOk={ok} onCancel={onClose} />}>
+      <Fieldset legend="위치">
+        <div className="form-grid">
+          <label>가로 정렬</label>
+          <Seg
+            value={s.align}
+            onChange={(v) => up({ align: v })}
+            options={[
+              { value: 'left', label: '왼쪽' },
+              { value: 'center', label: '가운데' },
+              { value: 'right', label: '오른쪽' },
+            ]}
+          />
+        </div>
+        <label className="check" style={{ marginTop: 8 }}>
+          <input type="checkbox" checked={s.inline} onChange={(e) => up({ inline: e.target.checked })} />
+          글자처럼 취급
+        </label>
+      </Fieldset>
+      <Fieldset legend="바깥 여백">
+        <div className="form-grid" style={{ gridTemplateColumns: 'auto 1fr auto 1fr' }}>
+          {(['왼쪽', '오른쪽', '위쪽', '아래쪽'] as const).map((label, i) => (
+            <span key={label} style={{ display: 'contents' }}>
+              <label>{label}</label>
+              <NumberInput value={s.om[i]} onChange={(v) => up({ om: s.om.map((x, k) => (k === i ? v : x)) })} min={0} max={100} step={0.1} unit="mm" />
+            </span>
+          ))}
+        </div>
+      </Fieldset>
+      <Fieldset legend="쪽 경계에서">
+        <Seg
+          value={s.split}
+          onChange={(v) => up({ split: v })}
+          options={[
+            { value: 'split', label: '나눔' },
+            { value: 'row', label: '셀 단위로 나눔' },
+            { value: 'none', label: '나누지 않음' },
+          ]}
+        />
+      </Fieldset>
+      <Fieldset legend="칸 간격">
+        <NumberInput value={s.spacing} onChange={(v) => up({ spacing: v })} min={0} max={10} step={0.1} unit="mm" />
+      </Fieldset>
+      <div className="unit">칸의 테두리·배경·안 여백은 셀 속성(L)에서 고칩니다. 제목 줄 반복은 표 → 제목 줄 지정/해제.</div>
     </Modal>
   );
 }

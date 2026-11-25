@@ -3,6 +3,8 @@ import { app } from '../../app/controller';
 import { Modal, OkCancel, Fieldset, NumberInput, ColorField, Seg } from '../widgets';
 import { Icon } from '../Icon';
 import { cleanParaBorder, type ParaBorder } from '../../formats/common';
+import { cleanTabs, type TabStopDef } from '../../editor/tabLayout';
+import { forEachSelectedPara } from '../../editor/extensions/paragraphFormat';
 
 const PB_RE = /^([\d.]+)mm (solid|dashed|dotted|double) (#[0-9A-Fa-f]{6})$/;
 /** 문단 테두리 값 → 대화 상자의 값 (그릴 변, 선 종류·굵기·색, 글과의 간격, 이어진 문단과 연결) */
@@ -199,6 +201,87 @@ export function ParaShapeDialog({ onClose }: { onClose: () => void }) {
         </div>
         <div>{'뒤 문단 '.repeat(24)}</div>
       </div>
+    </Modal>
+  );
+}
+
+/** 탭 채움 (탭 마크의 leader 값: 한글의 채움 종류 번호) */
+const TAB_LEADERS: [number, string][] = [
+  [0, '없음'],
+  [3, '점선 ······'],
+  [2, '파선 - - -'],
+  [1, '실선 ────'],
+];
+
+/** 탭 설정: 문단의 탭 자리 (자리·맞춤·채움)와 기본 탭 간격 (한글의 문단 모양 → 탭 설정) */
+export function TabDialog({ onClose }: { onClose: () => void }) {
+  const editor = app.active!.editor;
+  const a = editor.state.selection.$from.parent.attrs || {};
+  const t0 = cleanTabs(a.tabs);
+  const PT_MM = 25.4 / 72;
+  const [d, setD] = useState<number>(t0 ? t0.d : 40);
+  const [stops, setStops] = useState<TabStopDef[]>(t0?.s ? t0.s.map((s) => [...s] as TabStopDef) : []);
+  const [newPos, setNewPos] = useState<number>(Math.round(((stops[stops.length - 1]?.[0] ?? 0) * PT_MM + 20) * 10) / 10);
+  const add = () => {
+    const pt = Math.round((newPos / PT_MM) * 100) / 100;
+    if (!(pt >= 0 && pt < 4000) || stops.some((s) => Math.abs(s[0] - pt) < 0.5)) return;
+    setStops([...stops, [pt, 'l', 0] as TabStopDef].sort((x, y) => x[0] - y[0]));
+    setNewPos(Math.round((newPos + 20) * 10) / 10);
+  };
+  const apply = () => {
+    const tabs = stops.length || Math.abs(d - 40) > 0.01 ? cleanTabs({ d: Math.max(1, Math.min(2000, d)), s: stops }) : null;
+    const tr = editor.state.tr;
+    forEachSelectedPara(editor.state, (node, pos) => {
+      tr.setNodeMarkup(pos, undefined, { ...node.attrs, tabs });
+    });
+    editor.view.dispatch(tr);
+    editor.commands.focus();
+    onClose();
+  };
+  return (
+    <Modal title="탭 설정" onClose={onClose} width={460} onEnter={apply} footer={<OkCancel onOk={apply} onCancel={onClose} />}>
+      <Fieldset legend="탭 자리 (글 영역 왼쪽 끝에서)">
+        {stops.length === 0 && <div className="unit">정한 탭 자리가 없습니다. 탭은 기본 탭 간격마다 갑니다.</div>}
+        {stops.map((s, i) => (
+          <div key={i} className="row" style={{ gap: 6, marginBottom: 4, alignItems: 'center' }}>
+            <NumberInput value={Math.round(s[0] * PT_MM * 10) / 10} onChange={(v) => setStops(stops.map((x, k) => (k === i ? ([Math.round((v / PT_MM) * 100) / 100, x[1], x[2]] as TabStopDef) : x)).sort((p, q) => p[0] - q[0]))} min={0} max={1400} step={0.5} unit="mm" />
+            <select value={s[1]} onChange={(e) => setStops(stops.map((x, k) => (k === i ? ([x[0], e.target.value, x[2]] as TabStopDef) : x)))}>
+              <option value="l">왼쪽</option>
+              <option value="r">오른쪽</option>
+              <option value="c">가운데</option>
+              <option value="d">소수점</option>
+            </select>
+            <select value={s[2]} onChange={(e) => setStops(stops.map((x, k) => (k === i ? ([x[0], x[1], +e.target.value] as TabStopDef) : x)))}>
+              {TAB_LEADERS.map(([v, label]) => (
+                <option key={v} value={v}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <button className="btn small" title="지우기" onClick={() => setStops(stops.filter((_, k) => k !== i))}>
+              <Icon name="X" size={14} />
+            </button>
+          </div>
+        ))}
+        <div className="row" style={{ gap: 6, marginTop: 6, alignItems: 'center' }}>
+          <NumberInput value={newPos} onChange={setNewPos} min={0} max={1400} step={0.5} unit="mm" />
+          <button className="btn small" onClick={add}>
+            추가
+          </button>
+          {stops.length > 0 && (
+            <button className="btn small" onClick={() => setStops([])}>
+              모두 지우기
+            </button>
+          )}
+        </div>
+      </Fieldset>
+      <Fieldset legend="기본 탭">
+        <div className="form-grid">
+          <label>간격</label>
+          <NumberInput value={d} onChange={setD} min={1} max={2000} step={1} unit="pt" />
+        </div>
+      </Fieldset>
+      <div className="unit">고른 문단들에 적용됩니다. 한글(HWP·HWPX)·Word 로 저장해도 탭 자리로 남습니다.</div>
     </Modal>
   );
 }

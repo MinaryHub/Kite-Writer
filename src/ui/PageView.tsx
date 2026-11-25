@@ -4,12 +4,12 @@ import { TextSelection } from '@tiptap/pm/state';
 import type { DocTab } from '../doc/docTab';
 import type { PageSetup } from '../types';
 import { useApp, usePinchZoom } from '../app/hooks';
-import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, pageHidesOf, pagePaintHtml, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown, pageNumHtml, pageNumStyle } from '../print';
+import { computeGeom, geomFor, hfText, hfZones, PAGE_GAP, pageAtY, pageBackgroundStyle, pageHidesOf, pageNumStartsOf, pagePaintHtml, planPages, repeatHeadsHtml, stageWidth, type PageGeom , hfAt, pageNumAt, pageNumShown, pageNumHtml, pageNumStyle } from '../print';
 import { sectionsKey } from '../editor/extensions/sections';
 import { formatPageNumber, splitExt } from '../formats/common';
 import { applyFormatPainter, insertImagesFromFiles } from '../app/commands';
 import { viewState } from '../editor/viewState';
-import { FN_FONT_PX, FN_LINE, FN_SEP } from '../editor/extensions/pagination';
+import { EN_LINE, FN_FONT_PX, FN_LINE, FN_SEP } from '../editor/extensions/pagination';
 import { showContextMenu } from './ContextMenu';
 import { platform } from '../platform';
 import { hfRichHtml } from '../hfRich';
@@ -29,7 +29,7 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
   const pageCount = Math.max(1, tab.layout.pageCount);
   // 구역마다 용지가 다를 수 있다: 무대 폭은 가장 넓은 용지, 쪽은 저마다의 크기로 무대 가운데에
   const W = stageWidth(tab.settings, tab.editor.state.doc);
-  const plans = planPages(tab.settings, pageCount, tab.layout.pageSetups, W, PAGE_GAP, tab.layout.pageHfs);
+  const plans = planPages(tab.settings, pageCount, tab.layout.pageSetups, W, PAGE_GAP, tab.layout.pageHfs, pageNumStartsOf(tab));
   const lastPlan = plans[plans.length - 1];
   const stageH = lastPlan.top + lastPlan.g.H;
   /** 편집기(문서 용지의 본문 칸) 왼쪽 */
@@ -301,6 +301,18 @@ export function PageView({ tab, active, hidden = false }: { tab: DocTab; active:
         </div>,
       );
     }
+    const ens = (tab.layout.endnotes || []).filter((f) => f.page === k);
+    if (ens.length) {
+      chrome.push(
+        <div key={'en' + k} className="en-area" style={{ left: left + g.ml, width: g.contentW, top: top + g.mt, fontSize: FN_FONT_PX, lineHeight: EN_LINE }}>
+          {ens.map((f) => (
+            <div key={f.num} className="en-item" style={{ top: f.y }} title="두 번 누르면 미주 편집" onDoubleClick={() => app.openDialog('footnote', { pos: findFootnotePos(tab, f.num, 'end'), text: f.text, kind: 'end' })}>
+              {f.num}) {f.text}
+            </div>
+          ))}
+        </div>,
+      );
+    }
     if (s.lineNumbers)
       for (const b of lineNumberBoxes(lineMarks, g, k, s.lineNumbers))
         chrome.push(
@@ -370,12 +382,12 @@ function Corners({ g }: { g: PageGeom }) {
   );
 }
 
-function findFootnotePos(tab: DocTab, num: number): number | null {
+function findFootnotePos(tab: DocTab, num: number, kind: 'end' | null = null): number | null {
   let i = 0;
   let found: number | null = null;
   tab.editor.state.doc.descendants((n, pos) => {
     if (found != null) return false;
-    if (n.type.name === 'footnote') {
+    if (n.type.name === 'footnote' && (n.attrs.kind === 'end') === (kind === 'end')) {
       i++;
       if (i === num) found = pos;
     }
@@ -390,7 +402,7 @@ export function caretPage(tab: DocTab): number {
     const view = tab.editor.view;
     const c = view.coordsAtPos(view.state.selection.head);
     const r = view.dom.getBoundingClientRect();
-    const plans = planPages(tab.settings, tab.layout.pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP, tab.layout.pageHfs);
+    const plans = planPages(tab.settings, tab.layout.pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP, tab.layout.pageHfs, pageNumStartsOf(tab));
     const y = (c.top - r.top) / (viewState.zoom || 1);
     return Math.max(1, Math.min(tab.layout.pageCount, pageAtY(plans, y) + 1));
   } catch {

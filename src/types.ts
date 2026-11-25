@@ -129,6 +129,8 @@ export interface DocSettings {
   masterPages?: MasterPage[];
   /** 줄 번호 (한글의 쪽 → 구역 설정 → 줄 번호): 본문 줄마다 왼쪽 여백에 번호 */
   lineNumbers?: LineNumbering | null;
+  /** 원본 보존형 저장: HWP·HWPX 에서 읽은 원본 정의 (같은 형식으로 저장할 때 되살린다: formats/hwpBase.ts) */
+  hwpBase?: import('./formats/hwpBase').HwpBase | null;
 }
 
 /** 줄 번호 매기기 */

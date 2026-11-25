@@ -23,6 +23,9 @@ class Ctx {
   images = new Map<string, { rid: string; w: number; h: number; name: string } | null>();
   media: { path: string; bytes: Uint8Array; ext: string }[] = [];
   footnotes: string[] = [];
+  endnotes: string[] = [];
+  /** 책갈피 번호 (w:bookmarkStart·End 의 id) */
+  bookmarkSeq = 0;
   docPrId = 1;
   bodyWidthTw = 9000;
   /** 변경 내용(w:ins/w:del) 번호 */
@@ -557,6 +560,14 @@ function paragraphXml(ctx: Ctx, p: FlatPara): string {
       // 그리기 개체: DrawingML 묶음 (도형 경로·채우기·선·화살표, 안의 글, 그림)
       const dr = shapeDrawing(ctx, it, paraLeft);
       if (dr) x += `<w:r>${rPr(it.style)}${dr}</w:r>`;
+    } else if (it.type === 'bookmark') {
+      // 책갈피: 길이 없는 책갈피 (시작·끝을 붙여서)
+      const id = ++ctx.bookmarkSeq;
+      x += `<w:bookmarkStart w:id="${id}" w:name="${xmlEscape(it.name)}"/><w:bookmarkEnd w:id="${id}"/>`;
+    } else if (it.type === 'footnote' && it.end) {
+      ctx.endnotes.push(it.text);
+      const id = ctx.endnotes.length + 1;
+      x += `<w:r><w:rPr><w:rStyle w:val="EndnoteReference"/></w:rPr><w:endnoteReference w:id="${id}"/></w:r>`;
     } else if (it.type === 'footnote') {
       ctx.footnotes.push(it.text);
       const id = ctx.footnotes.length + 1;
@@ -672,6 +683,7 @@ const REL_TYPES: Record<string, string> = {
   header: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/header',
   footer: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer',
   footnotes: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes',
+  endnotes: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes',
   comments: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments',
   styles: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles',
   settings: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings',
@@ -747,6 +759,8 @@ function stylesXml(): string {
     `<w:style w:type="paragraph" w:styleId="Footer"><w:name w:val="footer"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:style>` +
     `<w:style w:type="paragraph" w:styleId="FootnoteText"><w:name w:val="footnote text"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:style>` +
     `<w:style w:type="character" w:styleId="FootnoteReference"><w:name w:val="footnote reference"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style>` +
+    `<w:style w:type="paragraph" w:styleId="EndnoteText"><w:name w:val="endnote text"/><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:line="240" w:lineRule="auto"/></w:pPr><w:rPr><w:sz w:val="18"/></w:rPr></w:style>` +
+    `<w:style w:type="character" w:styleId="EndnoteReference"><w:name w:val="endnote reference"/><w:rPr><w:vertAlign w:val="superscript"/></w:rPr></w:style>` +
     `</w:styles>`
   );
 }
@@ -921,6 +935,19 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
     files.push(['word/footnotes.xml', DECL + `<w:footnotes ${W_NS}>${sep('separator', 0, 'separator')}${sep('continuationSeparator', 1, 'continuationSeparator')}${notes}</w:footnotes>`]);
     ctx.addRel('footnotes', 'footnotes.xml');
   }
+  const hasEndnotes = ctx.endnotes.length > 0;
+  if (hasEndnotes) {
+    const sep = (type: string, id: number, tag: string) =>
+      `<w:endnote w:type="${type}" w:id="${id}"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:${tag}/></w:r></w:p></w:endnote>`;
+    const notes = ctx.endnotes
+      .map(
+        (t, i) =>
+          `<w:endnote w:id="${i + 2}"><w:p><w:pPr><w:pStyle w:val="EndnoteText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="EndnoteReference"/></w:rPr><w:endnoteRef/></w:r><w:r><w:t xml:space="preserve"> ${xmlEscape(t)}</w:t></w:r></w:p></w:endnote>`,
+      )
+      .join('');
+    files.push(['word/endnotes.xml', DECL + `<w:endnotes ${W_NS}>${sep('separator', 0, 'separator')}${sep('continuationSeparator', 1, 'continuationSeparator')}${notes}</w:endnotes>`]);
+    ctx.addRel('endnotes', 'endnotes.xml');
+  }
   // 메모 (답글은 같은 메모 안의 문단으로)
   const hasComments = ctx.commentNo.size > 0;
   if (hasComments) {
@@ -953,6 +980,7 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
     DECL +
     `<w:settings ${W_NS}><w:zoom w:percent="100"/>${background ? '<w:displayBackgroundShape/>' : ''}<w:defaultTabStop w:val="${defaultTab}"/>${evenOdd ? '<w:evenAndOddHeaders/>' : ''}<w:characterSpacingControl w:val="doNotCompress"/>` +
     (hasFootnotes ? '<w:footnotePr><w:footnote w:id="0"/><w:footnote w:id="1"/></w:footnotePr>' : '') +
+    (hasEndnotes ? '<w:endnotePr><w:endnote w:id="0"/><w:endnote w:id="1"/></w:endnotePr>' : '') +
     // Kite 는 문단의 위 간격과 앞 문단의 아래 간격을 더해 그린다: Word 도 그렇게 하도록 적는다 (없으면 큰 쪽만 둔다)
     `<w:compat><w:doNotUseHTMLParagraphAutoSpacing/><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>`;
 
@@ -968,6 +996,7 @@ export async function writeDocx(doc: KDocument): Promise<Uint8Array> {
     `<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>` +
     `<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>` +
     (hasFootnotes ? `<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>` : '') +
+    (hasEndnotes ? `<Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>` : '') +
     (hasComments ? `<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>` : '') +
     hfOverrides.join('') +
     `<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>` +

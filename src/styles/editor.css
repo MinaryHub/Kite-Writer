@@ -170,6 +170,10 @@ ol[style*='k-gov'] ol ol ol ol ol ol ol:not([style*='list-style-type']) { list-s
   margin: 0;
   position: relative;
 }
+/* 칸 안의 표: 바깥 여백(한글의 표 바깥 여백·줄 간격)이 앞뒤 표의 여백과 겹치지 않게 (한글은 표마다 한 줄을 차지해 간격이 더해진다) */
+.kdoc-content :is(td, th) > .tableWrapper {
+  display: flow-root;
+}
 .kdoc-content .table-handle {
   position: absolute;
   left: -17px;
@@ -470,6 +474,7 @@ ol[style*='k-gov'] ol ol ol ol ol ol ol:not([style*='list-style-type']) { list-s
 }
 
 /* ----- 각주 ----- */
+.kdoc-content sup.endnote-ref,
 .kdoc-content sup.footnote-ref {
   font-size: 0.62em;
   vertical-align: super;
@@ -478,6 +483,7 @@ ol[style*='k-gov'] ol ol ol ol ol ol ol:not([style*='list-style-type']) { list-s
   cursor: pointer;
   padding: 0 1px;
 }
+.kdoc-content sup.endnote-ref::after,
 .kdoc-content sup.footnote-ref::after {
   content: ')';
 }
@@ -1193,7 +1199,42 @@ p[data-cell-tail]:is(:empty, :has(> br:only-child)):not(.k-caret-here) {
 .print-page .k-field {
   background: none;
 }
+/* 표 계산식: 화면에서만 옅은 바탕 (인쇄에는 글만) */
+.kdoc-content .k-formula {
+  background: rgba(47, 111, 214, 0.08);
+  border-radius: 2px;
+}
+.print-page .k-formula {
+  background: none;
+}
+/* 상호 참조: 화면에서만 옅은 밑줄 (인쇄에는 글만) */
+.kdoc-content .k-xref {
+  border-bottom: 1px dotted rgba(26, 79, 181, 0.55);
+}
+.print-page .k-xref {
+  border-bottom: none;
+}
 .print-page .k-field[data-empty] {
   visibility: hidden;
 }
 
+
+/* ----- 책갈피: 폭 없는 자리. 문단 부호를 보일 때만 작은 깃발 ----- */
+.kdoc-content .k-bookmark {
+  display: inline;
+}
+.show-marks .kdoc-content .k-bookmark::before {
+  content: '\2691';
+  color: #2f80ed;
+  font-size: 0.7em;
+  vertical-align: super;
+  margin: 0 -0.35em;
+  pointer-events: none;
+}
+
+/* ----- 세로쓰기 칸·글상자: 글자는 위에서 아래로, 줄은 오른쪽에서 왼쪽으로 (한글처럼 영문 글자도 세운다) ----- */
+.kdoc-content td[data-vertical],
+.kdoc-content th[data-vertical] {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+}

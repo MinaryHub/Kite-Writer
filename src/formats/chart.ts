@@ -31,6 +31,8 @@ interface Series {
   pts: Map<number, string>;
   /** 값의 표시 형식 (numCache 의 formatCode) */
   fmt: string;
+  /** 계열의 데이터 레이블 설정 (c:ser/c:dLbls): 묶음의 설정보다 앞선다 */
+  dl: Element | null;
 }
 
 interface Group {
@@ -49,6 +51,8 @@ interface Group {
   radarFill: boolean;
   /** 주식형의 고가-저가 선 */
   hiLow: boolean;
+  /** 묶음의 데이터 레이블 설정 (c:barChart/c:dLbls 등) */
+  dl: Element | null;
 }
 
 interface TextStyle {
@@ -263,7 +267,7 @@ function parseSeries(ser: Element, kind: Kind, idx: number, theme: Map<string, s
     const n = catNum ? numOf(v) : null;
     return n != null ? formatNumber(n, cat.fmt) : v ?? '';
   });
-  return { name: String(name), cats, vals: val.vals.map(numOf), xs, fill, line, lineW: lw, marker, markerColor, pts, fmt: val.fmt };
+  return { name: String(name), cats, vals: val.vals.map(numOf), xs, fill, line, lineW: lw, marker, markerColor, pts, fmt: val.fmt, dl: kid(ser, 'dLbls') };
 }
 
 const GROUPS: Record<string, Kind> = {
@@ -300,6 +304,7 @@ function parseGroup(el: Element, kind: Kind, theme: Map<string, string>, base: n
   const dl = kid(el, 'dLbls') || descendant(el, 'dLbls');
   const on = (n: string) => attr(kid(dl, n), 'val') === '1';
   return {
+    dl: kid(el, 'dLbls'),
     kind,
     radarFill: v('radarStyle') === 'filled',
     hiLow: !!kid(el, 'hiLowLines'),
@@ -330,6 +335,13 @@ class Svg {
   }
   path(d: string, fill: string, stroke = 'none', sw = 0, extra = '') {
     this.parts.push(`<path d="${d}" fill="${fill}" stroke="${stroke}"${sw ? ` stroke-width="${r1(sw)}"` : ''}${extra}/>`);
+  }
+  /** 돌린 글 (축 제목의 vert270: -90도) */
+  textRot(x: number, y: number, s: string, st: TextStyle, deg: number) {
+    if (!s) return;
+    this.parts.push(
+      `<text x="${r1(x)}" y="${r1(y)}" transform="rotate(${deg} ${r1(x)} ${r1(y)})" font-family="${esc(this.font)}" font-size="${r1(st.size)}"${st.bold ? ' font-weight="bold"' : ''} fill="${st.color}" text-anchor="middle" dominant-baseline="central">${esc(s)}</text>`,
+    );
   }
   text(x: number, y: number, s: string, st: TextStyle, anchor: 'start' | 'middle' | 'end' = 'start') {
     if (!s) return;
@@ -620,7 +632,14 @@ function drawAxes(s: Svg, groups: Group[], plot: Element, box: { left: number; t
     } else for (const ser of g.series) for (const v of ser.vals) if (v != null) ((lo = Math.min(lo, v)), (hi = Math.max(hi, v)));
   }
   if (!Number.isFinite(lo)) ((lo = 0), (hi = 1));
-  const sc = niceScale(lo, hi, pct ? { min: 0, max: 1, unit: fixedOf(vAx).unit ?? 0.1 } : fixedOf(vAx));
+  // 값 축 칸 수: 값 축 길이에 글자 높이의 약 2.5배마다 하나 (2~10칸). 한글 2018 의 s5 차트(높이 약 230px, 12pt)가 5칸
+  const titleOf = (ax: Element | null) => (ax && !deleted(ax) ? titleText(kid(ax, 'title')) : null);
+  const vTitle = titleOf(vAx);
+  const xTitle = scatter ? titleOf(xAx) : titleOf(catAx);
+  const titleSt = (ax: Element | null) => textStyleOf(descendant(kid(kid(ax, 'title'), 'tx'), 'rich'), theme, { size: (10 * 96) / 72, color: txt.color, bold: false });
+  const estLen = horiz ? box.right - box.left - 40 : box.bottom - box.top - 8 - (deleted(xAx) ? 0 : ct.size * 1.6) - (xTitle ? titleSt(xAx).size * 1.6 : 0);
+  const maxSteps = Math.max(2, Math.min(10, Math.floor(estLen / ((horiz ? vt.size * 4 : vt.size) * 2.5))));
+  const sc = niceScale(lo, hi, pct ? { min: 0, max: 1, unit: fixedOf(vAx).unit ?? 0.1 } : fixedOf(vAx), maxSteps);
   const vFmt = (() => {
     const nf = kid(vAx, 'numFmt');
     if (pct) return '0%';
@@ -654,13 +673,26 @@ function drawAxes(s: Svg, groups: Group[], plot: Element, box: { left: number; t
   // 축 글자 자리
   const valSt = horiz ? ct : vt;
   const sideLabels = horiz ? catLabels : scatter ? vLabels : vLabels;
-  const sideW = sideLabels.length ? Math.min((box.right - box.left) * 0.4, Math.max(...sideLabels.map((t) => textW(t, (horiz ? ct : vt).size)))) + 8 : 0;
+  // 축 글자와 축 사이: 눈금(4px) + 글자 크기의 0.35 (한글 2018 의 s5 차트로 맞춤: 축에서 글자 끝까지 약 9px, 항목 글자 가운데까지 글자 크기의 1.2배)
+  const sideGap = 4 + (horiz ? ct : vt).size * 0.35;
+  const sideW = sideLabels.length ? Math.min((box.right - box.left) * 0.4, Math.max(...sideLabels.map((t) => textW(t, (horiz ? ct : vt).size)))) + sideGap + 2 : 0;
   const bottomLabels = horiz ? vLabels : scatter ? xLabels : catLabels;
-  const bottomH = bottomLabels.length ? (horiz ? vt : ct).size * 1.6 : 0;
-  const L = box.left + sideW;
+  const bottomSt = horiz ? vt : ct;
+  const bottomOff = bottomSt.size * 1.2;
+  const bottomH = bottomLabels.length ? bottomSt.size * 2.1 : 0;
+  // 축 제목: 세로 축은 왼쪽에 돌려서, 가로 축은 아래에
+  const sideTitle = horiz ? xTitle : vTitle;
+  const sideTitleSt = titleSt(horiz ? xAx : vAx);
+  const bottomTitle = horiz ? vTitle : xTitle;
+  const bottomTitleSt = titleSt(horiz ? vAx : xAx);
+  const sideTitleW = sideTitle ? sideTitleSt.size * 1.6 : 0;
+  const bottomTitleH = bottomTitle ? bottomTitleSt.size * 1.6 : 0;
+  const L = box.left + sideTitleW + sideW;
   const R = box.right - 4;
-  const T = box.top + 4;
-  const B = box.bottom - bottomH;
+  const T = box.top + 4 + vt.size * 0.3;
+  const B = box.bottom - bottomH - bottomTitleH;
+  if (sideTitle && B - T > 10) s.textRot(box.left + sideTitleW / 2, (T + B) / 2, fitText(sideTitle, sideTitleSt.size, B - T), sideTitleSt, -90);
+  if (bottomTitle && R - L > 10) s.text((L + R) / 2, box.bottom - bottomTitleH / 2, fitText(bottomTitle, bottomTitleSt.size, R - L), bottomTitleSt, 'middle');
   if (!(R - L > 10 && B - T > 10)) return;
   void valSt;
   const reverseCats = attr(kid(kid(xAx, 'scaling'), 'orientation'), 'val') === 'maxMin';
@@ -682,8 +714,8 @@ function drawAxes(s: Svg, groups: Group[], plot: Element, box: { left: number; t
   // 값 축 글자
   vLabels.forEach((t, i) => {
     const p = vPos(ticks[i]);
-    if (horiz) s.text(p, B + vt.size * 0.85, t, vt, 'middle');
-    else s.text(L - 6, p, t, vt, 'end');
+    if (horiz) s.text(p, B + bottomOff, t, vt, 'middle');
+    else s.text(L - sideGap, p, t, vt, 'end');
   });
   // 항목 자리 (가로 막대는 아래에서 위로)
   const band = (horiz ? B - T : R - L) / nCat;
@@ -700,14 +732,14 @@ function drawAxes(s: Svg, groups: Group[], plot: Element, box: { left: number; t
     catLabels.forEach((c, i) => {
       if (i % useStep) return;
       const p = catAt(i);
-      if (horiz) s.text(L - 6, p, fitText(c, st.size, maxW), st, 'end');
-      else s.text(p, B + st.size * 0.85, fitText(c, st.size, useStep > 1 ? band * useStep : band - 2), st, 'middle');
+      if (horiz) s.text(L - sideGap, p, fitText(c, st.size, maxW), st, 'end');
+      else s.text(p, B + bottomOff, fitText(c, st.size, useStep > 1 ? band * useStep : band - 2), st, 'middle');
     });
   }
   if (scatter && xs)
     xLabels.forEach((t, i) => {
       const p = L + ((xTicks[i] - xs!.min) / (xs!.max - xs!.min || 1)) * (R - L);
-      s.text(p, B + ct.size * 0.85, t, ct, 'middle');
+      s.text(p, B + bottomOff, t, ct, 'middle');
     });
   // 계열
   const zero = vPos(Math.max(sc.min, Math.min(sc.max, 0)));
@@ -745,10 +777,11 @@ function drawAxes(s: Svg, groups: Group[], plot: Element, box: { left: number; t
           // 가로 막대: 계열이 아래에서 위로 쌓인다
           if (horiz) s.rect(Math.min(p0, p1), c - off - bw, Math.abs(p1 - p0), bw, color);
           else s.rect(c + off, Math.min(p0, p1), bw, Math.abs(p1 - p0), color);
-          if (g.labels.val) {
-            const lt = formatNumber(ser.vals[i]!, ser.fmt);
-            if (horiz) s.text(Math.max(p0, p1) + 4, c - off - bw / 2, lt, { ...txt, size: (9 * 96) / 72, color: '#404040' });
-            else s.text(c + off + bw / 2, Math.min(p0, p1) - 8, lt, { ...txt, size: (9 * 96) / 72, color: '#404040' }, 'middle');
+          const lb = labelOf(g, ser, theme, txt);
+          if (lb) {
+            const lt = formatNumber(ser.vals[i]!, lb.fmt);
+            if (horiz) s.text(Math.max(p0, p1) + 4, c - off - bw / 2, lt, lb.st);
+            else s.text(c + off + bw / 2, Math.min(p0, p1) - lb.st.size * 0.6 - 3, lt, lb.st, 'middle');
           }
         }
       });
@@ -796,10 +829,11 @@ function drawAxes(s: Svg, groups: Group[], plot: Element, box: { left: number; t
           if (color !== 'none' && w > 0 && (g.kind === 'line' || ser.lineW)) s.path('M' + pts.map((p) => `${r1(p[0])} ${r1(p[1])}`).join('L'), 'none', color, w, ' stroke-linejoin="round" stroke-linecap="round"');
           if (ser.marker || g.kind === 'scatter') for (const p of pts) s.path(`M${r1(p[0] - 3.5)} ${r1(p[1])}a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0Z`, ser.markerColor || (color === 'none' ? paletteColor(si, theme) : color));
         }
-        if (g.labels.val)
+        const lb = labelOf(g, ser, theme, txt);
+        if (lb)
           pts.forEach((p, i) => {
             const v = ser.vals.filter((x) => x != null)[i];
-            if (v != null) s.text(p[0], p[1] - 10, formatNumber(v, ser.fmt), { ...txt, size: (9 * 96) / 72, color: '#404040' }, 'middle');
+            if (v != null) s.text(p[0], p[1] - lb.st.size * 0.6 - 4, formatNumber(v, lb.fmt), lb.st, 'middle');
           });
       }
     }
@@ -815,7 +849,45 @@ function drawAxes(s: Svg, groups: Group[], plot: Element, box: { left: number; t
   } else {
     s.line(L, B, R, B, '#D9D9D9', 1);
   }
+  // 값 축 선 (적힌 선이 있을 때만)과 바깥 눈금 (majorTickMark out·cross)
+  if (!scatter && vAx && !deleted(vAx)) {
+    const vLn = kid(kid(vAx, 'spPr'), 'ln');
+    const vColor = vLn && !kid(vLn, 'noFill') ? colorOf(kid(vLn, 'solidFill'), theme)?.c || null : null;
+    const vTick = attr(kid(vAx, 'majorTickMark'), 'val') || 'cross';
+    if (vColor) {
+      if (horiz) s.line(L, B, R, B, vColor, 1);
+      else s.line(L, T, L, B, vColor, 1);
+      if (vTick === 'out' || vTick === 'cross')
+        for (const v of ticks) {
+          const p = vPos(v);
+          if (horiz) s.line(p, B, p, B + 4, vColor, 1);
+          else s.line(L - 4, p, L, p, vColor, 1);
+        }
+    }
+  }
+  if (!scatter && xAx && !deleted(xAx)) {
+    const xLn = kid(kid(xAx, 'spPr'), 'ln');
+    const xColor = xLn && !kid(xLn, 'noFill') ? colorOf(kid(xLn, 'solidFill'), theme)?.c || null : null;
+    const xTick = attr(kid(xAx, 'majorTickMark'), 'val') || 'cross';
+    if (xColor && (xTick === 'out' || xTick === 'cross'))
+      for (let i = 0; i <= nCat; i++) {
+        const p = horiz ? B - i * band : L + i * band;
+        if (horiz) s.line(zero - 4, p, zero, p, xColor, 1);
+        else s.line(p, zero, p, zero + 4, xColor, 1);
+      }
+  }
   void gray;
+}
+
+/** 계열의 데이터 레이블: 보일지, 표시 형식, 글자 모양 (계열의 c:dLbls 가 묶음의 것보다 앞선다). 안 보이면 null */
+function labelOf(g: Group, ser: Series, theme: Map<string, string>, txt: TextStyle): { fmt: string; st: TextStyle } | null {
+  const dl = ser.dl || g.dl;
+  const show = ser.dl ? attr(kid(ser.dl, 'delete'), 'val') !== '1' && attr(kid(ser.dl, 'showVal'), 'val') === '1' : g.labels.val;
+  if (!show) return null;
+  const nf = kid(dl, 'numFmt');
+  const fmt = nf && attr(nf, 'sourceLinked') !== '1' ? attr(nf, 'formatCode') || ser.fmt : ser.fmt;
+  const st = textStyleOf(kid(dl, 'txPr'), theme, { ...txt, size: (9 * 96) / 72, color: '#404040' });
+  return { fmt, st };
 }
 
 /** 차트 XML 에서 계열·값을 꺼내 본다 (시험용) */

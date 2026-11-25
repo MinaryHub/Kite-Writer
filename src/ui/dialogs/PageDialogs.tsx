@@ -3,6 +3,7 @@ import { app } from '../../app/controller';
 import { Modal, OkCancel, Fieldset, NumberInput, Seg } from '../widgets';
 import type { DocSettings, HeaderFooter, HFAlign, LineNumbering, PageNumFormat, PageNumPos, PageSetup } from '../../types';
 import { formatPageNumber } from '../../formats/common';
+import { sectionAt } from '../../editor/extensions/nodes';
 
 const PAPERS: { name: string; w: number; h: number }[] = [
   { name: 'A4 (국배판) [210×297mm]', w: 210, h: 297 },
@@ -25,7 +26,15 @@ function applySettings(next: DocSettings) {
 
 export function PageSetupDialog({ onClose }: { onClose: () => void }) {
   const tab = app.active!;
-  const [p, setP] = useState<PageSetup>({ ...tab.settings.page });
+  const editor = tab.editor;
+  // 구역: 커서가 있는 구역의 용지를 고친다 (구역 나누기가 있는 문서는 '문서 전체'도 고를 수 있다)
+  const sec = sectionAt(editor.state.doc, editor.state.selection.from);
+  const sectionBreaks: number[] = [];
+  editor.state.doc.forEach((n, off) => {
+    if (n.type.name === 'pageBreak' && n.attrs.sectionPage) sectionBreaks.push(off);
+  });
+  const [scope, setScope] = useState<'section' | 'all'>(sectionBreaks.length ? 'section' : 'all');
+  const [p, setP] = useState<PageSetup>({ ...((sec?.node.attrs.sectionPage as PageSetup | null) || tab.settings.page) });
   const up = (x: Partial<PageSetup>) => setP({ ...p, ...x });
   // 줄 번호 (한글의 구역 설정 → 줄 번호)
   const [ln, setLn] = useState<LineNumbering | null>(tab.settings.lineNumbers ? { ...tab.settings.lineNumbers } : null);
@@ -37,7 +46,17 @@ export function PageSetupDialog({ onClose }: { onClose: () => void }) {
       app.toast('여백이 너무 커서 본문 영역이 없습니다.', 'error');
       return;
     }
-    applySettings({ ...tab.settings, page: p, lineNumbers: ln });
+    // 구역 나누기의 용지: 현재 구역만, 또는 문서 전체(모든 구역)
+    const targets = scope === 'all' ? sectionBreaks : sec ? [sec.pos] : [];
+    if (targets.length) {
+      const tr = editor.state.tr;
+      for (const pos of targets) {
+        const n = tr.doc.nodeAt(pos);
+        if (n) tr.setNodeMarkup(pos, undefined, { ...n.attrs, sectionPage: { ...p, columns: (n.attrs.sectionPage as PageSetup | null)?.columns ?? p.columns } });
+      }
+      editor.view.dispatch(tr);
+    }
+    applySettings({ ...tab.settings, page: scope === 'all' || !sec ? p : tab.settings.page, lineNumbers: ln });
     onClose();
   };
   const W = p.landscape ? Math.max(p.width, p.height) : p.width;
@@ -120,6 +139,19 @@ export function PageSetupDialog({ onClose }: { onClose: () => void }) {
           한글과 같이 본문은 '위쪽 + 머리말' 아래에서 시작하고 '아래쪽 + 꼬리말' 위에서 끝납니다.
         </div>
       </Fieldset>
+      {sectionBreaks.length > 0 && (
+        <Fieldset legend="적용 범위">
+          <Seg
+            value={scope}
+            onChange={(v) => setScope(v as 'section' | 'all')}
+            options={[
+              { value: 'section', label: '현재 구역' },
+              { value: 'all', label: '문서 전체' },
+            ]}
+          />
+          <div className="unit">구역 나누기(Alt+Shift+Enter)로 나눈 구역마다 용지를 따로 정할 수 있습니다.</div>
+        </Fieldset>
+      )}
       <Fieldset legend="줄 번호">
         <label className="check">
           <input type="checkbox" checked={!!ln} onChange={(e) => setLn(e.target.checked ? { restart: 'continue', countBy: 1, distance: 5, start: 1 } : null)} />
@@ -264,6 +296,87 @@ export function PageNumberDialog({ onClose }: { onClose: () => void }) {
           </div>
         </Fieldset>
       </div>
+    </Modal>
+  );
+}
+
+/** 커서가 있는 본문 최상위 블록 (표 안이면 그 표)의 자리와 노드 */
+function topBlockAtCursor() {
+  const editor = app.active!.editor;
+  const $p = editor.state.selection.$from;
+  if ($p.depth < 1) return null;
+  const pos = $p.before(1);
+  const node = editor.state.doc.nodeAt(pos);
+  return node ? { editor, pos, node } : null;
+}
+
+/** 블록의 속성 하나를 고친다 (되돌리기 기록에 남는다) */
+function setTopBlockAttr(key: string, value: unknown) {
+  const at = topBlockAtCursor();
+  if (!at) return;
+  const { editor, pos, node } = at;
+  editor.view.dispatch(editor.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, [key]: value }, node.marks));
+  editor.commands.focus();
+}
+
+const HIDE_ITEMS: [string, string][] = [
+  ['h', '머리말'],
+  ['f', '꼬리말'],
+  ['n', '쪽 번호'],
+  ['m', '바탕쪽'],
+  ['b', '쪽 테두리'],
+  ['x', '쪽 배경'],
+];
+
+/** 감추기: 커서가 있는 쪽(그 문단이 놓인 쪽)에서만 머리말·꼬리말·쪽 번호 등을 감춘다 (한글의 쪽 → 감추기) */
+export function PageHideDialog({ onClose }: { onClose: () => void }) {
+  const at = topBlockAtCursor();
+  const cur = typeof at?.node.attrs.pageHide === 'string' ? (at.node.attrs.pageHide as string) : '';
+  const [on, setOn] = useState<Record<string, boolean>>(Object.fromEntries(HIDE_ITEMS.map(([k]) => [k, cur.includes(k)])));
+  const apply = () => {
+    const v = HIDE_ITEMS.map(([k]) => (on[k] ? k : '')).join('');
+    setTopBlockAttr('pageHide', v || null);
+    onClose();
+  };
+  return (
+    <Modal title="감추기" onClose={onClose} width={360} onEnter={apply} footer={<OkCancel onOk={apply} onCancel={onClose} />}>
+      <Fieldset legend="이 쪽에서 감출 것">
+        <div className="form-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+          {HIDE_ITEMS.map(([k, label]) => (
+            <label key={k} className="check">
+              <input type="checkbox" checked={!!on[k]} onChange={(e) => setOn({ ...on, [k]: e.target.checked })} />
+              {label}
+            </label>
+          ))}
+        </div>
+      </Fieldset>
+      <div className="unit">커서가 있는 문단이 놓인 쪽에만 적용됩니다. 한글(HWP·HWPX)로 저장해도 감추기로 남습니다.</div>
+    </Modal>
+  );
+}
+
+/** 새 번호로 시작: 커서가 있는 문단이 놓인 쪽부터 쪽 번호를 이 번호로 다시 매긴다 (한글의 쪽 → 새 번호로 시작) */
+export function PageNumStartDialog({ onClose }: { onClose: () => void }) {
+  const at = topBlockAtCursor();
+  const cur = at?.node.attrs.pageNumStart;
+  const [use, setUse] = useState(cur != null);
+  const [n, setN] = useState<number>(typeof cur === 'number' ? cur : 1);
+  const apply = () => {
+    setTopBlockAttr('pageNumStart', use ? Math.max(0, Math.min(32767, Math.round(n))) : null);
+    onClose();
+  };
+  return (
+    <Modal title="새 번호로 시작" onClose={onClose} width={360} onEnter={apply} footer={<OkCancel onOk={apply} onCancel={onClose} />}>
+      <Fieldset legend="쪽 번호">
+        <label className="check">
+          <input type="checkbox" checked={use} onChange={(e) => setUse(e.target.checked)} />이 쪽부터 새 번호로 시작
+        </label>
+        <div className="form-grid" style={{ marginTop: 8 }}>
+          <label>시작 번호</label>
+          <NumberInput value={n} onChange={(v) => setN(v)} min={0} />
+        </div>
+      </Fieldset>
+      <div className="unit">커서가 있는 문단이 놓인 쪽부터 다시 매깁니다. 한글(HWP·HWPX)로 저장해도 새 번호로 남습니다.</div>
     </Modal>
   );
 }

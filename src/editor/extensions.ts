@@ -18,6 +18,7 @@ import { MathInline } from './extensions/math';
 import { TextStyleExt } from './extensions/textStyleExt';
 import {
   KImage,
+  Bookmark,
   PageBreak,
   ColumnBreak,
   Footnote,
@@ -43,13 +44,16 @@ import { CheckMarks } from './extensions/checkMarks';
 import { Insertion, Deletion, TrackChanges } from './extensions/trackChanges';
 import { CommentMark } from './extensions/comments';
 import { HwpMetrics } from './extensions/hwpMetrics';
+import { HwpKeep } from './extensions/hwpKeep';
 import { TabFill } from './extensions/tabFill';
 import { Sections } from './extensions/sections';
 import { Shape } from './extensions/shape';
 import { FloatWrap } from './extensions/floatWrap';
 import { ObjectPick } from './extensions/objectPick';
 import { ClickHere } from './extensions/clickHere';
-import { Compose, KStrike, KUnderline, Ruby } from './extensions/charMarks';
+import { CrossRef } from './extensions/crossRef';
+import { Formula } from './extensions/formula';
+import { AutoNum, Compose, KStrike, KUnderline, Ruby } from './extensions/charMarks';
 
 /** 문서 스키마를 구성하는 확장 (편집기 없이 변환에도 사용) */
 export function getExtensions(): AnyExtension[] {
@@ -66,7 +70,10 @@ export function getExtensions(): AnyExtension[] {
     KStrike,
     Ruby,
     Compose,
+    AutoNum,
     ClickHere,
+    CrossRef,
+    Formula,
     TextStyle,
     Color,
     // 글꼴 이름은 그대로 저장하고, 화면에는 대체 글꼴 목록을 붙여 그린다
@@ -131,6 +138,7 @@ export function getExtensions(): AnyExtension[] {
     TaskItem.configure({ nested: true }),
     ParagraphFormat,
     TextStyleExt,
+    Bookmark,
     PageBreak,
     ColumnBreak,
     Footnote,
@@ -148,7 +156,7 @@ export function getExtensions(): AnyExtension[] {
 
 /** 편집 화면용 확장 (스키마 + 편집 기능) */
 export function getEditorExtensions(): AnyExtension[] {
-  return [...getExtensions(), KeyboardExtras, CellNoWrap, Search, CharacterCount, Pagination, TableResize, CheckMarks, TrackChanges, HwpMetrics, Sections, TabFill, FloatWrap, ObjectPick];
+  return [...getExtensions(), KeyboardExtras, CellNoWrap, Search, CharacterCount, Pagination, TableResize, CheckMarks, TrackChanges, HwpMetrics, HwpKeep, Sections, TabFill, FloatWrap, ObjectPick];
 }
 
 let cachedSchema: Schema | null = null;

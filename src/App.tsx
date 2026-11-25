@@ -29,7 +29,7 @@ export function App() {
     app.init();
     const onFootnote = (e: Event) => {
       const d = (e as CustomEvent).detail;
-      app.openDialog('footnote', { pos: d.pos, text: d.text });
+      app.openDialog('footnote', { pos: d.pos, text: d.text, kind: d.kind === 'end' ? 'end' : null });
     };
     window.addEventListener('kite:edit-footnote', onFootnote);
     // 안드로이드: 화면 키보드가 올라와 화면이 줄면 입력 중인 자리가 키보드에 가리지 않게 다시 보이게 한다

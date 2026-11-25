@@ -3,9 +3,9 @@ import type { DocSettings, HeaderFooter, PageNumFormat, PageNumbering, PageSetup
 import { blocksHtml, hfRichHtml } from './hfRich';
 import { layoutTabsHtml } from './editor/tabLayout';
 import type { DocTab } from './doc/docTab';
-import { PX_PER_MM, formatPageNumber, xmlEscape } from './formats/common';
+import { PX_PER_MM, cleanPageNumStart, formatPageNumber, xmlEscape } from './formats/common';
 import { fontStack } from './fonts';
-import { FN_FONT_PX, FN_LINE, FN_SEP } from './editor/extensions/pagination';
+import { EN_LINE, FN_FONT_PX, FN_LINE, FN_SEP } from './editor/extensions/pagination';
 import { changeBarsHtml, lineNumbersHtml } from './lineNumbers';
 
 export const PAGE_GAP = 18;
@@ -104,6 +104,8 @@ export function planPages(
   W: number,
   gap = PAGE_GAP,
   pageHfs?: ({ hf: SectionHf; start: number } | null)[],
+  /** 쪽마다 '새 번호로 시작' 한 번호 (pageNumStartsOf) */
+  restarts?: Map<number, number>,
 ): PagePlan[] {
   const base = computeGeom(s, gap);
   // 용지가 따로 없는 쪽(첫 구역)의 설정: 첫 쪽만의 본문 영역을 넣은 것
@@ -120,12 +122,14 @@ export function planPages(
     let settings: DocSettings = setup ? { ...s, page: setup } : s0;
     // 구역마다 다른 머리말·꼬리말: 그 구역의 것과 그 구역의 첫 쪽, 쪽 번호 다시 시작·모양
     const sh = pageHfs?.[k];
-    if (sh) {
-      if (sh.start === k && (sh.hf.start != null || sh.hf.fmt)) {
-        numbering = { ...numbering, ...(sh.hf.start != null ? { start: sh.hf.start, base: k } : {}), ...(sh.hf.fmt ? { format: sh.hf.fmt as PageNumFormat } : {}) };
-      }
-      settings = { ...settings, header: sh.hf.header, footer: sh.hf.footer, hideFirst: undefined, sectionStart: sh.start, pageNumber: numbering };
-    } else if (numbering !== s.pageNumber) settings = { ...settings, pageNumber: numbering };
+    if (sh && sh.start === k && (sh.hf.start != null || sh.hf.fmt)) {
+      numbering = { ...numbering, ...(sh.hf.start != null ? { start: sh.hf.start, base: k } : {}), ...(sh.hf.fmt ? { format: sh.hf.fmt as PageNumFormat } : {}) };
+    }
+    // 새 번호로 시작: 이 쪽부터 그 번호
+    const rs = restarts?.get(k);
+    if (rs != null) numbering = { ...numbering, start: rs, base: k };
+    if (sh) settings = { ...settings, header: sh.hf.header, footer: sh.hf.footer, hideFirst: undefined, sectionStart: sh.start, pageNumber: numbering };
+    else if (numbering !== s.pageNumber) settings = { ...settings, pageNumber: numbering };
     out.push({ g, settings, left, top, contentTop: top + g.mt - base.mt, dx: left + g.ml - hostLeft });
     top += g.H + gap;
   }
@@ -240,6 +244,34 @@ const SAFE_GRADIENT = /^(linear|radial|conic)-gradient\([\w\s%.,#()-]{1,400}\)$/
  * 화면(PageView)의 용지와 쪽 경계 가리개, 인쇄용 쪽이 같은 것을 쓴다. 그릴 것이 없으면 빈 문자열
  */
 const hideCache = new WeakMap<object, Map<number, string>>();
+const restartCache = new WeakMap<object, Map<number, number>>();
+
+/** 블록이 시작하는 쪽 (쪽 시작 자리 목록에서): 시작 자리가 블록 자리 이하인 마지막 쪽 */
+function pageOfOffset(starts: number[], offset: number): number {
+  let lo = 0;
+  let hi = starts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (starts[mid] <= offset) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/** 쪽마다 '새 번호로 시작' 한 번호: 블록의 pageNumStart 를 그 블록이 시작하는 쪽에. 쪽 나누기 결과가 바뀔 때마다 다시 셈한다 */
+export function pageNumStartsOf(tab: DocTab): Map<number, number> {
+  let m = restartCache.get(tab.layout);
+  if (m) return m;
+  const out = new Map<number, number>();
+  const starts = tab.layout.pageStarts?.length ? tab.layout.pageStarts : [0];
+  tab.editor.state.doc.forEach((node, offset) => {
+    const n = cleanPageNumStart(node.attrs?.pageNumStart);
+    if (n != null) out.set(pageOfOffset(starts, offset), n);
+  });
+  m = out;
+  restartCache.set(tab.layout, m);
+  return m;
+}
 
 /**
  * 쪽마다 감출 것 (한글의 '감추기'): 블록의 pageHide 표시를 그 블록이 시작하는 쪽에 모은다.
@@ -454,6 +486,10 @@ export function pageChromeHtml(tab: DocTab, g: PageGeom, k: number, pageCount: n
   // 줄 번호와 변경 막대 (본문 왼쪽 여백)
   html += lineNumbersHtml(tab, g, k);
   html += changeBarsHtml(tab, g, k);
+  // 미주 (문서 끝: 쪽 본문 맨 위부터)
+  const ens = (tab.layout.endnotes || []).filter((f) => f.page === k);
+  for (const f of ens)
+    html += `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;top:${g.mt + f.y}px;font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:${FN_FONT_PX}px;line-height:${EN_LINE};padding-left:1.6em;text-indent:-1.6em;word-break:keep-all;text-align:justify;box-sizing:border-box">${f.num}) ${xmlEscape(f.text)}</div>`;
   const fns = tab.layout.footnotes.filter((f) => f.page === k);
   if (fns.length) {
     html += `<div style="position:absolute;left:${g.ml}px;width:${g.contentW}px;bottom:${g.mb}px;font-family:'함초롬바탕','HCR Batang','바탕',serif;font-size:${FN_FONT_PX}px;line-height:${FN_LINE}">`;
@@ -557,7 +593,7 @@ function addWrapCarries(clone: HTMLElement, b: PageBox, carries: WrapCarry[]) {
 /** 편집 화면의 쪽 배치 (구역마다 용지가 다르면 쪽마다 다르다) */
 export function printPlans(tab: DocTab): PagePlan[] {
   const pageCount = Math.max(1, tab.layout.pageCount);
-  return planPages(tab.settings, pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP, tab.layout.pageHfs);
+  return planPages(tab.settings, pageCount, tab.layout.pageSetups, stageWidth(tab.settings, tab.editor.state.doc), PAGE_GAP, tab.layout.pageHfs, pageNumStartsOf(tab));
 }
 
 /** k 번째 쪽: 편집 화면의 블록 사본을 쪽 안 자리에 놓고 머리말·꼬리말·쪽 번호·각주를 붙인다 */

@@ -1,4 +1,6 @@
+import { updateCrossRefs } from './crossRefs';
 import { forEachSelectedPara } from '../editor/extensions/paragraphFormat';
+import { sectionAt } from '../editor/extensions/nodes';
 import type { Editor } from '@tiptap/react';
 import { CellSelection } from '@tiptap/pm/tables';
 import { NodeSelection } from '@tiptap/pm/state';
@@ -11,7 +13,7 @@ import * as review from './review';
 import * as collab from '../collab/session';
 import { openSponsor, openContact, contactAvailable } from '../support';
 import { applyLeaderTab, insertToc, updateToc } from './toc';
-import { changeCase, insertTextBox, sortParagraphs, tableCalc, tableEqualHeight, tableToText, textToTable } from './editCommands';
+import { changeCase, insertTableCaption, insertTextBox, sortParagraphs, tableCalc, tableEqualHeight, tableToText, textToTable } from './editCommands';
 
 /** 차례 만들기 (제목 1~3 · 한글의 개요 1~3 문단) */
 async function runInsertToc() {
@@ -357,13 +359,40 @@ export const commands: Record<string, Command> = {
     },
     enabled: () => isImageSelected() && !!(ed()!.state.selection as NodeSelection).node.attrs.crop,
   },
-  'insert.link': { label: '하이퍼링크...', icon: 'Link', shortcut: 'Ctrl+K,H', keys: ['Ctrl+K'], run: () => app.openDialog('link'), enabled: hasDoc },
+  'insert.bookmark': { label: '책갈피...', icon: 'Bookmark', shortcut: 'Ctrl+K,B', run: () => app.openDialog('bookmark'), enabled: hasDoc },
+  'insert.crossRef': { label: '상호 참조...', icon: 'Bookmark', shortcut: 'Ctrl+K,R', run: () => app.openDialog('crossRef'), enabled: hasDoc },
+  'edit.updateCrossRefs': {
+    label: '상호 참조 새로 고침',
+    run: () => {
+      const tab = app.active;
+      if (!tab) return;
+      const n = updateCrossRefs(tab);
+      app.toast(n ? `상호 참조 ${n}개를 새로 고쳤습니다.` : '바뀐 상호 참조가 없습니다.');
+    },
+    enabled: hasDoc,
+  },
+  'insert.link': { label: '하이퍼링크...', icon: 'Link', shortcut: 'Ctrl+K,H', run: () => app.openDialog('link'), enabled: hasDoc },
   'insert.symbol': { label: '문자표...', icon: 'Omega', shortcut: 'Ctrl+F10', keys: ['Ctrl+F10'], run: () => app.openDialog('symbol'), enabled: hasDoc },
   'insert.footnote': { label: '각주', icon: 'Superscript', shortcut: 'Ctrl+N,N', run: () => app.openDialog('footnote', { pos: null, text: '' }), enabled: hasDoc },
+  'insert.endnote': { label: '미주', icon: 'Superscript', shortcut: 'Ctrl+N,E', run: () => app.openDialog('footnote', { pos: null, text: '', kind: 'end' }), enabled: hasDoc },
   'insert.math': { label: '수식...', icon: 'Sigma', shortcut: 'Ctrl+N,M', run: () => app.openDialog('math', { pos: null, latex: '', hwp: '' }), enabled: hasDoc },
   'insert.toc': { label: '차례 만들기', icon: 'TableOfContents', run: () => void runInsertToc(), enabled: hasDoc },
   'insert.tocUpdate': { label: '차례 새로 고침', icon: 'RefreshCw', run: () => void runUpdateToc(), enabled: hasDoc },
   'format.leaderTab': { label: '제목과 쪽 사이 점선 채우기', icon: 'MoreHorizontal', run: runLeaderTab, enabled: hasDoc },
+  'insert.sectionBreak': {
+    label: '구역 나누기',
+    icon: 'SeparatorHorizontal',
+    shortcut: 'Alt+Shift+Enter',
+    keys: ['Alt+Shift+Enter'],
+    run: () => {
+      const e = ed();
+      if (!e || !app.active) return;
+      // 새 구역의 용지는 지금 구역의 것을 그대로 (편집 용지에서 '현재 구역'으로 바꾼다)
+      const cur = sectionAt(e.state.doc, e.state.selection.from);
+      e.chain().focus().setSectionBreak({ ...(cur?.node.attrs.sectionPage || app.active.settings.page) }).run();
+    },
+    enabled: hasDoc,
+  },
   'insert.pageBreak': { label: '쪽 나누기', icon: 'SeparatorHorizontal', shortcut: 'Ctrl+Enter', run: () => chain().setPageBreak().run(), enabled: hasDoc },
   'insert.hr': { label: '가로줄', icon: 'Minus', run: () => chain().setHorizontalRule().run(), enabled: hasDoc },
   'insert.shape': { label: '도형...', icon: 'Shapes', run: () => app.openDialog('shape'), enabled: hasDoc },
@@ -380,6 +409,7 @@ export const commands: Record<string, Command> = {
   // ----- 서식 -----
   'format.char': { label: '글자 모양...', icon: 'Type', shortcut: 'Alt+L', keys: ['Alt+L'], run: () => app.openDialog('charShape'), enabled: hasDoc },
   'format.para': { label: '문단 모양...', icon: 'AlignLeft', shortcut: 'Alt+T', keys: ['Alt+T'], run: () => app.openDialog('paraShape'), enabled: hasDoc },
+  'format.tabs': { label: '탭 설정...', icon: 'MoreHorizontal', run: () => app.openDialog('tabs'), enabled: hasDoc },
   'format.style': { label: '스타일...', icon: 'Palette', shortcut: 'F6', keys: ['F6'], run: () => app.openDialog('style'), enabled: hasDoc },
   'format.bold': { label: '진하게', icon: 'Bold', shortcut: 'Ctrl+B', run: () => chain().toggleBold().run(), active: () => !!ed()?.isActive('bold'), enabled: hasDoc },
   'format.italic': { label: '기울임', icon: 'Italic', shortcut: 'Ctrl+I', run: () => chain().toggleItalic().run(), active: () => !!ed()?.isActive('italic'), enabled: hasDoc },
@@ -416,6 +446,8 @@ export const commands: Record<string, Command> = {
   'page.setup': { label: '편집 용지...', icon: 'FileText', shortcut: 'F7', keys: ['F7'], run: () => app.openDialog('pageSetup'), enabled: hasDoc },
   'page.headerFooter': { label: '머리말/꼬리말...', icon: 'PanelTop', shortcut: 'Ctrl+N,H', run: () => app.openDialog('headerFooter'), enabled: hasDoc },
   'page.number': { label: '쪽 번호 매기기...', icon: 'Hash', shortcut: 'Ctrl+N,P', run: () => app.openDialog('pageNumber'), enabled: hasDoc },
+  'page.newNumber': { label: '새 번호로 시작...', icon: 'RefreshCw', run: () => app.openDialog('pageNumStart'), enabled: hasDoc },
+  'page.hide': { label: '감추기...', icon: 'EyeOff', run: () => app.openDialog('pageHide'), enabled: hasDoc },
   'page.columns': { label: '다단 설정...', icon: 'Columns2', run: () => app.openDialog('columns'), enabled: hasDoc },
   'page.border': { label: '쪽 테두리/배경...', icon: 'Frame', run: () => app.openDialog('pageBorder'), enabled: hasDoc },
   'insert.columnBreak': { label: '단 나누기', icon: 'Columns2', shortcut: 'Ctrl+Shift+Enter', run: () => chain().setColumnBreak().run(), enabled: hasDoc },
@@ -448,8 +480,11 @@ export const commands: Record<string, Command> = {
   'table.selectCell': { label: '셀 블록 지정 (F5 반복: 모든 셀 → 표)', shortcut: 'F5', keys: ['F5'], run: selectCurrentCell, enabled: inTable },
   'table.select': { label: '표 선택', icon: 'Table', run: selectTable, enabled: inTable },
   'table.header': { label: '제목 줄 지정/해제', icon: 'PanelTopOpen', run: () => chain().toggleHeaderRow().run(), enabled: inTable },
-  'table.cellProps': { label: '셀 테두리/배경...', icon: 'PaintBucket', shortcut: 'L', run: () => app.openDialog('cellProps'), enabled: inTable },
+  'table.cellProps': { label: '셀 속성(테두리/배경/여백)...', icon: 'PaintBucket', shortcut: 'L', run: () => app.openDialog('cellProps'), enabled: inTable },
+  'table.caption': { label: '캡션 넣기', icon: 'Type', run: () => ed() && insertTableCaption(ed()!), enabled: inTable },
+  'table.props': { label: '표 속성...', icon: 'Table', shortcut: 'P', run: () => app.openDialog('tableProps'), enabled: inTable },
   'table.equalHeight': { label: '셀 높이를 같게', icon: 'Rows3', run: () => ed() && tableEqualHeight(ed()!), enabled: inTable },
+  'table.formula': { label: '계산식...', icon: 'Calculator', shortcut: 'Ctrl+N,F', run: () => app.openDialog('formula'), enabled: inTable },
   'table.sumRow': { label: '가로 합계', icon: 'Sigma', run: () => ed() && tableCalc(ed()!, 'row', 'sum'), enabled: inTable },
   'table.sumCol': { label: '세로 합계', icon: 'Sigma', run: () => ed() && tableCalc(ed()!, 'col', 'sum'), enabled: inTable },
   'table.avgRow': { label: '가로 평균', icon: 'Calculator', run: () => ed() && tableCalc(ed()!, 'row', 'avg'), enabled: inTable },
@@ -787,7 +822,9 @@ for (const [id, c] of Object.entries(commands)) for (const k of c.keys || []) ke
 
 /** Ctrl+N 다음 글자로 이어지는 한글식 단축키 */
 const CHORDS: Record<string, Record<string, string>> = {
-  'Ctrl+N': { T: 'insert.table', I: 'insert.image', H: 'page.headerFooter', P: 'page.number', N: 'insert.footnote', M: 'insert.math', B: 'insert.textBox' },
+  'Ctrl+N': { T: 'insert.table', I: 'insert.image', H: 'page.headerFooter', P: 'page.number', N: 'insert.footnote', E: 'insert.endnote', F: 'table.formula', M: 'insert.math', B: 'insert.textBox' },
+  // 한글처럼 Ctrl+K 다음 글자: H 하이퍼링크, B 책갈피, R 상호 참조
+  'Ctrl+K': { H: 'insert.link', B: 'insert.bookmark', R: 'insert.crossRef' },
   'Ctrl+Q': { I: 'file.info' },
   'Ctrl+G': { T: 'view.marks' },
 };
@@ -838,13 +875,13 @@ export function installShortcuts() {
       chordTimer = setTimeout(() => (pendingChord = null), 1500);
       return;
     }
-    // 셀 블록에서 M/S/L
+    // 셀 블록에서 M/S/L/P (셀 합치기·나누기·셀 속성·표 속성)
     const editor = ed();
     if (editor && editor.state.selection instanceof CellSelection && !e.ctrlKey && !e.altKey && !e.metaKey && !inField) {
       const k = e.key.toLowerCase();
-      if (k === 'm' || k === 's' || k === 'l') {
+      if (k === 'm' || k === 's' || k === 'l' || k === 'p') {
         e.preventDefault();
-        runCommand(k === 'm' ? 'table.merge' : k === 's' ? 'table.split' : 'table.cellProps');
+        runCommand(k === 'm' ? 'table.merge' : k === 's' ? 'table.split' : k === 'p' ? 'table.props' : 'table.cellProps');
         return;
       }
     }

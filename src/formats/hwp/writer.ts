@@ -1,12 +1,16 @@
 import * as CFB from 'cfb';
 import { clickHereCommand } from '../clickHere';
+import { formulaCommand } from '../formula';
 import { deflateRaw } from 'pako';
-import type { Columns, HeaderFooter, KDocument } from '../../types';
-import { type JNode, mmToHwp, pxToHwp, ptToHwp, parseBorderCss, paraBorderToFill, cleanColumns, HWP_BORDER_WIDTHS, FIXED_SPACE } from '../common';
-import { type CharStyle, type FlatBlock, type FlatFloat, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, unwrapBoxes, fieldKey } from '../flatten';
+import type { Columns, HeaderFooter, KDocument, PageSetup } from '../../types';
+import { type JNode, dataUrlToBytes, mmToHwp, pxToHwp, ptToHwp, parseBorderCss, paraBorderToFill, cleanColumns, HWP_BORDER_WIDTHS, FIXED_SPACE } from '../common';
+import { tableCaptionAt, type CharStyle, type FlatBlock, type FlatFloat, type FlatInline, type FlatPara, type FlatTable, type ParaStyle, charKey, langFontIds, defaultChar, defaultPara, flattenContent, flattenDoc, paraKey, unwrapBoxes, fieldKey } from '../flatten';
 import { prepareImage } from '../imageUtil';
 import { HWP_LINE_STYLES, SHADOW_UNIT_PX, type ShapeData, type ShapeItem, type ShapeRaw } from '../shape';
 import { rawOf, shapeImageSrcs, shapeObjects } from '../hwpx/shapeWriter';
+import { type HwpDocInfoBase, fromB64, mergeDocInfo, parseHwpDocInfo, setLastPara } from './base';
+import type { TabDefs } from '../../editor/tabLayout';
+import { baseKey, digest, hfKey, type RawRef } from '../hwpBase';
 
 const PT2PX = 96 / 72;
 /** 그림 채우는 방식의 번호 (리더의 IMG_FILL_MODES 와 같은 차례) */
@@ -132,6 +136,10 @@ class RecWriter {
     } else h.u32((tag & 0x3ff) | ((level & 0x3ff) << 10) | (size << 20));
     this.parts.push(h.out(), data);
   }
+  /** 이미 레코드 꼴인 바이트를 그대로 (원본 보존형 저장의 원본 문단) */
+  raw(bytes: Uint8Array) {
+    this.parts.push(bytes);
+  }
   out(): Uint8Array {
     const n = this.parts.reduce((a, b) => a + b.length, 0);
     const o = new Uint8Array(n);
@@ -163,21 +171,62 @@ class Registry {
   bfs: BF[] = [];
   bfIds = new Map<string, number>();
   bins: { id: number; ext: string; bytes: Uint8Array }[] = [];
+  /** 문단의 탭 자리 정의 (TAB_DEF): Kite 의 기본 탭 정의 두 개 뒤에 붙는다 */
+  tabDefs: TabDefs[] = [];
+  tabIds = new Map<string, number>();
+  /**
+   * 원본 보존형 저장 (formats/hwpBase.ts): 원본 DocInfo. 있으면 원본 정의를 그대로 두고 Kite 정의는 목록마다 뒤에 붙는다
+   * (번호가 원본 수만큼 밀린다). 글꼴은 언어마다 원본 목록에서 먼저 찾는다
+   */
+  base: HwpDocInfoBase | null = null;
+  langFonts: string[][] | null = null;
+  charBase = 0;
+  paraBase = 0;
+  bfBase = 0;
+  /** 쪽 테두리·글자/문단 기본·표의 테두리/배경 번호 */
+  bfPage = 1;
+  bfChar = 2;
+  bfTable = 3;
 
-  constructor() {
-    this.bf({ bg: null, noBorders: ['l', 'r', 't', 'b'], borders: false }); // 1 쪽 테두리
-    this.bf({ bg: null, noBorders: ['l', 'r', 't', 'b'], borders: false, tag: 'char' } as any); // 2 글자/문단 기본
-    this.bf({ bg: null, noBorders: [], borders: true }); // 3 표
-    this.font('함초롬바탕');
-    this.font('함초롬돋움');
-    this.char(defaultChar());
-    this.para(defaultPara());
+  constructor(base: HwpDocInfoBase | null = null) {
+    if (base) {
+      this.base = base;
+      this.langFonts = base.fontNames.map((f) => [...f]);
+      this.charBase = base.nCs;
+      this.paraBase = base.nPs;
+      this.bfBase = base.nBf;
+    }
+    this.bfPage = this.bf({ bg: null, noBorders: ['l', 'r', 't', 'b'], borders: false }); // 쪽 테두리
+    this.bfChar = this.bf({ bg: null, noBorders: ['l', 'r', 't', 'b'], borders: false, tag: 'char' } as any); // 글자/문단 기본
+    this.bfTable = this.bf({ bg: null, noBorders: [], borders: true }); // 표
+    if (!base) {
+      this.font('함초롬바탕');
+      this.font('함초롬돋움');
+      this.char(defaultChar());
+      this.para(defaultPara());
+    }
   }
-  font(n: string) {
-    let i = this.fonts.indexOf(n);
+  /** 탭 정의 번호: 정한 자리가 없으면 Kite 의 기본 탭 정의 (원본이 있으면 원본 정의 뒤) */
+  tab(t: TabDefs | null | undefined): number {
+    const first = this.base ? this.base.nTab : 0;
+    if (!t?.s?.length) return first;
+    const k = JSON.stringify(t.s);
+    let id = this.tabIds.get(k);
+    if (id === undefined) {
+      id = first + 2 + this.tabDefs.length;
+      this.tabDefs.push(t);
+      this.tabIds.set(k, id);
+    }
+    return id;
+  }
+
+  /** 글꼴 번호 (lang: 한글 0 … 사용자 6). 원본이 없으면 언어마다 같은 목록 */
+  font(n: string, lang = 0) {
+    const list = this.langFonts ? this.langFonts[lang] || this.langFonts[0] : this.fonts;
+    let i = list.indexOf(n);
     if (i < 0) {
-      i = this.fonts.length;
-      this.fonts.push(n);
+      i = list.length;
+      list.push(n);
     }
     return i;
   }
@@ -185,10 +234,10 @@ class Registry {
     const k = charKey(c);
     let id = this.charIds.get(k);
     if (id === undefined) {
-      id = this.chars.length;
+      id = this.charBase + this.chars.length;
       this.chars.push(c);
       this.charIds.set(k, id);
-      langFontIds(c, (n) => this.font(n));
+      langFontIds(c, (n, l) => this.font(n, l));
     }
     return id;
   }
@@ -197,7 +246,7 @@ class Registry {
     let id = this.bfIds.get(k);
     if (id === undefined) {
       this.bfs.push(d);
-      id = this.bfs.length;
+      id = this.bfBase + this.bfs.length;
       this.bfIds.set(k, id);
     }
     return id;
@@ -206,12 +255,12 @@ class Registry {
     const k = paraKey(p);
     let id = this.paraIds.get(k);
     if (id === undefined) {
-      let bf = 2;
+      let bf = this.bfChar;
       if (p.border) {
         const f = paraBorderToFill(p.border);
         bf = this.bf({ bg: p.bg, noBorders: f.noBorders, borders: f.noBorders.length < 4, css: f.css });
       } else if (p.bg || p.borderBottom) bf = this.bf({ bg: p.bg, noBorders: p.borderBottom ? ['l', 'r', 't'] : ['l', 'r', 't', 'b'], borders: p.borderBottom });
-      id = this.paras.length;
+      id = this.paraBase + this.paras.length;
       this.paras.push({ ...p, bf });
       this.paraIds.set(k, id);
     }
@@ -227,7 +276,7 @@ const NUMBERING_TEMPLATE = hex(
 function charShapeRec(r: Registry, c: CharStyle): Uint8Array {
   const b = new Buf();
   // 언어별 글꼴 번호 (글꼴 목록은 언어마다 같은 순서로 기록한다)
-  for (const f of langFontIds(c, (n) => r.font(n))) b.u16(f);
+  for (const f of langFontIds(c, (n, l) => r.font(n, l))) b.u16(f);
   for (let i = 0; i < 7; i++) b.u8(Math.max(50, Math.min(200, Math.round(c.fontWidth || 100))));
   for (let i = 0; i < 7; i++) b.i8(Math.max(-50, Math.min(50, Math.round(c.letterSpacing || 0))));
   for (let i = 0; i < 7; i++) b.u8(100);
@@ -257,12 +306,12 @@ function charShapeRec(r: Registry, c: CharStyle): Uint8Array {
   b.u32(c.ulColor ? rgb(c.ulColor) : c.underline ? rgb(c.color) : 0); // 밑줄 색
   b.u32(c.highlight ? rgb(c.highlight) : 0xffffffff); // 음영 색
   b.u32(0xc0c0c0); // 그림자 색
-  b.u16(2); // 글자 테두리/배경
+  b.u16(r.bfChar); // 글자 테두리/배경
   b.u32(c.stColor ? rgb(c.stColor) : c.strike ? rgb(c.color) : 0); // 취소선 색
   return b.out();
 }
 
-function paraShapeRec(p: ParaStyle & { bf: number }): Uint8Array {
+function paraShapeRec(p: ParaStyle & { bf: number }, tabId = 0): Uint8Array {
   const b = new Buf();
   const ALIGN: Record<string, number> = { justify: 0, left: 1, right: 2, center: 3, distribute: 4 };
   let lsType = 0;
@@ -282,7 +331,7 @@ function paraShapeRec(p: ParaStyle & { bf: number }): Uint8Array {
   b.i32(ptToHwp(p.spaceBefore) * 2);
   b.i32(ptToHwp(p.spaceAfter) * 2);
   b.i32(lsType === 0 ? lsVal : lsVal);
-  b.u16(0); // 탭 정의
+  b.u16(tabId); // 탭 정의
   b.u16(0); // 문단 번호/글머리표
   b.u16(p.bf);
   // 문단 테두리와 글의 간격 (왼·오른·위·아래)
@@ -324,12 +373,40 @@ function borderFillRec(d: BF): Uint8Array {
   return b.out();
 }
 
-function docInfo(reg: Registry, pageNumChar: number | null = null): Uint8Array {
+/** 탭 정의 레코드: 속성(자동 탭 없음), 개수, 탭마다 위치(HWPUNIT 의 2배)·종류(왼쪽 0, 오른쪽 1, 가운데 2, 소수점 3)·채움 */
+function tabDefRec(t: TabDefs): Uint8Array {
+  const s = t.s || [];
+  const b = new Buf().u32(0).u32(s.length);
+  for (const [pos, al, ld] of s) b.u32(Math.max(0, ptToHwp(pos)) * 2).u8({ l: 0, r: 1, c: 2, d: 3 }[al] ?? 0).u8(ld || 0).u16(0);
+  return b.out();
+}
+
+function docInfo(reg: Registry, pageNumChar: number | null = null, sectionCount = 1): Uint8Array {
+  // 문단의 탭 자리 정의를 먼저 모두 등록한다 (정의 수를 ID_MAPPINGS 에 적는다)
+  for (const p of reg.paras) reg.tab(p.tabs);
+  // 원본 보존형 저장: 원본 DocInfo 에 Kite 정의를 목록마다 덧붙인다 (탭 정의는 Kite 것 두 개를 원본 뒤에)
+  if (reg.base) {
+    const b = reg.base;
+    const tabId = b.nTab;
+    const styles: Uint8Array[] = [];
+    if (pageNumChar != null && !b.styleNames.includes('쪽 번호')) styles.push(new Buf().wstr('쪽 번호').wstr('Page Number').u8(0).u8(Math.min(255, b.nStyle)).i16(0x412).u16(0).u16(pageNumChar).u16(0).out());
+    return mergeDocInfo(b, {
+      fonts: reg.langFonts!.map((list, l) => list.slice(b.fontNames[l].length)),
+      borderFills: reg.bfs.map(borderFillRec),
+      charShapes: reg.chars.map((c) => charShapeRec(reg, c)),
+      tabDefs: [hex('00 00 00 00 00 00 00 00'), hex('01 00 00 00 00 00 00 00'), ...reg.tabDefs.map(tabDefRec)],
+      numberings: [NUMBERING_TEMPLATE],
+      paraShapes: reg.paras.map((p) => paraShapeRec(p, p.tabs?.s?.length ? reg.tab(p.tabs) : tabId)),
+      styles,
+      bins: reg.bins.map((x) => ({ id: x.id, ext: x.ext })),
+      sectionCount,
+    });
+  }
   const w = new RecWriter();
-  w.rec(TAG.DOCUMENT_PROPERTIES, 0, new Buf().u16(1).u16(1).u16(1).u16(1).u16(1).u16(1).u16(1).u32(0).u32(0).u32(0).out());
+  w.rec(TAG.DOCUMENT_PROPERTIES, 0, new Buf().u16(sectionCount).u16(1).u16(1).u16(1).u16(1).u16(1).u16(1).u32(0).u32(0).u32(0).out());
   const nf = reg.fonts.length;
   const ids = new Buf();
-  [reg.bins.length, nf, nf, nf, nf, nf, nf, nf, reg.bfs.length, reg.chars.length, 2, 1, 0, reg.paras.length, pageNumChar == null ? 1 : 2, 0, 0, 0].forEach((v) => ids.i32(v));
+  [reg.bins.length, nf, nf, nf, nf, nf, nf, nf, reg.bfs.length, reg.chars.length, 2 + reg.tabDefs.length, 1, 0, reg.paras.length, pageNumChar == null ? 1 : 2, 0, 0, 0].forEach((v) => ids.i32(v));
   w.rec(TAG.ID_MAPPINGS, 0, ids.out());
   for (const bin of reg.bins) w.rec(TAG.BIN_DATA, 1, new Buf().u16(1).u16(bin.id).wstr(bin.ext).out());
   for (let lang = 0; lang < 7; lang++) for (const f of reg.fonts) w.rec(TAG.FACE_NAME, 1, new Buf().u8(0).wstr(f).out());
@@ -337,8 +414,9 @@ function docInfo(reg: Registry, pageNumChar: number | null = null): Uint8Array {
   for (const c of reg.chars) w.rec(TAG.CHAR_SHAPE, 1, charShapeRec(reg, c));
   w.rec(TAG.TAB_DEF, 1, hex('00 00 00 00 00 00 00 00'));
   w.rec(TAG.TAB_DEF, 1, hex('01 00 00 00 00 00 00 00'));
+  for (const t of reg.tabDefs) w.rec(TAG.TAB_DEF, 1, tabDefRec(t));
   w.rec(TAG.NUMBERING, 1, NUMBERING_TEMPLATE);
-  for (const p of reg.paras) w.rec(TAG.PARA_SHAPE, 1, paraShapeRec(p));
+  for (const p of reg.paras) w.rec(TAG.PARA_SHAPE, 1, paraShapeRec(p, reg.tab(p.tabs)));
   w.rec(TAG.STYLE, 1, new Buf().wstr('바탕글').wstr('Normal').u8(0).u8(0).i16(0x412).u16(0).u16(0).u16(0).out());
   // 쪽 번호는 '쪽 번호' 스타일의 글자 모양으로 찍힌다 (한글도, Kite 도)
   if (pageNumChar != null) w.rec(TAG.STYLE, 1, new Buf().wstr('쪽 번호').wstr('Page Number').u8(0).u8(1).i16(0x412).u16(0).u16(pageNumChar).u16(0).out());
@@ -361,14 +439,62 @@ interface ParaBuild {
 class BodyWriter {
   w = new RecWriter();
   footNo = 0;
+  endNo = 0;
   /** 머리말/꼬리말을 쓰는 중 ({{PAGE}} → 쪽 번호 필드) */
   inHF = false;
+  /** 지금 쓰는 구역: 차례(0부터), 용지(첫 구역은 문서 용지), 그 구역의 용지를 고치지 않았는가 (원본 구역 정의를 쓸 수 있다) */
+  secIndex = 0;
+  secPage: PageSetup | null = null;
+  secKept = false;
+  /** 원본 보존형 저장: 머리말·꼬리말·쪽 번호가 든 원본 문단을 모두 원본 레코드로 쓴다 (Kite 가 새로 만들지 않는다) */
+  hfRaw = false;
+  /** 원본 보존형 저장: 머리말·꼬리말·쪽 번호를 읽을 때와 다르게 고쳤다 (첫 구역의 첫 문단을 새로 써서 Kite 가 그것들을 넣는다) */
+  hfChanged = false;
+  /** 원본 보존형 저장: 원본 문단의 줄 정보를 쓰는 중 (Kite 가 새로 쓴 문단부터는 한글이 다시 배치하므로 뒤 원본 문단의 줄 정보도 뺀다) */
+  segOn = false;
   constructor(
     private reg: Registry,
     private doc: KDocument,
     private images: Map<string, { binId: number; w: number; h: number } | null>,
-    private bodyW: number,
+    public bodyW: number,
   ) {}
+
+  /** 원본 보존형 저장: 원본 [문단 모양, 스타일] 번호가 원본 DocInfo 에 있으면 그대로 */
+  private keptRef(pr: [number, number] | undefined): [number, number] | null {
+    const b = this.reg.base;
+    return pr && b && pr[0] < b.nPs && pr[1] < b.nStyle && pr[1] < 256 ? pr : null;
+  }
+  /** 원본 보존형 저장: 원본 글자 모양 번호가 원본 DocInfo 에 있으면 그대로 */
+  private keptCp(cp: number | null | undefined): number | null {
+    const b = this.reg.base;
+    return b && cp != null && Number.isInteger(cp) && cp >= 0 && cp < b.nCs ? cp : null;
+  }
+  /** 원본 보존형 저장: 원본 테두리/배경 번호(1부터)가 원본 DocInfo 에 있으면 그대로 */
+  private keptBf(id: number | null | undefined): number | null {
+    const b = this.reg.base;
+    return b && id != null && Number.isInteger(id) && id >= 1 && id <= b.nBf ? id : null;
+  }
+
+  /**
+   * 원본 보존형 저장: 이 원본 문단 묶음을 원본 레코드로 쓸 수 있는가. 구역 정의가 든 문단은 구역 첫 블록 자리에서만,
+   * 그 구역의 용지를 고치지 않았을 때만. 머리말·꼬리말·쪽 번호가 든 문단은 그것들을 고치지 않았을 때만 (hfRaw)
+   */
+  rawAllowed(raw: RawRef, isFirst: boolean): boolean {
+    if (!this.reg.base) return false;
+    const sec = !!raw.flags?.includes('s');
+    if (sec !== isFirst) return false;
+    if (sec && !this.secRawOK()) return false;
+    // 머리말·꼬리말·쪽 번호를 고쳤으면 첫 구역의 첫 문단을 새로 쓴다 (원본에 없던 머리말을 넣은 것도: 원문에는 그 자리가 없다)
+    if (sec && this.secIndex === 0 && this.hfChanged) return false;
+    if (raw.flags?.includes('h') && !this.hfRaw) return false;
+    return true;
+  }
+  /** 지금 구역의 원본 구역 정의를 쓸 수 있는가 (용지를 고치지 않았다) */
+  secRawOK(): boolean {
+    const s = this.doc.settings;
+    if (!this.reg.base || s.hwpBase?.fmt !== 'hwp') return false;
+    return this.secIndex === 0 ? s.hwpBase.key === baseKey(s) : this.secKept;
+  }
 
   private beginPara(): ParaBuild {
     return { text: [], shapes: [], ctrls: [], maxSize: 10 };
@@ -387,7 +513,7 @@ class BodyWriter {
     pb.text.push(code, v & 0xffff, v >>> 16, 0, 0, 0, 0, code);
   }
 
-  private emitPara(pb: ParaBuild, paraId: number, level: number, last: boolean, breakType = 0) {
+  private emitPara(pb: ParaBuild, paraId: number, level: number, last: boolean, breakType = 0, styleId = 0) {
     pb.text.push(13);
     if (!pb.shapes.length) pb.shapes.push([0, 0]);
     let mask = 0;
@@ -397,7 +523,7 @@ class BodyWriter {
       .u32((n | (last ? 0x80000000 : 0)) >>> 0)
       .u32(mask)
       .u16(paraId)
-      .u8(0)
+      .u8(styleId)
       .u8(breakType)
       .u16(pb.shapes.length)
       .u16(0)
@@ -414,10 +540,12 @@ class BodyWriter {
     for (const [pos, id] of pb.shapes) cs.u32(pos).u32(id);
     this.w.rec(TAG.PARA_CHAR_SHAPE, level + 1, cs.out());
     const lh = Math.round(pb.maxSize * 100);
+    // 줄 정보: 한글은 문단마다 이것이 있어야 문서를 연다. Kite 는 줄을 나누지 않으므로 줄 폭(horzsize)을 0 으로 적는다 — 그러면
+    // 한글이 문단을 다시 배치한다 (폭을 본문 폭으로 적으면 각주·미주·칸 안의 긴 문단을 한 줄에 눌러 담는다: 2026-11-25 한글 2018 로 확인)
     this.w.rec(
       TAG.PARA_LINE_SEG,
       level + 1,
-      new Buf().u32(0).i32(0).i32(lh).i32(lh).i32(Math.round(lh * 0.85)).i32(Math.round(lh * 0.6)).i32(0).i32(this.bodyW).u32(0x60000).out(),
+      new Buf().u32(0).i32(0).i32(lh).i32(lh).i32(Math.round(lh * 0.85)).i32(Math.round(lh * 0.6)).i32(0).i32(0).u32(0x60000).out(),
     );
     for (const c of pb.ctrls) c(this.w, level + 1);
   }
@@ -604,9 +732,10 @@ class BodyWriter {
     };
     // 누름틀 (%clk): 이어진 같은 누름틀 글을 필드 시작(글자 3)~끝(글자 4)으로 감싼다. 비어 있으면 글은 쓰지 않는다
     let curField = '';
+    let curFieldId = '%clk';
     const endField = () => {
       if (!curField) return;
-      const v = ctrlId('%clk');
+      const v = ctrlId(curFieldId);
       pb.text.push(4, v & 0xffff, (v >>> 16) & 0xff, 0, 0, 0, 0, 4);
       curField = '';
     };
@@ -615,7 +744,22 @@ class BodyWriter {
       if (fieldKey(f) !== curField) {
         endLink();
         endField();
-        if (f) {
+        if (f && f.frm) {
+          // 계산식 (%fmu): 속성 0, 기타 8, 명령 글 (한글이 만든 파일과 같게). 결과 글은 필드 안
+          const cmd = formulaCommand(f.frm, it.type === 'text' ? it.text : '');
+          this.ctrlChars(pb, 3, '%fmu');
+          pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('%fmu')).u32(0).u8(8).wstr(cmd).u32(inst()).u32(0).out()));
+          curField = fieldKey(f);
+          curFieldId = '%fmu';
+        } else if (f && f.xref) {
+          // 상호 참조 (%xrf): 속성 2, 기타 0, 명령 글 (한글이 만든 파일과 같게). 결과 글은 필드 안에
+          const cmd = f.xref;
+          this.ctrlChars(pb, 3, '%xrf');
+          pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('%xrf')).u32(2).u8(0).wstr(cmd).u32(inst()).u32(0).out()));
+          curField = fieldKey(f);
+          curFieldId = '%xrf';
+        } else if (f) {
+          curFieldId = '%clk';
           this.ctrlChars(pb, 3, '%clk');
           const cmd = clickHereCommand(f);
           pb.ctrls.push((w, lv) => {
@@ -656,8 +800,15 @@ class BodyWriter {
           // 겹칠 글자, 테두리 모양, 안 글자 크기, 펼침, 글자 모양 수와 번호
           pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('tcps')).wstr(text).u8(shape).i8(-3).u8(1).u8(1).u32(cid).out()));
         }
+      } else if (it.type === 'text' && it.autoNum) {
+        // 자동 번호 (캡션의 '표 1' 등): 번호 컨트롤 (종류 1 각주, 2 미주, 3 그림, 4 표, 5 수식. 한글이 다시 매긴다)
+        this.setShape(pb, this.keptCp(it.cp) ?? this.reg.char(it.style));
+        const kind = { FOOTNOTE: 1, ENDNOTE: 2, PICTURE: 3, TABLE: 4, EQUATION: 5 }[it.autoNum] ?? 4;
+        const num = Math.max(1, parseInt(it.text, 10) || 1);
+        this.ctrlChars(pb, 18, 'atno');
+        pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('atno')).u32(kind).u16(num).u16(0).u16(0).u16(0).out()));
       } else if (it.type === 'text') {
-        this.setShape(pb, this.reg.char(it.style));
+        this.setShape(pb, this.keptCp(it.cp) ?? this.reg.char(it.style));
         pb.maxSize = Math.max(pb.maxSize, it.style.size);
         // 머리말/꼬리말 안의 쪽 번호 자리({{PAGE}})는 쪽 번호 필드로
         const parts = this.inHF ? it.text.split('{{PAGE}}') : [it.text];
@@ -687,7 +838,7 @@ class BodyWriter {
       } else if (it.type === 'image') {
         const info = this.images.get(it.src);
         if (!info) continue;
-        this.setShape(pb, this.reg.char(it.style));
+        this.setShape(pb, this.keptCp(it.cp) ?? this.reg.char(it.style));
         this.ctrlChars(pb, 11, 'gso ');
         let wv = it.width ? pxToHwp(it.width) : pxToHwp(info.w);
         let hv = it.height ? pxToHwp(it.height) : it.width ? Math.round((pxToHwp(it.width) * info.h) / Math.max(1, info.w)) : pxToHwp(info.h);
@@ -706,16 +857,25 @@ class BodyWriter {
         pb.ctrls.push((w, lv) => this.picture(w, lv, wv, hv, binId, ow, oh, crop, fl, paraLeft, sb));
       } else if (it.type === 'shape') {
         if (!this.canWriteShape(it.d)) continue;
-        this.setShape(pb, this.reg.char(it.style));
+        this.setShape(pb, this.keptCp(it.cp) ?? this.reg.char(it.style));
         this.ctrlChars(pb, 11, 'gso ');
         if (!it.float) pb.maxSize = Math.max(pb.maxSize, pxToHwp(it.height) / 100);
         pb.ctrls.push((w, lv) => this.shapeCtrl(w, lv, it, paraLeft, sb));
+      } else if (it.type === 'bookmark') {
+        // 책갈피: 글자 22 컨트롤 + 이름(CTRL_DATA, 누름틀 이름과 같은 꼴)
+        const name = it.name;
+        this.ctrlChars(pb, 22, 'bokm');
+        pb.ctrls.push((w, lv) => {
+          w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('bokm')).out());
+          w.rec(TAG.CTRL_DATA, lv + 1, new Buf().u16(0x021b).u16(1).u16(0).u16(0x4000).u16(1).wstr(name).out());
+        });
       } else if (it.type === 'footnote') {
         this.setShape(pb, this.reg.char(it.style));
-        this.ctrlChars(pb, 17, 'fn  ');
-        const no = ++this.footNo;
+        const end = !!it.end;
+        this.ctrlChars(pb, 17, end ? 'en  ' : 'fn  ');
+        const no = end ? ++this.endNo : ++this.footNo;
         const text = it.text;
-        pb.ctrls.push((w, lv) => this.footnote(w, lv, no, text));
+        pb.ctrls.push((w, lv) => this.footnote(w, lv, no, text, end));
       }
     }
     endLink();
@@ -769,8 +929,9 @@ class BodyWriter {
     w.rec(TAG.SHAPE_COMPONENT_PICTURE, lv, pic.out());
   }
 
-  private footnote(w: RecWriter, lv: number, no: number, text: string) {
-    w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('fn  ')).u32(no).u16(0).u16(0x29).u32(0).u32(inst()).out());
+  /** 각주·미주 (end: 미주 'en  ', 번호 컨트롤 종류 2) */
+  private footnote(w: RecWriter, lv: number, no: number, text: string, end = false) {
+    w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId(end ? 'en  ' : 'fn  ')).u32(no).u16(0).u16(0x29).u32(0).u32(inst()).out());
     w.rec(TAG.LIST_HEADER, lv + 1, new Buf().i16(1).u32(0).u16(0).zeros(8).out());
     const c = defaultChar();
     c.size = 9;
@@ -778,7 +939,7 @@ class BodyWriter {
     this.setShape(pb, this.reg.char(c));
     pb.maxSize = 9;
     this.ctrlChars(pb, 18, 'atno');
-    pb.ctrls.push((ww, l2) => ww.rec(TAG.CTRL_HEADER, l2, new Buf().u32(ctrlId('atno')).u32(1).u16(no).u16(0).u16(0).u16(0x29).out()));
+    pb.ctrls.push((ww, l2) => ww.rec(TAG.CTRL_HEADER, l2, new Buf().u32(ctrlId('atno')).u32(end ? 2 : 1).u16(no).u16(0).u16(0).u16(0x29).out()));
     for (const ch of ' ' + text) if (ch.charCodeAt(0) >= 32) pb.text.push(ch.charCodeAt(0));
     const pp = defaultPara();
     pp.lineHeight = '1.3';
@@ -832,7 +993,7 @@ class BodyWriter {
   /** 첫 문단: 구역/단 정의, 머리말·꼬리말, 쪽 번호 */
   private sectionCtrls(pb: ParaBuild) {
     const s = this.doc.settings;
-    const pg = s.page;
+    const pg = this.secPage || s.page;
     this.ctrlChars(pb, 2, 'secd');
     pb.ctrls.push((w, lv) => {
       const secd = hex('64 63 65 73 00 00 00 00 6e 04 00 00 00 00 40 1f 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00');
@@ -901,6 +1062,8 @@ class BodyWriter {
     this.curCols = colKey(pg.columns);
     pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, coldRec(pg.columns)));
     const hfHeight = (mm: number) => Math.max(1000, mmToHwp(mm));
+    // 원본 보존형 저장: 머리말·꼬리말·쪽 번호는 원본 문단에 그대로 든다
+    if (this.hfRaw) return;
     if (s.header.text.trim()) {
       this.ctrlChars(pb, 16, 'head');
       const t = s.header.text;
@@ -956,34 +1119,49 @@ class BodyWriter {
     pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('pghd')).u32(attr).out()));
   }
 
+  /** 새 번호로 시작 (본문 문단만): 이 문단이 놓인 쪽부터 그 번호. 속성 bit 0~3 번호 종류(0 쪽), 번호 */
+  private pageNumStartCtrl(pb: ParaBuild, n: number | null | undefined, level: number) {
+    if (n == null || level !== 0 || this.inHF) return;
+    this.ctrlChars(pb, 21, 'nwno');
+    pb.ctrls.push((w, lv) => w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('nwno')).u32(0).u16(n).out()));
+  }
+
   para(p: FlatPara, level: number, last: boolean, first = false) {
     const pb = this.beginPara();
     pb.maxSize = p.baseChar.size;
-    this.setShape(pb, this.reg.char(p.baseChar));
+    // 원본 보존형 저장: 문단 모양을 고치지 않은 한글 문단은 원본 문단 모양·스타일·끝 글자 모양 번호
+    const kept = this.keptRef(p.pr);
+    this.setShape(pb, (kept ? this.keptCp(p.endCp) : null) ?? this.reg.char(p.baseChar));
     if (first) this.sectionCtrls(pb);
     const bt = this.breakOf(pb, p, level, first);
     this.pageHideCtrl(pb, p.pageHide, level);
-    this.inlines(pb, p.inlines, level, (p.style.indentLeft + Math.max(0, -p.style.textIndent)) * PT2PX, p.style.spaceBefore * PT2PX);
-    this.emitPara(pb, this.reg.para(p.style), level, last, bt);
+    this.pageNumStartCtrl(pb, p.pageNumStart, level);
+    // 원본 문단 모양에 문단 머리가 있으면 한글이 번호를 붙인다: Kite 가 글로 넣은 앞머리는 쓰지 않는다
+    const inl = kept && this.reg.base!.paraHeading[kept[0]] ? p.inlines.filter((i) => !(i.type === 'text' && i.head)) : p.inlines;
+    this.inlines(pb, inl, level, (p.style.indentLeft + Math.max(0, -p.style.textIndent)) * PT2PX, p.style.spaceBefore * PT2PX);
+    this.emitPara(pb, kept ? kept[0] : this.reg.para(p.style), level, last, bt, kept ? kept[1] : 0);
   }
 
-  table(t: FlatTable, level: number, last: boolean, first = false) {
+  table(t: FlatTable, level: number, last: boolean, first = false, cap: { side: 'top' | 'bottom'; paras: FlatPara[] } | null = null) {
     const pb = this.beginPara();
-    this.setShape(pb, 0);
+    // 원본 보존형 저장: 표가 든 자리의 원본 글자 모양 번호 (한글은 표 줄의 줄 간격을 그 글자 크기로 셈한다)
+    this.setShape(pb, this.keptCp(t.cp) ?? (this.reg.base ? this.reg.char(defaultChar()) : 0));
     // 문서가 표로 시작하면 구역 정의를 표가 든 문단에 함께 둔다 (따로 빈 문단을 두면 그 줄만큼 본문이 내려간다)
     if (first) this.sectionCtrls(pb);
     const bt = this.breakOf(pb, t, level, first);
     this.pageHideCtrl(pb, t.pageHide, level);
+    this.pageNumStartCtrl(pb, t.pageNumStart, level);
     this.ctrlChars(pb, 11, 'tbl ');
-    pb.ctrls.push((w, lv) => this.tableCtrl(w, lv, t));
+    pb.ctrls.push((w, lv) => this.tableCtrl(w, lv, t, cap));
     const pp = defaultPara();
     if (t.align !== 'left') pp.align = t.align as any;
     // 글자처럼 놓인 표의 줄: 줄 간격이 160% 면 표 아래에 글자 크기의 60% 만큼 빈자리가 더 생긴다
     if (t.inline) pp.lineHeight = '1';
-    this.emitPara(pb, this.reg.para(pp), level, last, bt);
+    const kept = this.keptRef(t.pr);
+    this.emitPara(pb, kept ? kept[0] : this.reg.para(pp), level, last, bt, kept ? kept[1] : 0);
   }
 
-  private tableCtrl(w: RecWriter, lv: number, t: FlatTable) {
+  private tableCtrl(w: RecWriter, lv: number, t: FlatTable, cap: { side: 'top' | 'bottom'; paras: FlatPara[] } | null = null) {
     const totalPx = t.colWidthsPx.reduce((a, b) => a + b, 0) || 1;
     const scale = Math.min(1, this.bodyW / pxToHwp(totalPx));
     const colW = t.colWidthsPx.map((x) => Math.round(pxToHwp(x) * scale));
@@ -994,8 +1172,20 @@ class BodyWriter {
     // 글자처럼 취급(bit 0)이면 표가 든 문단의 정렬을, 아니면 가로 정렬(bit 10~12)을 따른다. 바깥 여백은 읽은 값 그대로
     // 바깥 여백: 한글에서 읽은 표는 그 값, Kite 에서 만든 표는 화면과 같이 0 (HWPX 와 같은 기본값)
     const om = t.outMarginPx ? t.outMarginPx.map((v) => pxToHwp(v)) : [0, 0, 0, 0];
-    const objAttr = t.inline ? 0x082a2211 : (0x082a2210 | ((t.align === 'center' ? 1 : t.align === 'right' ? 2 : 0) << 10)) >>> 0;
+    // bit 29: 캡션이 있다 (한글이 만든 캡션 표와 같게: 없으면 한글이 캡션 목록을 표로 읽어 문서를 열지 못한다)
+    const objAttr = ((t.inline ? 0x082a2211 : 0x082a2210 | ((t.align === 'center' ? 1 : t.align === 'right' ? 2 : 0) << 10)) | (cap ? 0x20000000 : 0)) >>> 0;
     w.rec(TAG.CTRL_HEADER, lv, new Buf().u32(ctrlId('tbl ')).u32(objAttr).i32(0).i32(0).u32(tableW).u32(spanH(0, t.rows)).i32(0).u16(om[0]).u16(om[1]).u16(om[2]).u16(om[3]).u32(inst()).u32(0).u16(0).out());
+    // 캡션: 표 레코드 앞의 문단 목록 (문단 수, 속성, 캡션 자리 0 왼쪽·1 오른쪽·2 위·3 아래, 폭, 간격, 표 폭) + 캡션 문단들
+    if (cap) {
+      const g = t.capGeo;
+      const side = g && (g.side === 'LEFT' || g.side === 'RIGHT') ? (g.side === 'LEFT' ? 0 : 1) : cap.side === 'top' ? 2 : 3;
+      const paras = cap.paras.map((p) => ({ ...p, caption: undefined }));
+      w.rec(TAG.LIST_HEADER, lv + 1, new Buf().i16(paras.length).u32(0).u16(0).u32(side).u32(g ? g.w : 8504).u16(g ? g.gap : 850).u32(tableW).zeros(8).out());
+      const saved = this.w;
+      this.w = w;
+      this.blocks(paras, lv + 1);
+      this.w = saved;
+    }
     // 표 속성: bit 0~1 쪽 경계에서 나눔(0 나누지 않음, 1 셀 단위로 나눔, 2 나눔), bit 2 제목 줄 자동 반복
     const tb = new Buf().u32(0x04000004 | (t.pageSplit === 'row' ? 1 : t.pageSplit === 'none' ? 0 : 2)).u16(t.rows).u16(t.cols).u16(0).u16(pad).u16(pad).u16(141).u16(141);
     for (const row of t.cells) tb.u16(row.length);
@@ -1003,7 +1193,8 @@ class BodyWriter {
     w.rec(TAG.TABLE, lv + 1, tb.out());
     for (const row of t.cells) {
       for (const cell of row) {
-        const bf = this.reg.bf({ bg: cell.bg, noBorders: cell.noBorders, borders: cell.noBorders.length < 4, css: cell.borderCss });
+        // 원본 보존형 저장: 테두리/배경을 고치지 않은 칸은 원본 테두리/배경 (대각선·그러데이션·그림 채우기까지 그대로)
+        const bf = this.keptBf(cell.bf) ?? this.reg.bf({ bg: cell.bg, noBorders: cell.noBorders, borders: cell.noBorders.length < 4, css: cell.borderCss });
         const cw = colW.slice(cell.col, cell.col + cell.colspan).reduce((a, b) => a + b, 0);
         const va = cell.vAlign === 'top' ? 0 : cell.vAlign === 'bottom' ? 2 : 1;
         const blocks = cell.blocks.length ? cell.blocks : [{ kind: 'para', style: defaultPara(), baseChar: defaultChar(), inlines: [], pageBreakBefore: false } as FlatPara];
@@ -1013,7 +1204,8 @@ class BodyWriter {
           lv + 1,
           new Buf()
             .i16(nParas)
-            .u32(va << 21)
+            // 글 방향(bit 16~18: 1 세로쓰기)·세로 맞춤(bit 21~22)
+            .u32(((cell.vertical ? 1 << 16 : 0) | (va << 21)) >>> 0)
             // 칸 자체 여백(bit 0), 제목 칸(bit 2)
             .u16((cell.header ? 4 : 0) | (cell.marginsPx ? 1 : 0))
             .u16(cell.col)
@@ -1040,13 +1232,59 @@ class BodyWriter {
   }
 
   blocks(blocks: FlatBlock[], level: number, topLevel = false) {
-    blocks.forEach((b, i) => {
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      // 원본 보존형 저장 (formats/hwpBase.ts): 고치지 않은 본문 문단은 원본 레코드 그대로 (그 문단에서 나온 블록 묶음을 한 번에)
+      if (topLevel && !this.inHF && b.raw?.bin) {
+        const n = rawSpanHwp(blocks, i);
+        const bytes = n ? fromB64(b.raw.bin) : null;
+        if (n && bytes && this.rawAllowed(b.raw, i === 0)) {
+          if (b.raw.flags?.includes('s')) this.curCols = colKey((this.secPage || this.doc.settings.page).columns);
+          else if (b.columnsBefore) this.curCols = colKey(b.columnsBefore);
+          // (HWP 는 문단마다 줄 정보가 있어야 한글이 연다: 원본 문단의 줄 정보는 늘 그대로 둔다)
+          this.w.raw(setLastPara(bytes, i + n - 1 === blocks.length - 1));
+          i += n - 1;
+          continue;
+        }
+      }
+      // HWP 에서 읽은 표 문단은 '빈 문단 + 표' 로 온다: 같은 원본 문단에서 나온 빈 문단은 표 문단이 그 줄이므로 따로 쓰지 않는다
+      // (따로 쓰면 저장할 때마다 표 앞에 빈 줄이 하나씩 늘어난다)
+      let nk = i + 1;
+      while (blocks[nk]?.kind === 'para' && (blocks[nk] as FlatPara).caption === 'top') nk++;
+      if (b.kind === 'para' && b.lead && !b.inlines.length && blocks[nk]?.kind === 'table' && !b.pageBreakBefore && !b.sectionPageBefore) continue;
+      // 표 캡션: 캡션 문단들을 표 안의 캡션으로 (위 캡션은 표 앞, 아래 캡션은 표 뒤의 문단)
+      const capAt = tableCaptionAt(blocks, i);
+      if (capAt) {
+        const t = blocks[capAt.table] as FlatTable;
+        const first = topLevel && i === 0;
+        if (topLevel && !this.inHF) this.segOn = false;
+        this.table(t, level, capAt.next - 1 === blocks.length - 1, first, { side: capAt.side, paras: capAt.paras });
+        i = capAt.next - 1;
+        continue;
+      }
       const last = i === blocks.length - 1;
+      if (topLevel && !this.inHF) this.segOn = false;
       if (b.kind === 'para') this.para(b, level, last, topLevel && i === 0);
       else if (b.kind === 'table') this.table(b, level, last, topLevel && i === 0);
       else this.blocks(b.blocks, level, false);
-    });
+    }
   }
+}
+
+/** 원본에 있던 그림을 Kite 가 다시 만들 수 없을 때 그 번호 자리에 넣는 1×1 투명 PNG (번호 차례를 지킨다) */
+const PLACEHOLDER_PNG = hex(
+  '89 50 4e 47 0d 0a 1a 0a 00 00 00 0d 49 48 44 52 00 00 00 01 00 00 00 01 08 06 00 00 00 1f 15 c4 89 00 00 00 0d 49 44 41 54 78 9c 63 60 00 02 00 00 05 00 01 7a 5e ab 3f 00 00 00 00 49 45 4e 44 ae 42 60 82',
+);
+
+/** 원본 보존형 저장: k 의 원본 문단 묶음이 고스란히 이어져 있으면 그 블록 수, 아니면 0 */
+function rawSpanHwp(blocks: FlatBlock[], k: number): number {
+  const r = blocks[k]?.raw;
+  if (!r || r.i !== 0 || !r.bin) return 0;
+  for (let j = 1; j < r.n; j++) {
+    const q = blocks[k + j]?.raw;
+    if (!q || q.g !== r.g || q.i !== j || q.n !== r.n) return 0;
+  }
+  return r.n;
 }
 
 /** 다단 값을 견주는 열쇠 (한 단은 '1') */
@@ -1119,13 +1357,41 @@ function previewText(blocks: FlatBlock[]): string {
 }
 
 export async function writeHwp(doc: KDocument, opts: { pageCount?: number } = {}): Promise<Uint8Array> {
-  // 글상자는 아직 HWP 바이너리로 쓰지 않으므로 안의 문단만 남긴다
-  const blocks = unwrapBoxes(flattenDoc(doc.content as JNode));
-  if (!blocks.length || (blocks[0].kind !== 'para' && blocks[0].kind !== 'table')) blocks.unshift({ kind: 'para', style: defaultPara(), baseChar: defaultChar(), inlines: [], pageBreakBefore: false });
-  const reg = new Registry();
+  // 원본 보존형 저장 (formats/hwpBase.ts): HWP 에서 읽은 문서는 원본 DocInfo 를 두고 고치지 않은 문단을 원본 레코드로 쓴다
+  const hb = doc.settings.hwpBase;
+  const base = hb?.fmt === 'hwp' && hb.docInfo ? parseHwpDocInfo(fromB64(hb.docInfo)) : null;
+  // 글상자는 아직 HWP 바이너리로 쓰지 않으므로 안의 문단만 남긴다 (원본 레코드로 쓸 문단 묶음은 그대로 둔다)
+  const flat = flattenDoc(doc.content as JNode);
+  const blocks: FlatBlock[] = [];
+  let carrySec: FlatBlock | null = null;
+  for (let i = 0; i < flat.length; i++) {
+    const n = base && flat[i].raw?.bin ? rawSpanHwp(flat, i) : 0;
+    const got = n ? flat.slice(i, i + n) : unwrapBoxes([flat[i]]);
+    if (n) i += n - 1;
+    // 구역 나누기 표시는 풀어 낸 첫 블록으로 (빈 상자면 다음 블록으로)
+    const head: FlatBlock = flat[i - (n ? n - 1 : 0)];
+    const sec: FlatBlock | null = head.sectionPageBefore ? head : carrySec;
+    if (got.length && sec && !got[0].sectionPageBefore) got[0] = { ...got[0], sectionPageBefore: sec.sectionPageBefore, sectionRawBefore: sec.sectionRawBefore } as FlatBlock;
+    carrySec = got.length ? null : sec;
+    blocks.push(...got);
+  }
+  const reg = new Registry(base);
   const pg = doc.settings.page;
   const pageW = pg.landscape ? Math.max(pg.width, pg.height) : pg.width;
   const bodyW = mmToHwp(pageW - pg.marginLeft - pg.marginRight - pg.gutter);
+  // 구역 나누기마다 구역 스트림 하나 (한글은 구역마다 제 용지·구역 정의를 가진다). 구역은 문단이나 표로 시작해야 한다
+  const groups: FlatBlock[][] = [[]];
+  for (const b of blocks) {
+    if (b.sectionPageBefore && groups[groups.length - 1].length) groups.push([]);
+    groups[groups.length - 1].push(b);
+  }
+  for (const g of groups) {
+    const rawStart = !!(base && g[0]?.raw?.bin && g[0].raw.flags?.includes('s') && rawSpanHwp(g, 0));
+    if (!g.length || (!rawStart && g[0].kind !== 'para' && g[0].kind !== 'table')) {
+      const lead = g[0];
+      g.unshift({ kind: 'para', style: defaultPara(), baseChar: defaultChar(), inlines: [], pageBreakBefore: false, ...(lead?.sectionPageBefore ? { sectionPageBefore: lead.sectionPageBefore, sectionRawBefore: lead.sectionRawBefore } : {}) } as FlatPara);
+    }
+  }
 
   const srcs = new Set<string>();
   collectImages(blocks, srcs);
@@ -1133,24 +1399,77 @@ export async function writeHwp(doc: KDocument, opts: { pageCount?: number } = {}
   if (doc.settings.pageBorder?.image) srcs.add(doc.settings.pageBorder.image);
   for (const mp of doc.settings.masterPages || []) collectImages(flattenContent((mp.content || []) as any), srcs);
   const images = new Map<string, { binId: number; w: number; h: number } | null>();
+  let maxBin = 0;
+  if (base) {
+    // 원본 그림은 원본 번호·확장자 그대로 (원본 레코드의 그림이 그 번호를 가리킨다). 브라우저가 못 그리는 원본(WMF·OLE 등)은 원본 바이트
+    const byDigest = new Map<string, number>();
+    for (const [id, d] of Object.entries(hb?.bins || {})) if (!byDigest.has(d)) byDigest.set(d, +id);
+    const srcOf = new Map<number, string>();
+    for (const src of srcs) {
+      const id = byDigest.get(digest(src));
+      if (id != null && !srcOf.has(id)) srcOf.set(id, src);
+    }
+    for (const ob of base.bins) {
+      maxBin = Math.max(maxBin, ob.id);
+      const src = srcOf.get(ob.id);
+      const img = src ? await prepareImage(src) : null;
+      if (src && img) images.set(src, { binId: ob.id, w: img.width, h: img.height });
+      const raw = hb?.binRaw?.[String(ob.id)];
+      const bytes = (raw ? dataUrlToBytes(raw)?.bytes : null) || img?.bytes || PLACEHOLDER_PNG;
+      reg.bins.push({ id: ob.id, ext: ob.ext || (img ? (img.ext === 'jpeg' ? 'jpg' : img.ext) : 'png'), bytes });
+    }
+  }
   for (const src of srcs) {
+    if (images.has(src)) continue;
     const img = await prepareImage(src);
     if (!img) {
       images.set(src, null);
       continue;
     }
-    const id = reg.bins.length + 1;
+    const id = ++maxBin;
     reg.bins.push({ id, ext: img.ext === 'jpeg' ? 'jpg' : img.ext, bytes: img.bytes });
     images.set(src, { binId: id, w: img.width, h: img.height });
   }
 
   const body = new BodyWriter(reg, doc, images, bodyW);
   body.pageCount = opts.pageCount || 1;
-  body.blocks(blocks, 0, true);
-  const section = body.w.out();
+  // 원본 보존형 저장: 머리말·꼬리말·쪽 번호가 든 원본 문단을 모두 원본 레코드로 쓸 수 있으면 Kite 가 그것들을 새로 만들지 않는다
+  if (base && hb?.hf && hb.hf === hfKey(doc.settings) && (hb.hfGroups || 0) > 0) {
+    let seen = 0;
+    let ok = true;
+    groups.forEach((g, k) => {
+      body.secIndex = k;
+      body.secKept = k ? !!g[0].sectionRawBefore : false;
+      for (let i = 0; i < g.length; i++) {
+        const r = g[i].raw;
+        if (!r?.bin || !r.flags?.includes('h')) continue;
+        if (!rawSpanHwp(g, i) || (r.flags.includes('s') && (i !== 0 || !body.secRawOK()))) ok = false;
+        else seen++;
+      }
+    });
+    body.hfRaw = ok && seen === hb.hfGroups;
+  }
+  // 쪽 설정이 읽을 때와 같으면 원본 문단의 줄 정보를 쓴다 (Kite 가 새로 쓴 문단부터는 뺀다)
+  body.segOn = !!base && hb?.key === baseKey(doc.settings);
+  body.hfChanged = !!base && !!hb?.hf && hb.hf !== hfKey(doc.settings);
+  const sections = groups.map((g, k) => {
+    body.secIndex = k;
+    body.secPage = k ? g[0].sectionPageBefore || null : null;
+    body.secKept = k ? !!g[0].sectionRawBefore : false;
+    if (k) {
+      // 새 구역은 늘 새 쪽에서 시작한다
+      g[0] = { ...g[0], pageBreakBefore: false } as FlatBlock;
+      const sp = body.secPage || pg;
+      body.bodyW = mmToHwp((sp.landscape ? Math.max(sp.width, sp.height) : sp.width) - sp.marginLeft - sp.marginRight - sp.gutter);
+      if (!body.secKept) body.segOn = false;
+    }
+    body.w = new RecWriter();
+    body.blocks(g, 0, true);
+    return body.w.out();
+  });
   const pn = doc.settings.pageNumber;
   const pnChar = pn.fontSize && pn.fontSize > 0 ? reg.char({ ...defaultChar(), font: pn.fontFamily || '함초롬돋움', size: pn.fontSize, bold: !!pn.bold, italic: !!pn.italic, color: pn.color || '#000000' }) : null;
-  const info = docInfo(reg, pnChar);
+  const info = docInfo(reg, pnChar, sections.length);
 
   // FileHeader (256 바이트)
   const fh = new Uint8Array(256);
@@ -1164,7 +1483,7 @@ export async function writeHwp(doc: KDocument, opts: { pageCount?: number } = {}
   const add = (name: string, data: Uint8Array) => CFB.utils.cfb_add(cfb, name, data as any);
   add('/FileHeader', fh);
   add('/DocInfo', deflateRaw(info));
-  add('/BodyText/Section0', deflateRaw(section));
+  sections.forEach((sec, k) => add(`/BodyText/Section${k}`, deflateRaw(sec)));
   for (const b of reg.bins) add(`/BinData/BIN${b.id.toString(16).toUpperCase().padStart(4, '0')}.${b.ext}`, deflateRaw(b.bytes));
   const prv = previewText(blocks);
   const prvBuf = new Uint8Array(prv.length * 2 + 2);

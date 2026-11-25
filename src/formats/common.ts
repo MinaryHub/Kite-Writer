@@ -125,6 +125,15 @@ export function cleanPageHide(v: unknown): string | null {
   return out || null;
 }
 
+/** 자동 번호의 종류 (한글의 번호 매기기 종류: 캡션 '표 1'·'그림 2' 의 번호 등) */
+export const AUTO_NUM_KINDS = ['TABLE', 'PICTURE', 'EQUATION', 'FOOTNOTE', 'ENDNOTE'];
+
+/** 한글의 '새 번호로 시작' (쪽 번호): 이 블록이 놓인 쪽부터 이 번호로 다시 매긴다 (없으면 null) */
+export function cleanPageNumStart(v: unknown): number | null {
+  const n = typeof v === 'string' ? Number(v) : v;
+  return typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= 32767 ? n : null;
+}
+
 /**
  * 떠 있는 개체 둘레의 글 흐름 (Word 의 정사각형·빽빽하게·통과·위아래 배치).
  * s: 글이 흐르는 쪽 — r 개체 오른쪽, l 개체 왼쪽, tb 개체 위아래만(옆은 비움). d: 개체와 글 사이 간격 px (위·오른쪽·아래·왼쪽)
@@ -449,7 +458,7 @@ export function nodeText(n: JNode): string {
   if (n.type === 'math') return n.attrs?.hwp || latexToHwp(n.attrs?.latex || '');
   if (!n.content) return '';
   const inner = n.content.map(nodeText);
-  const isBlockContainer = n.content.some((c) => c.type !== 'text' && c.type !== 'hardBreak' && c.type !== 'image' && c.type !== 'footnote' && c.type !== 'math');
+  const isBlockContainer = n.content.some((c) => c.type !== 'text' && c.type !== 'hardBreak' && c.type !== 'image' && c.type !== 'footnote' && c.type !== 'math' && c.type !== 'bookmark');
   return inner.join(isBlockContainer ? '\n' : '');
 }
 

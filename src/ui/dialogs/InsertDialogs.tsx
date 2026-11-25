@@ -3,6 +3,8 @@ import { fieldRange } from '../../editor/extensions/clickHere';
 import { app } from '../../app/controller';
 import { Modal, OkCancel, Fieldset, NumberInput, Seg, ColorField } from '../widgets';
 import { PX_PER_MM } from '../../formats/common';
+import { gotoBookmark, insertBookmark, listBookmarks, removeBookmark } from '../../app/bookmarks';
+import { insertCrossRef } from '../../app/crossRefs';
 import type { ShapeData, ShapeItem } from '../../formats/shape';
 
 /** 입력 → 덧말 넣기: 블록으로 지정한 글(본말) 위나 아래에 작은 글을 얹는다. 블록이 없으면 본말도 함께 넣는다 */
@@ -316,6 +318,164 @@ export function ClickHereDialog({ onClose }: { onClose: () => void }) {
             ? '고른 글을 누름틀로 만듭니다.'
             : '누름틀 지우기: 입력한 글은 남기고 누름틀만 없앱니다.'}
       </p>
+    </Modal>
+  );
+}
+
+/** 입력 → 책갈피 (Ctrl+K,B): 커서 자리에 이름 붙은 자리를 넣고, 문서의 책갈피로 옮겨 가거나 지운다 */
+/** 표 → 계산식: 커서가 든 칸에 계산식을 넣거나 고친다 (한글의 계산식 필드로 저장, 칸 값이 바뀌면 다시 셈한다) */
+export function FormulaDialog({ onClose }: { onClose: () => void }) {
+  const editor = app.active!.editor;
+  const cur = editor.getAttributes('formula') as { formula?: string; fmt?: string };
+  const [formula, setFormula] = useState(cur.formula || '=SUM(LEFT)');
+  const [fmt0] = useState(cur.fmt || '%g,');
+  const m = /^%(?:\.(\d+))?([gfd])(,)?/.exec(fmt0);
+  const [dec, setDec] = useState<string>(m && m[2] === 'f' ? m[1] || '0' : 'g');
+  const [comma, setComma] = useState(m ? !!m[3] : true);
+  const ok = () => {
+    const f = formula.trim().startsWith('=') ? formula.trim() : '=' + formula.trim();
+    if (f.length < 2) return;
+    editor.chain().focus().insertFormula(f, (dec === 'g' ? '%g' : `%.${dec}f`) + (comma ? ',' : '')).run();
+    onClose();
+  };
+  const add = (s: string) => setFormula((v) => (v.trim() ? v.replace(/\s+$/, '') + s : '=' + s));
+  return (
+    <Modal title="계산식" onClose={onClose} width={440} onEnter={ok} footer={<OkCancel onOk={ok} onCancel={onClose} okLabel={cur.formula ? '고치기' : '넣기'} />}>
+      <Fieldset legend="계산식">
+        <input type="text" value={formula} onChange={(e) => setFormula(e.target.value)} style={{ width: '100%', fontFamily: 'monospace' }} autoFocus />
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
+          {['SUM(', 'AVG(', 'PRODUCT(', 'MIN(', 'MAX(', 'COUNT(', 'ROUND(', 'LEFT)', 'ABOVE)', 'RIGHT)', 'BELOW)'].map((s) => (
+            <button key={s} className="btn" style={{ padding: '1px 6px' }} onClick={() => add(s)}>
+              {s.replace(/[()]/g, '')}
+            </button>
+          ))}
+        </div>
+        <div className="unit">칸 주소는 열 글자와 줄 번호(A1, B2, A1:C3). LEFT·ABOVE 는 이 칸의 왼쪽·위쪽 칸들. 예: =SUM(A1:A3)*2, =AVG(LEFT)</div>
+      </Fieldset>
+      <Fieldset legend="결과 모양">
+        <Seg value={dec} onChange={(v) => setDec(v)} options={[{ value: 'g', label: '기본' }, { value: '0', label: '정수' }, { value: '1', label: '소수 1자리' }, { value: '2', label: '소수 2자리' }]} />
+        <label className="check" style={{ marginTop: 8 }}>
+          <input type="checkbox" checked={comma} onChange={(e) => setComma(e.target.checked)} />
+          천 단위 쉼표
+        </label>
+      </Fieldset>
+    </Modal>
+  );
+}
+
+/** 입력 → 상호 참조: 책갈피의 쪽 번호·이름·위/아래를 글로 넣는다 (한글의 상호 참조 필드로 저장) */
+export function CrossRefDialog({ onClose }: { onClose: () => void }) {
+  const tab = app.active!;
+  const [list] = useState(() => listBookmarks(tab.editor));
+  const [target, setTarget] = useState(list[0]?.name || '');
+  const [content, setContent] = useState<'0' | '1' | '3'>('0');
+  const [link, setLink] = useState(true);
+  const ok = () => {
+    if (!target) return;
+    insertCrossRef(tab, target, Number(content), link);
+    onClose();
+  };
+  return (
+    <Modal title="상호 참조" onClose={onClose} width={400} onEnter={ok} footer={<OkCancel onOk={ok} onCancel={onClose} okLabel="넣기" />}>
+      <Fieldset legend={`참조할 책갈피 (${list.length})`}>
+        <div className="list-box" style={{ maxHeight: 180, overflow: 'auto' }}>
+          {list.length === 0 && <div className="unit">책갈피가 없습니다. 먼저 참조할 곳에 책갈피를 넣으세요 (Ctrl+K,B).</div>}
+          {list.map((b) => (
+            <div key={b.pos} className={'list-item' + (b.name === target ? ' on' : '')} onClick={() => setTarget(b.name)}>
+              {b.name}
+            </div>
+          ))}
+        </div>
+      </Fieldset>
+      <Fieldset legend="넣을 내용">
+        <Seg value={content} onChange={(v) => setContent(v as '0' | '1' | '3')} options={[{ value: '0', label: '쪽 번호' }, { value: '1', label: '책갈피 이름' }, { value: '3', label: '위/아래' }]} />
+        <label className="check" style={{ marginTop: 8 }}>
+          <input type="checkbox" checked={link} onChange={(e) => setLink(e.target.checked)} />
+          하이퍼링크로 (문맥 메뉴에서 참조한 곳으로 갈 수 있게)
+        </label>
+        <div className="unit">쪽이 바뀌면 문맥 메뉴의 '상호 참조 새로 고침'으로 번호를 다시 셉니다.</div>
+      </Fieldset>
+    </Modal>
+  );
+}
+
+export function BookmarkDialog({ onClose }: { onClose: () => void }) {
+  const editor = app.active!.editor;
+  const [list, setList] = useState(() => listBookmarks(editor));
+  // 고른 글이 있으면 그 글을 이름으로 (한글처럼)
+  const sel = editor.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to, ' ').trim().slice(0, 64);
+  const [name, setName] = useState(sel || `책갈피${list.length + 1}`);
+  const [picked, setPicked] = useState<string | null>(null);
+  const exists = list.some((b) => b.name === name.trim());
+  const insert = () => {
+    if (!name.trim()) return;
+    insertBookmark(editor, name);
+    onClose();
+  };
+  return (
+    <Modal
+      title="책갈피"
+      onClose={onClose}
+      width={400}
+      onEnter={insert}
+      footer={
+        <>
+          <button className="btn primary" onClick={insert} disabled={!name.trim()}>
+            {exists ? '옮기기' : '넣기'}
+          </button>
+          <button
+            className="btn"
+            disabled={!picked}
+            onClick={() => {
+              if (picked && gotoBookmark(editor, picked)) onClose();
+            }}
+          >
+            이동
+          </button>
+          <button
+            className="btn"
+            disabled={!picked}
+            onClick={() => {
+              if (!picked) return;
+              removeBookmark(editor, picked);
+              setList(listBookmarks(editor));
+              setPicked(null);
+            }}
+          >
+            지우기
+          </button>
+          <button className="btn" onClick={onClose}>
+            닫기
+          </button>
+        </>
+      }
+    >
+      <Fieldset legend="책갈피 이름">
+        <input type="text" value={name} maxLength={64} onChange={(e) => setName(e.target.value)} style={{ width: '100%' }} autoFocus />
+        {exists && <div className="unit">같은 이름의 책갈피가 있습니다. 넣으면 그 책갈피를 이 자리로 옮깁니다.</div>}
+      </Fieldset>
+      <Fieldset legend={`문서의 책갈피 (${list.length})`}>
+        <div className="list-box" style={{ maxHeight: 180, overflow: 'auto' }}>
+          {list.length === 0 && <div className="unit">책갈피가 없습니다.</div>}
+          {list.map((b) => (
+            <div
+              key={b.pos}
+              className={'list-item' + (picked === b.name ? ' on' : '')}
+              onClick={() => {
+                setPicked(b.name);
+                setName(b.name);
+              }}
+              onDoubleClick={() => {
+                if (gotoBookmark(editor, b.name)) onClose();
+              }}
+              style={{ padding: '3px 6px', cursor: 'pointer', background: picked === b.name ? 'var(--accent-soft, rgba(47,128,237,.18))' : undefined }}
+            >
+              {b.name}
+            </div>
+          ))}
+        </div>
+        <div className="unit">두 번 누르면 그 자리로 옮겨 갑니다. 하이퍼링크의 주소를 #이름 으로 쓰면 그 책갈피로 갑니다.</div>
+      </Fieldset>
     </Modal>
   );
 }

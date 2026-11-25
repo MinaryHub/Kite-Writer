@@ -40,13 +40,6 @@ export function parseCellNumber(text: string): { v: number; decimals: number; co
   return { v: neg ? -v : v, decimals: dot < 0 ? 0 : s.length - dot - 1, comma };
 }
 
-function formatNumber(v: number, decimals: number, comma: boolean): string {
-  const s = v.toFixed(Math.max(0, Math.min(6, decimals)));
-  if (!comma) return s;
-  const [int, frac] = s.split('.');
-  return int.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (frac ? '.' + frac : '');
-}
-
 /** 쉬운 계산식: 커서가 있는 칸에 그 왼쪽(가로) 또는 위쪽(세로) 칸들의 합계·평균·곱을 넣는다 */
 export function tableCalc(editor: Editor, dir: 'row' | 'col', op: 'sum' | 'avg' | 'prod') {
   const at = cellAt(editor);
@@ -69,29 +62,9 @@ export function tableCalc(editor: Editor, dir: 'row' | 'col', op: 'sum' | 'avg' 
     app.toast(dir === 'row' ? '왼쪽 칸에 계산할 숫자가 없습니다.' : '위쪽 칸에 계산할 숫자가 없습니다.', 'error');
     return;
   }
-  let v = op === 'prod' ? 1 : 0;
-  for (const n of nums) v = op === 'prod' ? v * n.v : v + n.v;
-  let decimals = Math.max(...nums.map((n) => n.decimals));
-  if (op === 'avg') {
-    v /= nums.length;
-    // 평균은 나누어떨어지지 않으면 소수 둘째 자리까지
-    if (Math.abs(v * 10 ** decimals - Math.round(v * 10 ** decimals)) > 1e-9) decimals = Math.max(decimals, 2);
-  } else if (op === 'prod') decimals = Math.min(6, nums.reduce((a, n) => a + n.decimals, 0));
-  const text = formatNumber(v, decimals, nums.some((n) => n.comma));
-  // 칸의 첫 문단 글을 결과로 바꾼다
-  const cell = at.table.nodeAt(at.cellPos - at.tableStart);
-  if (!cell) return;
-  let tb: { pos: number; size: number } | null = null;
-  cell.descendants((n, p) => {
-    if (!tb && n.isTextblock) tb = { pos: at.cellPos + 1 + p, size: n.content.size };
-    return !tb;
-  });
-  if (!tb) return;
-  const t: { pos: number; size: number } = tb;
-  const tr = editor.state.tr.insertText(text, t.pos + 1, t.pos + 1 + t.size);
-  tr.setSelection(TextSelection.create(tr.doc, t.pos + 1 + text.length));
-  editor.view.dispatch(tr.scrollIntoView());
-  editor.view.focus();
+  // 한글의 쉬운 계산식처럼 계산식 필드로 넣는다 (칸 값이 바뀌면 다시 셈한다): 합계·곱은 "%g,", 평균은 "%.2f," (한글과 같게)
+  const fn = op === 'sum' ? 'SUM' : op === 'avg' ? 'AVG' : 'PRODUCT';
+  editor.chain().focus().insertFormula(`=${fn}(${dir === 'row' ? 'LEFT' : 'ABOVE'})`, op === 'avg' ? '%.2f,' : '%g,').run();
 }
 
 /** 셀 높이를 같게: 고른 줄들(블록이 없으면 표의 모든 줄)의 높이를 그 평균으로 맞춘다 */
@@ -254,4 +227,38 @@ export function insertTextBox(editor: Editor) {
   tr.setSelection(TextSelection.near(tr.doc.resolve(pos + 2)));
   editor.view.dispatch(tr.scrollIntoView());
   editor.view.focus();
+}
+
+/**
+ * 표 → 캡션 넣기: 커서가 든 표 아래에 캡션 문단 '표 N ' 을 넣는다 (N 은 자동 번호: 한글로 저장하면 번호 컨트롤, 한글이 다시 매긴다).
+ * 이미 아래 캡션이 있으면 그 끝으로 커서를 옮긴다
+ */
+export function insertTableCaption(editor: Editor) {
+  const $p = editor.state.selection.$from;
+  let depth = -1;
+  for (let d = $p.depth; d > 0; d--)
+    if ($p.node(d).type.name === 'table') {
+      depth = d;
+      break;
+    }
+  if (depth < 0) return;
+  const tablePos = $p.before(depth);
+  const after = tablePos + $p.node(depth).nodeSize;
+  const { state, view, schema } = editor;
+  const next = state.doc.resolve(after).nodeAfter;
+  if (next && next.type.name === 'paragraph' && next.attrs.caption === 'bottom') {
+    view.dispatch(state.tr.setSelection(TextSelection.create(state.doc, after + next.nodeSize - 1)).scrollIntoView());
+    view.focus();
+    return;
+  }
+  // 번호: 앞에 있는 표 캡션 번호 수 + 1
+  let n = 1;
+  state.doc.nodesBetween(0, tablePos, (node) => {
+    if (node.isText && node.marks.some((m) => m.type.name === 'autoNum' && m.attrs.kind === 'TABLE')) n++;
+  });
+  const para = schema.nodes.paragraph.create({ caption: 'bottom' }, [schema.text('표 '), schema.text(String(n), [schema.marks.autoNum.create({ kind: 'TABLE' })]), schema.text(' ')]);
+  const tr = state.tr.insert(after, para);
+  tr.setSelection(TextSelection.create(tr.doc, after + para.nodeSize - 1));
+  view.dispatch(tr.scrollIntoView());
+  view.focus();
 }
