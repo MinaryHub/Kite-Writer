@@ -107,6 +107,9 @@ function tokenize(src: string): Tok[] | null {
   return out.length > 500 ? null : out;
 }
 
+/** 계산식 하나가 볼 수 있는 칸 수의 한도 (표 하나는 아무리 커도 이보다 작다: 줄 4096 × 칸 512 의 일부) */
+const MAX_VISITS = 200_000;
+
 const FUNCS = new Set(['SUM', 'AVG', 'AVERAGE', 'PRODUCT', 'MIN', 'MAX', 'COUNT', 'ABS', 'INT', 'ROUND', 'SQRT', 'MOD']);
 const DIRS = new Set(['LEFT', 'RIGHT', 'ABOVE', 'BELOW']);
 
@@ -117,6 +120,8 @@ export function evaluateFormula(formula: string, at: { r: number; c: number }, s
   const toks = tokenize(formula.replace(/^\s*=/, ''));
   if (!toks || !toks.length) return null;
   let p = 0;
+  /** 이 계산식이 지금까지 본 칸 수 (방향·범위 모두): 한도를 넘으면 셈하지 않는다 */
+  let visits = 0;
   const peek = () => toks[p];
   const isOp = (v: string) => peek()?.t === 'op' && peek()!.v === v;
   const fail = (): never => {
@@ -139,6 +144,7 @@ export function evaluateFormula(formula: string, at: { r: number; c: number }, s
       p++;
       const out: number[] = [];
       const push = (r: number, c: number) => {
+        if (++visits > MAX_VISITS) fail();
         const v = numAt(r, c);
         if (v != null) out.push(v);
       };
@@ -155,8 +161,14 @@ export function evaluateFormula(formula: string, at: { r: number; c: number }, s
       if (!b) fail();
       p += 3;
       const out: number[] = [];
-      for (let r = Math.min(a.r, b!.r); r <= Math.max(a.r, b!.r); r++)
-        for (let c = Math.min(a.c, b!.c); c <= Math.max(a.c, b!.c); c++) {
+      // 범위는 표 안으로 자른다 (문서에 적힌 'A1:ZZZ99999' 같은 범위로 수십억 번 돌지 않게), 계산식 하나가 보는 칸 수에도 한도
+      const r0 = Math.max(0, Math.min(a.r, b!.r));
+      const r1 = Math.min(size.rows - 1, Math.max(a.r, b!.r));
+      const c0 = Math.max(0, Math.min(a.c, b!.c));
+      const c1 = Math.min(size.cols - 1, Math.max(a.c, b!.c));
+      for (let r = r0; r <= r1; r++)
+        for (let c = c0; c <= c1; c++) {
+          if (++visits > MAX_VISITS) fail();
           const v = numAt(r, c);
           if (v != null) out.push(v);
         }
