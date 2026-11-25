@@ -1,9 +1,9 @@
 import { useApp } from '../app/hooks';
 import { CharShapeDialog } from './dialogs/CharShapeDialog';
-import { ParaShapeDialog } from './dialogs/ParaShapeDialog';
-import { PageSetupDialog, HeaderFooterDialog, PageNumberDialog } from './dialogs/PageDialogs';
+import { ParaShapeDialog, TabDialog } from './dialogs/ParaShapeDialog';
+import { PageSetupDialog, HeaderFooterDialog, PageNumberDialog, PageHideDialog, PageNumStartDialog } from './dialogs/PageDialogs';
 import { ColumnsDialog, PageBorderDialog } from './dialogs/LayoutDialogs';
-import { RubyDialog, ComposeDialog, ShapeDialog, ClickHereDialog } from './dialogs/InsertDialogs';
+import { RubyDialog, ComposeDialog, ShapeDialog, ClickHereDialog, BookmarkDialog, CrossRefDialog, FormulaDialog } from './dialogs/InsertDialogs';
 import {
   TableDialog,
   LinkDialog,
@@ -11,6 +11,7 @@ import {
   FootnoteDialog,
   GotoDialog,
   CellPropsDialog,
+  TablePropsDialog,
   DocInfoDialog,
   PrefsDialog,
   ShortcutsDialog,
@@ -43,6 +44,9 @@ export function Dialogs() {
       case 'paraShape':
         el = <ParaShapeDialog onClose={close} />;
         break;
+      case 'tabs':
+        el = <TabDialog onClose={close} />;
+        break;
       case 'pageSetup':
         el = <PageSetupDialog onClose={close} />;
         break;
@@ -52,6 +56,12 @@ export function Dialogs() {
       case 'pageNumber':
         el = <PageNumberDialog onClose={close} />;
         break;
+      case 'pageHide':
+        el = <PageHideDialog onClose={close} />;
+        break;
+      case 'pageNumStart':
+        el = <PageNumStartDialog onClose={close} />;
+        break;
       case 'columns':
         el = <ColumnsDialog onClose={close} />;
         break;
@@ -60,6 +70,15 @@ export function Dialogs() {
         break;
       case 'ruby':
         el = <RubyDialog onClose={close} />;
+        break;
+      case 'bookmark':
+        el = <BookmarkDialog onClose={close} />;
+        break;
+      case 'crossRef':
+        el = <CrossRefDialog onClose={close} />;
+        break;
+      case 'formula':
+        el = <FormulaDialog onClose={close} />;
         break;
       case 'compose':
         el = <ComposeDialog onClose={close} />;
@@ -77,13 +96,16 @@ export function Dialogs() {
         el = <SymbolDialog onClose={close} />;
         break;
       case 'footnote':
-        el = <FootnoteDialog onClose={close} pos={d.props?.pos ?? null} text={d.props?.text || ''} />;
+        el = <FootnoteDialog onClose={close} pos={d.props?.pos ?? null} text={d.props?.text || ''} kind={d.props?.kind === 'end' ? 'end' : null} />;
         break;
       case 'goto':
         el = <GotoDialog onClose={close} />;
         break;
       case 'cellProps':
         el = <CellPropsDialog onClose={close} />;
+        break;
+      case 'tableProps':
+        el = <TablePropsDialog onClose={close} />;
         break;
       case 'docInfo':
         el = <DocInfoDialog onClose={close} />;

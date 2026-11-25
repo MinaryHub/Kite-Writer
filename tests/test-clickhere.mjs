@@ -52,7 +52,8 @@ for (const [fmt, w, r] of [
   const empty = ms.find((m) => m.name === '주소');
   ok(filled && filled.text === '홍길동' && filled.guide === '이름을 쓰세요' && filled.memo === '성과 이름' && !filled.empty, `${fmt.toUpperCase()}: 입력한 누름틀 (글·안내문·메모·이름)`, JSON.stringify(ms));
   ok(empty && empty.empty && empty.text === '주소를 쓰세요', `${fmt.toUpperCase()}: 빈 누름틀은 안내문 자리 표시로`, JSON.stringify(empty));
-  const text = JSON.stringify(back.content);
+  // 원본 보존형 저장의 속성(hwpRaw: 문단 원문 등)은 빼고 센다
+  const text = JSON.stringify(back.content, (k, v) => (k.startsWith('hwp') ? undefined : v));
   ok(text.includes(' (끝)') && (text.match(/주소를 쓰세요/g) || []).length === 2, `${fmt.toUpperCase()}: 안내문을 본문 글로 두 번 쓰지 않는다`);
 }
 {

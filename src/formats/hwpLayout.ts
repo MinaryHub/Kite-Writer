@@ -1,4 +1,4 @@
-import type { JNode } from './common';
+import { borderCss, parseBorderCss, type JNode } from './common';
 
 /**
  * 한글이 문서에 적어 둔 배치(줄마다의 세로 자리, 개체의 자리)를 문서 노드의 화면 전용 속성으로 옮기는 셈법.
@@ -13,7 +13,7 @@ import type { JNode } from './common';
 const PT2PX = 96 / 72;
 const r2 = (v: number) => Math.round(v * 100) / 100;
 
-const INLINE_LEAVES = new Set(['image', 'hardBreak', 'footnote', 'math', 'shape']);
+const INLINE_LEAVES = new Set(['image', 'hardBreak', 'footnote', 'math', 'shape', 'bookmark']);
 const LEAF_BLOCKS = new Set(['pageBreak', 'columnBreak', 'horizontalRule']);
 /** 쪽 나누기·단 나누기 (줄 정보를 갖지 않는 블록) */
 export const isBreakBlock = (b: JNode) => b.type === 'pageBreak' || b.type === 'columnBreak';
@@ -579,8 +579,10 @@ export function cellContentNeed(content: JNode[], cellHeightPx: number, vMarginP
 /**
  * 칸의 내용 높이 (한글 PDF 의 표 줄 높이로 확인한 규칙). 적힌 칸 높이가 글(마지막 줄의 글자 높이까지 + 위아래 안 여백)보다
  * 작으면 한글은 칸을 내용 높이로 늘린다. 그 내용 높이는 칸의 세로 맞춤에 따라 다르다:
- *  - 위 맞춤 칸: 마지막 줄 아래의 줄 간격과 문단 아래 간격까지 든다 (글을 다 놓은 자리까지: hwpTrail)
- *  - 가운데·아래 맞춤 칸: 마지막 줄의 글자 높이까지만 (가운데에 놓을 글 덩어리의 높이)
+ *  - MS 워드 호환 문서(호환 문서 대상 MS_WORD)의 위 맞춤 칸: 마지막 줄 아래의 줄 간격과 문단 아래 간격까지 든다
+ *    (글을 다 놓은 자리까지: hwpTrail. top 은 이 경우에만 참으로 넘긴다)
+ *  - 그 밖의 칸 (한글 문서의 위 맞춤 칸, 가운데·아래 맞춤 칸): 마지막 줄의 글자 높이까지만. 한글 2018 로 확인:
+ *    HWP201X 문서는 마지막 문단의 줄 간격·문단 아래 간격을 바꿔도 칸 높이가 그대로이고, 대상만 MS_WORD 로 바꾸면 늘어난다
  * 적힌 칸 높이가 글보다 크면 그 높이를 지킨다. 돌려주는 값은 내용이 요구하는 높이(px), 적힌 높이를 지키거나 알 수 없으면 0
  */
 export function markCellTrail(content: JNode[], cellHeightPx: number, vMarginPx: number, top: boolean): number {
@@ -686,7 +688,7 @@ export function dropHwpLayout(n: JNode): JNode {
   const out: JNode = { ...n };
   if (n.attrs) {
     const a: Record<string, any> = {};
-    for (const k of Object.keys(n.attrs)) if (!/^hwp(Lines|Len|Top|Seq|Page|Col|Vs|Gap|Trail|Pitch)$/.test(k)) a[k] = n.attrs[k];
+    for (const k of Object.keys(n.attrs)) if (!/^hwp(Lines|Len|Top|Seq|Page|Col|Vs|Gap|Trail|Pitch|Seg|Chars)$/.test(k)) a[k] = n.attrs[k];
     out.attrs = a;
   }
   if (n.content) out.content = n.content.map(dropHwpLayout);
@@ -767,4 +769,41 @@ export function floatOverhang(content: JNode[]): number {
   }
   const d = floatBottom - textBottom;
   return d > 0.5 && d < 5000 ? r2(d) : 0;
+}
+
+/**
+ * 셀 영역(여러 칸을 묶은 영역)의 테두리/배경: 한글은 영역의 바깥 선을 영역 테두리의 선으로 긋고, 배경을 영역 전체에 채운다
+ * (칸 자체의 테두리/배경은 그대로 두고 그 위에). 영역 테두리에서 선이 없는 쪽은 칸의 선을 그대로 둔다.
+ * h4: 칸마다 선이 없는 조직도 표에서 '실장' 상자와 이음선이 모두 영역 테두리다 (한글로 HWPX 로 다시 저장해 확인)
+ */
+export function applyZoneBorder(
+  cells: { row: number; col: number; cs: number; rs: number; node: JNode }[],
+  z: { r0: number; r1: number; c0: number; c1: number },
+  bf: { noBorders: string[]; css?: string | null; bg?: string | null },
+) {
+  const zoneSides = parseBorderCss(bf.css);
+  for (const c of cells) {
+    if (c.row < z.r0 || c.row > z.r1 || c.col < z.c0 || c.col > z.c1) continue;
+    const a = (c.node.attrs = { ...(c.node.attrs || {}) });
+    if (bf.bg && !a.backgroundColor) a.backgroundColor = bf.bg;
+    const edges: ('l' | 'r' | 't' | 'b')[] = [];
+    if (c.col === z.c0) edges.push('l');
+    if (c.col + c.cs - 1 >= z.c1) edges.push('r');
+    if (c.row === z.r0) edges.push('t');
+    if (c.row + c.rs - 1 >= z.r1) edges.push('b');
+    const on = edges.filter((e) => !bf.noBorders.includes(e));
+    if (!on.length) continue;
+    const hide = new Set(String(a.borderStyle || '').split(' ').filter(Boolean));
+    const sides = parseBorderCss(a.borderCss);
+    for (const e of on) {
+      hide.delete(e);
+      if (zoneSides[e]) sides[e] = zoneSides[e];
+      else delete sides[e];
+    }
+    if (hide.size) a.borderStyle = [...hide].join(' ');
+    else delete a.borderStyle;
+    const css = borderCss(sides);
+    if (css) a.borderCss = css;
+    else delete a.borderCss;
+  }
 }

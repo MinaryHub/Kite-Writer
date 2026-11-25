@@ -1,10 +1,11 @@
 import { cleanLook, type PicLook } from './picLook';
 import { latexToHwp } from '../math/hwpEq';
 import { cleanTabs, type TabDefs } from '../editor/tabLayout';
-import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type FloatWrap, type JMark, type JNode, type ParaBorder, cleanColumns, cleanFloatWrap, cleanPageHide, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
+import { DEFAULT_FONT, DEFAULT_FONT_SIZE, type FloatWrap, type JMark, type JNode, type ParaBorder, cleanColumns, cleanFloatWrap, cleanPageHide, cleanPageNumStart, cleanParaBorder, formatNumber, normColor, toRoman } from './common';
 import type { Columns, PageSetup, SectionHf } from '../types';
 import { cleanShape, type ShapeData } from './shape';
 import type { FloatHw } from './hwpLayout';
+import { keptCellBf, keptCharRef, keptObjCharRef, keptParaRef, keptSecRaw, keptSegs, rawRefOf, type KeptSegs, type RawRef } from './hwpBase';
 
 /** 떠 있는 개체의 자리 (px). hw 는 한글 문서에서 읽은 자리 값 (저장할 때 그대로 쓴다) */
 /** 누름틀 (한글의 입력 칸). empty: 글이 안내문 자리 표시 (저장할 때 글은 쓰지 않는다) */
@@ -13,12 +14,20 @@ export interface FlatField {
   memo: string;
   name: string;
   empty: boolean;
+  /** 상호 참조 필드 (명령 글: formats/crossRef.ts). 있으면 누름틀이 아니라 상호 참조 */
+  xref?: string;
+  /** 표 계산식 필드 (formats/formula.ts). 있으면 누름틀이 아니라 계산식 */
+  frm?: { formula: string; fmt: string };
 }
 
 /** 누름틀 비교 열쇠 (이어진 글이 같은 누름틀인가) */
-export const fieldKey = (f: FlatField | null | undefined) => (f ? JSON.stringify([f.guide, f.memo, f.name, f.empty]) : '');
+export const fieldKey = (f: FlatField | null | undefined) => (f ? JSON.stringify([f.guide, f.memo, f.name, f.empty, f.xref || '', f.frm || '']) : '');
 
 function fieldOf(marks: JMark[] | undefined): FlatField | undefined {
+  const fm = (marks || []).find((mk) => mk.type === 'formula');
+  if (fm && typeof fm.attrs?.formula === 'string' && fm.attrs.formula.startsWith('=')) return { guide: '', memo: '', name: '', empty: false, frm: { formula: fm.attrs.formula.slice(0, 500), fmt: typeof fm.attrs.fmt === 'string' && fm.attrs.fmt ? fm.attrs.fmt.slice(0, 40) : '%g,' } };
+  const x = (marks || []).find((mk) => mk.type === 'crossRef');
+  if (x && typeof x.attrs?.cmd === 'string' && x.attrs.cmd) return { guide: '', memo: '', name: '', empty: false, xref: x.attrs.cmd.slice(0, 1000) };
   const m = (marks || []).find((x) => x.type === 'clickHere');
   if (!m) return undefined;
   const s = (v: unknown, n: number) => (typeof v === 'string' ? v.slice(0, n) : '');
@@ -108,12 +117,13 @@ export interface CharStyle {
 }
 
 /** 언어 7개(한글·영문·한자·일어·기타·기호·사용자)의 글꼴 번호. font 는 글꼴 이름 → 번호 */
-export function langFontIds(c: CharStyle, font: (name: string) => number): number[] {
+export function langFontIds(c: CharStyle, font: (name: string, lang: number) => number): number[] {
   // Word 문서에서 온 글자: 한글 글꼴(eaFont)이 따로 있으면 그것이 한글·한자 글꼴이고 font 는 영문 글꼴이다
-  const base = font(c.eaFont || c.font);
+  const b = c.eaFont || c.font;
   const lf = c.langFonts || {};
-  const id = (n?: string) => (n ? font(n) : base);
-  return [base, id(lf.en || (c.eaFont ? c.font : undefined)), id(lf.hanja), base, base, id(lf.sym), base];
+  const en = lf.en || (c.eaFont ? c.font : undefined);
+  // 언어별 글꼴 목록 차례: 한글, 영문, 한자, 일어, 외국어, 기호, 사용자 (원본 보존형 저장은 언어마다 목록이 다르다)
+  return [font(b, 0), font(en || b, 1), font(lf.hanja || b, 2), font(b, 3), font(b, 4), font(lf.sym || b, 5), font(b, 6)];
 }
 
 export interface ParaStyle {
@@ -158,12 +168,15 @@ export interface ReviewInfo {
   comments?: string[];
 }
 
+/** cp: 원본 보존형 저장 (formats/hwpBase.ts). 글자 모양을 고치지 않은 한글 글자·개체의 원본 글자 모양 번호 */
 export type FlatInline =
-  | { type: 'text'; text: string; style: CharStyle; link: string | null; tab?: TabInfo | null; review?: ReviewInfo; math?: { latex: string; hwp: string }; ruby?: { text: string; pos: string } | null; compose?: string | null; field?: FlatField }
+  | { type: 'text'; text: string; style: CharStyle; link: string | null; head?: boolean; tab?: TabInfo | null; review?: ReviewInfo; math?: { latex: string; hwp: string }; ruby?: { text: string; pos: string } | null; compose?: string | null; field?: FlatField; cp?: number; autoNum?: string }
   | { type: 'break' }
-  | { type: 'image'; src: string; width: number | null; height: number | null; style: CharStyle; crop: { t: number; r: number; b: number; l: number } | null; float?: FlatFloat | null; rotate?: number | null; look?: PicLook | null }
-  | { type: 'shape'; width: number; height: number; d: ShapeData; float: FlatFloat | null; style: CharStyle }
-  | { type: 'footnote'; text: string; style: CharStyle };
+  | { type: 'image'; src: string; width: number | null; height: number | null; style: CharStyle; crop: { t: number; r: number; b: number; l: number } | null; float?: FlatFloat | null; rotate?: number | null; look?: PicLook | null; cp?: number; hwpPos?: HwpRawPos }
+  | { type: 'shape'; width: number; height: number; d: ShapeData; float: FlatFloat | null; style: CharStyle; cp?: number }
+  | { type: 'footnote'; text: string; style: CharStyle; end?: boolean }
+  /** 책갈피 (이름 붙은 자리) */
+  | { type: 'bookmark'; name: string };
 
 /** 블록 앞의 단 나누기 (다음 단으로), 다단 설정 나누기 (여기서부터 그 다단으로. count 1 은 한 단) */
 export interface FlatColumnBreak {
@@ -173,8 +186,14 @@ export interface FlatColumnBreak {
   sectionPageBefore?: PageSetup | null;
   /** 그 구역의 머리말·꼬리말·쪽 번호 (구역 나누기의 sectionHf: 구역마다 다른 머리말) */
   sectionHfBefore?: SectionHf | null;
+  /** 원본 보존형 저장 (formats/hwpBase.ts): 용지를 고치지 않은 한글 구역의 원본 구역 정의 (hp:secPr 원문) */
+  sectionRawBefore?: string | null;
+  /** 원본 보존형 저장: 고치지 않은 본문 블록의 원문 묶음 (최상위 블록만) */
+  raw?: RawRef;
   /** 한글의 감추기: 이 블록이 놓인 쪽에서 감출 것 (h 머리말, f 꼬리말, m 바탕쪽, b 쪽 테두리, x 쪽 배경, n 쪽 번호) */
   pageHide?: string | null;
+  /** 한글의 새 번호로 시작 (쪽 번호): 이 블록이 놓인 쪽부터 이 번호 */
+  pageNumStart?: number | null;
 }
 
 export interface FlatPara extends FlatColumnBreak {
@@ -184,6 +203,16 @@ export interface FlatPara extends FlatColumnBreak {
   baseChar: CharStyle;
   inlines: FlatInline[];
   pageBreakBefore: boolean;
+  /** 원본 보존형 저장 (formats/hwpBase.ts): 문단 모양을 고치지 않은 한글 문단의 원본 [문단 모양 번호, 스타일 번호] */
+  pr?: [number, number];
+  /** 원본 보존형 저장: 고치지 않은 한글 문단의 원본 줄 정보와 그때의 문단 차례 */
+  segs?: KeptSegs;
+  /** 원본 보존형 저장: 문단 모양을 고치지 않은 한글 문단의 끝(마지막 글자 묶음) 글자 모양 번호 */
+  endCp?: number;
+  /** 캡션 문단: 바로 뒤('top')·앞('bottom')의 표의 캡션 */
+  caption?: 'top' | 'bottom';
+  /** HWP 에서 읽은, 떠 있는 표가 든 원본 문단의 빈 줄 (뒤 표 문단 자신의 줄) */
+  lead?: boolean;
 }
 
 export interface FlatCell {
@@ -201,6 +230,14 @@ export interface FlatCell {
   header: boolean;
   /** 칸 자체 안 여백 [왼, 오른, 위, 아래] (px). 없으면 표 기본 */
   marginsPx?: number[] | null;
+  /** 원본 보존형 저장 (formats/hwpBase.ts): 고치지 않은 한글 칸의 원본 크기 [폭, 높이] (HWPUNIT) */
+  hwpSz?: [number, number];
+  /** 원본 보존형 저장: 테두리/배경을 고치지 않은 한글 칸의 원본 테두리/배경 번호 */
+  bf?: number;
+  /** 칸 배경 그림 (그림 값과 채우는 방식) */
+  bgImage?: { src: string; fit: string } | null;
+  /** 세로쓰기 칸 */
+  vertical?: boolean;
 }
 
 export interface FlatTable extends FlatColumnBreak {
@@ -223,11 +260,34 @@ export interface FlatTable extends FlatColumnBreak {
   pageSplit?: 'row' | 'none' | null;
   /** 칸 사이 간격 (px) */
   cellSpacingPx?: number | null;
+  /** 원본 보존형 저장 (formats/hwpBase.ts): 표가 놓인 한글 문단의 원본 줄 정보와 그때의 문단 차례 */
+  segs?: KeptSegs;
+  /** 원본 보존형 저장: 떠 있는 표가 딸린 한글 문단 (prev 앞 문단, next 뒤 문단)과 원본 자리 (hp:pos·hp:outMargin 원문) */
+  anchor?: 'prev' | 'next';
+  hwpPos?: { wrap: string; pos: string; om: string };
+  /** 원본 보존형 저장: 글자처럼 놓인 이 표와 뒤 문단이 원래 한 한글 문단 (저장할 때 뒤 문단 글 앞의 개체로) */
+  join?: 'next';
+  /** 원본 보존형 저장: 표를 고치지 않았으면 표가 든 한글 문단의 원본 [문단 모양 번호, 스타일 번호] */
+  pr?: [number, number];
+  /** 원본 보존형 저장: 고치지 않은 한글 표의 원본 크기 [폭, 높이] (HWPUNIT) */
+  hwpSz?: [number, number];
+  /** 원본 보존형 저장: 표가 든 한글 글자 묶음의 원본 글자 모양 번호 */
+  cp?: number;
+  /** 원본 보존형 저장: 한글 표 자체의 원본 테두리/배경 번호 */
+  bf?: number;
+  /** 캡션 모양 (한글에서 읽은 값): 자리·폭·간격 (HWPUNIT) */
+  capGeo?: { side: string; w: number; gap: number; full: boolean };
 }
 
 /** 글상자 (도형 안의 문단들) */
 export interface FlatBox extends FlatColumnBreak {
   kind: 'box';
+  /** 원본 보존형 저장 (formats/hwpBase.ts): 글자처럼 놓인 글상자가 든 한글 문단의 원본 줄 정보와 문단 차례 */
+  segs?: KeptSegs;
+  /** 원본 보존형 저장: 글상자가 든 한글 문단의 원본 [문단 모양 번호, 스타일 번호] */
+  pr?: [number, number];
+  /** 원본 보존형 저장: 글상자(떠 있는 표를 담은 상자)가 든 한글 글자 묶음의 원본 글자 모양 번호 */
+  cp?: number;
   width: number | null;
   height: number | null;
   bg: string | null;
@@ -246,6 +306,8 @@ export interface FlatBox extends FlatColumnBreak {
   borderDash?: string | null;
   /** 글의 세로 맞춤 */
   valign?: 'middle' | 'bottom' | null;
+  /** 세로쓰기 글상자 */
+  vertical?: boolean;
 }
 
 export type FlatBlock = FlatPara | FlatTable | FlatBox;
@@ -510,6 +572,7 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
   let pendingCols: Columns | null = null;
   let pendingSection: PageSetup | null = null;
   let pendingHf: SectionHf | null = null;
+  let pendingRaw: string | null = null;
   const push = (b: FlatBlock) => {
     if (pendingBreak) {
       b.pageBreakBefore = true;
@@ -518,8 +581,10 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
     if (pendingSection) {
       b.sectionPageBefore = pendingSection;
       if (pendingHf) b.sectionHfBefore = pendingHf;
+      if (pendingRaw) b.sectionRawBefore = pendingRaw;
       pendingSection = null;
       pendingHf = null;
+      pendingRaw = null;
     }
     if (pendingCol) {
       b.columnBreakBefore = true;
@@ -534,9 +599,14 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
   for (const n of nodes) {
     // 감추기 표시는 이 노드에서 나온 첫 블록에 단다
     const hide = cleanPageHide(n.attrs?.pageHide);
+    const pns = cleanPageNumStart(n.attrs?.pageNumStart);
     const at = out.length;
     flattenOne(n);
     if (hide && out.length > at) out[at].pageHide = hide;
+    if (pns != null && out.length > at) out[at].pageNumStart = pns;
+    // 원문 묶음: 노드 하나가 블록 하나로 온 것만 (최상위 문단·표·글상자)
+    const raw = ctx.indent === 0 && !ctx.quote && out.length === at + 1 ? rawRefOf(n.attrs?.hwpRaw) : null;
+    if (raw) out[at].raw = raw;
   }
   if (pendingBreak || pendingCol || pendingCols) push(flattenPara({ type: 'paragraph' }, ctx, 0));
   return out;
@@ -550,6 +620,7 @@ export function flattenBlocks(nodes: JNode[], ctx: Ctx): FlatBlock[] {
           pendingCols = cleanColumns(n.attrs.sectionPage.columns) || { count: 1, gap: 0 };
           pendingSection = n.attrs.sectionPage as PageSetup;
           pendingHf = n.attrs.sectionHf && typeof n.attrs.sectionHf === 'object' ? (n.attrs.sectionHf as SectionHf) : null;
+          pendingRaw = keptSecRaw(n.attrs);
         }
         break;
       case 'columnBreak':
@@ -666,34 +737,59 @@ function flattenPara(n: JNode, ctx: Ctx, level: number): FlatPara {
       const field = fieldOf(c.marks);
       const prev = inlines[inlines.length - 1];
       // 탭 정보가 붙은 글자는 따로 둔다 (탭 하나짜리 텍스트). 덧말·글자 겹침이 붙은 글자도 따로
-      if (!tab && !ruby && !compose && prev && prev.type === 'text' && !prev.tab && !prev.math && !prev.ruby && !prev.compose && charKey(prev.style) === charKey(cs) && prev.link === link && reviewKey(prev.review) === reviewKey(review) && fieldKey(prev.field) === fieldKey(field)) prev.text += c.text || '';
-      else inlines.push({ type: 'text', text: c.text || '', style: cs, link, tab, ...(review ? { review } : {}), ...(ruby ? { ruby } : {}), ...(compose ? { compose } : {}), ...(field ? { field } : {}) });
+      const head = (c.marks || []).some((m) => m.type === 'paraHead');
+      const cp = keptCharRef(c.marks) ?? undefined;
+      const an = (c.marks || []).find((m) => m.type === 'autoNum')?.attrs?.kind;
+      const cpo = { ...(cp != null ? { cp } : {}), ...(typeof an === 'string' && /^[A-Z]{3,10}$/.test(an) ? { autoNum: an } : {}) };
+      if (head) inlines.push({ type: 'text', text: c.text || '', style: cs, link, head: true, ...cpo });
+      else if (!tab && !ruby && !compose && !an && prev && prev.type === 'text' && !prev.head && !prev.tab && !prev.math && !prev.ruby && !prev.compose && !prev.autoNum && prev.cp === cp && charKey(prev.style) === charKey(cs) && prev.link === link && reviewKey(prev.review) === reviewKey(review) && fieldKey(prev.field) === fieldKey(field)) prev.text += c.text || '';
+      else inlines.push({ type: 'text', text: c.text || '', style: cs, link, tab, ...(review ? { review } : {}), ...(ruby ? { ruby } : {}), ...(compose ? { compose } : {}), ...(field ? { field } : {}), ...cpo });
     } else if (c.type === 'hardBreak') inlines.push({ type: 'break' });
+    else if (c.type === 'bookmark') {
+      const name = typeof c.attrs?.name === 'string' ? c.attrs.name.trim().replace(/[\u0000-\u001f]/g, '').slice(0, 64) : '';
+      if (name) inlines.push({ type: 'bookmark', name });
+    }
     else if (c.type === 'image') {
       const { style: cs } = applyMarks(base, c.marks);
       const rot = Number(c.attrs?.rotate);
-      inlines.push({ type: 'image', src: c.attrs?.src, width: c.attrs?.width || null, height: c.attrs?.height || null, style: cs, crop: c.attrs?.crop || null, float: flatFloatOf(c.attrs?.float), rotate: Number.isFinite(rot) && rot % 360 ? rot : null, look: cleanLook(c.attrs?.look) });
+      const cp = keptObjCharRef(c);
+      const float = flatFloatOf(c.attrs?.float);
+      const hwpPos = float ? null : rawPosOf(c.attrs?.hwpPos);
+      inlines.push({ type: 'image', src: c.attrs?.src, width: c.attrs?.width || null, height: c.attrs?.height || null, style: cs, crop: c.attrs?.crop || null, float, rotate: Number.isFinite(rot) && rot % 360 ? rot : null, look: cleanLook(c.attrs?.look), ...(cp != null ? { cp } : {}), ...(hwpPos ? { hwpPos } : {}) });
     } else if (c.type === 'shape') {
       const d = cleanShape(c.attrs?.d);
-      if (d) inlines.push({ type: 'shape', width: +c.attrs?.width || 1, height: +c.attrs?.height || 1, d, float: flatFloatOf(c.attrs?.float), style: applyMarks(base, c.marks).style });
+      const cp = keptObjCharRef(c);
+      if (d) inlines.push({ type: 'shape', width: +c.attrs?.width || 1, height: +c.attrs?.height || 1, d, float: flatFloatOf(c.attrs?.float), style: applyMarks(base, c.marks).style, ...(cp != null ? { cp } : {}) });
     } else if (c.type === 'footnote') {
-      inlines.push({ type: 'footnote', text: c.attrs?.text || '', style: applyMarks(base, c.marks).style });
+      inlines.push({ type: 'footnote', text: c.attrs?.text || '', style: applyMarks(base, c.marks).style, ...(c.attrs?.kind === 'end' ? { end: true } : {}) });
     } else if (c.type === 'math') {
       // 수식: 수식을 아는 형식(HWPX)은 math 를 쓰고, 나머지는 한글 수식 글자로 남는다
       const { style: cs, link } = applyMarks(base, c.marks);
       const math = { latex: c.attrs?.latex || '', hwp: c.attrs?.hwp || latexToHwp(c.attrs?.latex || '') };
-      inlines.push({ type: 'text', text: math.hwp || math.latex, style: { ...cs, italic: true }, link, math });
+      const cp = keptCharRef(c.marks);
+      inlines.push({ type: 'text', text: math.hwp || math.latex, style: { ...cs, italic: true }, link, math, ...(cp != null ? { cp } : {}) });
     }
   }
   const firstText = inlines.find((i) => i.type === 'text') as any;
-  return { kind: 'para', style, baseChar: firstText ? firstText.style : base, inlines, pageBreakBefore: false };
+  const pr = keptParaRef(a);
+  const segs = keptSegs(a);
+  // 문단 끝 글자 모양: 문단 모양(빈 문단의 글자 크기 포함)을 고치지 않았을 때만
+  const endCp = pr && Number.isInteger(a.hwpEnd) && a.hwpEnd >= 0 ? (a.hwpEnd as number) : null;
+  const caption = a.caption === 'top' || a.caption === 'bottom' ? (a.caption as 'top' | 'bottom') : null;
+  return { kind: 'para', style, baseChar: firstText ? firstText.style : base, inlines, pageBreakBefore: false, ...(pr ? { pr } : {}), ...(segs ? { segs } : {}), ...(endCp != null ? { endCp } : {}), ...(caption ? { caption } : {}), ...(a.hwpLead === true ? { lead: true } : {}) };
 }
 
 function flattenBox(n: JNode, ctx: Ctx): FlatBox {
   const a = n.attrs || {};
   const num = (v: any) => (Number.isFinite(+v) && +v > 0 ? +v : null);
   const pad = Array.isArray(a.padding) && a.padding.length === 4 ? a.padding.map((v: any) => Math.max(0, +v || 0)) : null;
+  const segs = keptSegs(a);
+  const pr = keptParaRef(a);
+  const cp = keptObjCharRef(n);
   return {
+    ...(segs && !a.float ? { segs } : {}),
+    ...(pr && !a.float ? { pr } : {}),
+    ...(cp != null ? { cp } : {}),
     kind: 'box',
     width: num(a.width),
     height: num(a.height),
@@ -708,6 +804,7 @@ function flattenBox(n: JNode, ctx: Ctx): FlatBox {
     float: flatFloatOf(a.float),
     borderDash: typeof a.borderDash === 'string' && /^[A-Z_]{3,20}$/.test(a.borderDash) ? a.borderDash : null,
     valign: a.valign === 'middle' || a.valign === 'bottom' ? a.valign : null,
+    ...(a.vertical === true ? { vertical: true } : {}),
   };
 }
 
@@ -721,6 +818,52 @@ const cellSpacingOf = (v: unknown): number | null => {
   const n = Number(v);
   return n > 0 && n <= 50 ? n : null;
 };
+
+/**
+ * 표 캡션 찾기: blocks[k] 가 캡션 'top' 문단이면 이어진 캡션 문단들 뒤의 표 자리와 그 문단들, 표면 바로 뒤의 캡션 'bottom' 문단들.
+ * 캡션이 없으면 null (쓰는 쪽이 캡션 문단을 표 안의 캡션으로 되돌린다)
+ */
+export function tableCaptionAt(blocks: FlatBlock[], k: number): { table: number; side: 'top' | 'bottom'; paras: FlatPara[]; next: number } | null {
+  const b = blocks[k];
+  if (b?.kind === 'para' && b.caption === 'top') {
+    let j = k;
+    while (blocks[j]?.kind === 'para' && (blocks[j] as FlatPara).caption === 'top') j++;
+    if (blocks[j]?.kind !== 'table') return null;
+    return { table: j, side: 'top', paras: blocks.slice(k, j) as FlatPara[], next: j + 1 };
+  }
+  if (b?.kind === 'table') {
+    let j = k + 1;
+    while (blocks[j]?.kind === 'para' && (blocks[j] as FlatPara).caption === 'bottom') j++;
+    if (j === k + 1) return null;
+    return { table: k, side: 'bottom', paras: blocks.slice(k + 1, j) as FlatPara[], next: j };
+  }
+  return null;
+}
+
+/** 칸 배경 그림 목록의 첫 그림 (그림 값이 있을 때) */
+function cellBgImage(v: unknown): { src: string; fit: string } | null {
+  const f = Array.isArray(v) ? v[0] : null;
+  return f && typeof f.src === 'string' && f.src ? { src: f.src, fit: typeof f.fit === 'string' ? f.fit : 'stretch' } : null;
+}
+
+/** 원본 보존형 저장: 한글 개체의 원본 자리 (textWrap 값, hp:pos·hp:outMargin 원문) */
+export interface HwpRawPos {
+  wrap: string;
+  pos: string;
+  om: string;
+}
+
+/** 원본 자리 값 검사: 모양이 맞으면 그대로, 아니면 null (원문을 XML 에 그대로 넣으므로 꼴을 엄격히 본다) */
+function rawPosOf(hp: any): HwpRawPos | null {
+  return hp && typeof hp.wrap === 'string' && /^[A-Z_]{3,30}$/.test(hp.wrap) && typeof hp.pos === 'string' && /^<hp:pos [^<>]*\/>$/.test(hp.pos) && typeof hp.om === 'string' && (hp.om === '' || /^<hp:outMargin [^<>]*\/>$/.test(hp.om))
+    ? { wrap: hp.wrap, pos: hp.pos, om: hp.om }
+    : null;
+}
+
+/** 원본 보존형 저장: [폭, 높이] (HWPUNIT, 양의 정수) 이면 그대로 */
+function sizePair(v: unknown): [number, number] | null {
+  return Array.isArray(v) && v.length === 2 && v.every((x) => Number.isInteger(x) && x > 0 && x < 10_000_000) ? [v[0], v[1]] : null;
+}
 
 function flattenTable(n: JNode, ctx: Ctx): FlatTable {
   const rowsJ = n.content || [];
@@ -755,6 +898,10 @@ function flattenTable(n: JNode, ctx: Ctx): FlatTable {
         blocks: flattenBlocks(cell.content || [], { ...ctx, indent: 0 }),
         header: cell.type === 'tableHeader' || row.attrs?.repeat === true,
         marginsPx: cleanMargins(cell.attrs?.margins),
+        ...(sizePair(cell.attrs?.hwpSz) ? { hwpSz: sizePair(cell.attrs?.hwpSz)! } : {}),
+        ...(keptCellBf(cell.attrs) != null ? { bf: keptCellBf(cell.attrs)! } : {}),
+        ...(cellBgImage(cell.attrs?.bgImages) ? { bgImage: cellBgImage(cell.attrs?.bgImages) } : {}),
+        ...(cell.attrs?.vertical === true ? { vertical: true } : {}),
       };
       cellWidths.set(fc, cw);
       list.push(fc);
@@ -781,5 +928,17 @@ function flattenTable(n: JNode, ctx: Ctx): FlatTable {
   for (const row of cells) for (const cell of row) if (!cell.widthPx) cell.widthPx = colWidthsPx.slice(cell.col, cell.col + cell.colspan).reduce((a, b) => a + b, 0);
   const cellPadPx = n.attrs?.cellPadding != null ? +n.attrs.cellPadding : 6.8;
   const rowHeightsPx = rowsJ.map((r) => ((r.attrs?.height ?? 0) > 0 ? +r.attrs!.height : null));
-  return { kind: 'table', rows: rowsJ.length, cols: maxCols, colWidthsPx, cells, pageBreakBefore: false, align: n.attrs?.align || 'left', cellPadPx, rowHeightsPx, outMarginPx: cleanMargins(n.attrs?.outMargin), inline: n.attrs?.inline === true, pageSplit: n.attrs?.pageSplit === 'row' || n.attrs?.pageSplit === 'none' ? n.attrs.pageSplit : null, cellSpacingPx: cellSpacingOf(n.attrs?.cellSpacing) };
+  const segs = keptSegs(n.attrs);
+  const hwpPos = rawPosOf(n.attrs?.hwpPos);
+  // 딸린 표·합칠 표는 고치지 않았을 때만 (고치면 편집기가 hwpSeg 표시를 지운다: hwpKeep)
+  const intact = Array.isArray(n.attrs?.hwpSeg);
+  const anchor = intact && (n.attrs?.hwpAnchor === 'prev' || n.attrs?.hwpAnchor === 'next') ? n.attrs!.hwpAnchor : null;
+  const join = intact && n.attrs?.inline && n.attrs?.hwpJoin === 'next' ? 'next' : null;
+  const pr = keptParaRef(n.attrs);
+  const hwpSz = sizePair(n.attrs?.hwpSz);
+  const cp = keptObjCharRef(n);
+  const tbf = Number.isInteger(n.attrs?.hwpBf) && n.attrs!.hwpBf >= 1 ? (n.attrs!.hwpBf as number) : null;
+  const hc = n.attrs?.hwpCap;
+  const capGeo = hc && typeof hc.side === 'string' && /^(LEFT|RIGHT|TOP|BOTTOM)$/.test(hc.side) ? { side: hc.side, w: Math.max(0, Math.min(1_000_000, +hc.w || 8504)), gap: Math.max(0, Math.min(100_000, +hc.gap || 850)), full: !!hc.full } : null;
+  return { ...(cp != null ? { cp } : {}), ...(tbf != null ? { bf: tbf } : {}), ...(capGeo ? { capGeo } : {}), ...(hwpPos ? { hwpPos } : {}), ...(hwpPos && anchor ? { anchor } : {}), ...(join ? { join } : {}), ...(pr ? { pr } : {}), ...(hwpSz ? { hwpSz } : {}), kind: 'table', rows: rowsJ.length, cols: maxCols, colWidthsPx, cells, pageBreakBefore: false, align: n.attrs?.align || 'left', cellPadPx, rowHeightsPx, outMarginPx: cleanMargins(n.attrs?.outMargin), inline: n.attrs?.inline === true, pageSplit: n.attrs?.pageSplit === 'row' || n.attrs?.pageSplit === 'none' ? n.attrs.pageSplit : null, cellSpacingPx: cellSpacingOf(n.attrs?.cellSpacing) , ...(segs ? { segs } : {}) };
 }

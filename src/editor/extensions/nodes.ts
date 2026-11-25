@@ -10,7 +10,7 @@ import type { Node as PMNode } from '@tiptap/pm/model';
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from '@tiptap/pm/state';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
 import { viewState } from '../viewState';
-import type { Columns } from '../../types';
+import type { Columns, PageSetup } from '../../types';
 import { cleanMargins } from '../../formats/flatten';
 import { cleanColumns, cleanFloatWrap, normColor, parseBorderCss, type BorderSide, type FloatWrap } from '../../formats/common';
 import { cleanLook, lookCss, lookStyle } from '../../formats/picLook';
@@ -19,9 +19,9 @@ import { decorationSet } from '../decoSet';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
-    pageBreak: { setPageBreak: () => ReturnType };
+    pageBreak: { setPageBreak: () => ReturnType; setSectionBreak: (page: PageSetup) => ReturnType };
     columnBreak: { setColumnBreak: (columns?: Columns | null) => ReturnType };
-    footnote: { insertFootnote: (text: string) => ReturnType; updateFootnote: (pos: number, text: string) => ReturnType };
+    footnote: { insertFootnote: (text: string, kind?: 'end' | null) => ReturnType; updateFootnote: (pos: number, text: string) => ReturnType };
     overwrite: { toggleOverwrite: () => ReturnType };
   }
 }
@@ -89,6 +89,10 @@ export const TextBox = Node.create({
       hwpLen: plain,
       hwpPage: plain,
       hwpCol: plain,
+      // 원본 보존형 저장 (formats/hwpBase.ts): 글자처럼 놓인 글상자가 든 한글 문단의 원본 줄 정보·문단 차례·문단 모양 번호
+      hwpSeg: plain,
+      hwpChars: plain,
+      hwpPr: plain,
     };
   },
   parseHTML() {
@@ -131,6 +135,8 @@ export const TextBox = Node.create({
     if (typeof a.radius === 'string' && RADIUS_RE.test(a.radius)) st.push(`border-radius:${a.radius}`);
     if (Array.isArray(a.padding) && a.padding.length === 4) st.push(`padding:${a.padding.map((v: any) => Math.max(0, +v || 0) + 'px').join(' ')}`);
     if (a.valign === 'middle' || a.valign === 'bottom') st.push('display:flex', 'flex-direction:column', `justify-content:${a.valign === 'middle' ? 'center' : 'flex-end'}`);
+    // 세로쓰기 글상자: 글자는 위에서 아래로, 줄은 오른쪽에서 왼쪽으로
+    if (a.vertical === true) st.push('writing-mode:vertical-rl', 'text-orientation:upright');
     if (fl && fl.cf && fl.py == null) {
       // 글이 옆으로 흐르는 틀: 상자를 감싼 CSS float (안쪽 여백이 둘레 글과의 간격). x 는 붙은 끝에서 민 거리
       const d = fl.wrap?.d || [0, 0, 0, 0];
@@ -268,6 +274,17 @@ export const cropOf = (v: any): Crop | null => {
   return c.t || c.r || c.b || c.l ? c : null;
 };
 
+/**
+ * 90·270도 돌린 한글 그림: 한글은 그림을 돌리기 전 틀(폭·높이를 바꾼 것)에 그려 돌리고, 돌린 뒤의 상자가 개체 크기다.
+ * 그 그림의 img 스타일 (자른 그림이거나 크기를 모르면 null: 상자째 돌린다)
+ */
+function quarterTurn(rot: number, w: number, h: number, crop: unknown): string | null {
+  if (!Number.isFinite(rot) || !(w > 0 && h > 0) || crop) return null;
+  const r = ((Math.round(rot) % 360) + 360) % 360;
+  if (r !== 90 && r !== 270) return null;
+  return `display:block;max-width:none;width:${h}px;height:${w}px;transform:translate(${(w - h) / 2}px, ${(h - w) / 2}px) rotate(${r}deg)`;
+}
+
 export const KImage = Image.extend({
   addAttributes() {
     return {
@@ -292,7 +309,7 @@ export const KImage = Image.extend({
       },
       /** 떠 있는 자리 { x, y, behind? } (px, 문단 상자의 왼쪽 위 기준). 있으면 줄에 끼지 않고 그 자리에 뜬다 (한글 문서 화면 전용) */
       float: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
-      /** 돌린 각도(도, 시계 방향). 한글 문서 화면 전용 */
+      /** 돌린 각도(도, 시계 방향). 한글 문서 화면 전용. 폭·높이는 돌린 뒤의 상자(한글의 sz): 90·270도는 그림을 폭·높이를 바꾼 틀에 그려 돌린다 */
       rotate: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       /** 그림 보정·효과 (밝기·대비·회색조·투명도·선·그림자·네온·부드러운 가장자리·반사: picLook). 한글 문서에서 읽은 값 */
       look: {
@@ -344,7 +361,11 @@ export const KImage = Image.extend({
       imgStyle = `width:${iw}px;height:${ih}px;max-width:none;display:block;margin-left:${-c.l * iw}px;margin-top:${-c.t * ih}px`;
     } else if (w && h) imgStyle = `width:${w}px;height:${h}px`;
     if (fl) st.push(`left:${fl.x}px`, `top:${fl.y}px`);
-    if (turned) st.push(`transform:rotate(${rot}deg)`);
+    const qt = quarterTurn(rot, w, h, c);
+    if (qt) {
+      st.push(`width:${w}px`, `height:${h}px`, 'overflow:hidden');
+      imgStyle = qt;
+    } else if (turned) st.push(`transform:rotate(${rot}deg)`);
     const ls = look ? lookStyle(look) : null;
     if (ls?.wrap) st.push(ls.wrap);
     if (ls?.img) imgStyle = imgStyle ? imgStyle + ';' + ls.img : ls.img;
@@ -403,7 +424,20 @@ export const KImage = Image.extend({
         if (n.attrs.height) wrap.style.setProperty('--kh', n.attrs.height + 'px');
         else wrap.style.removeProperty('--kh');
         const rot = Number(n.attrs.rotate);
-        wrap.style.transform = Number.isFinite(rot) && rot % 360 ? `rotate(${rot}deg)` : '';
+        const qt = quarterTurn(rot, +n.attrs.width || 0, +n.attrs.height || 0, cropOf(n.attrs.crop));
+        if (qt) {
+          // 90·270도: 상자는 돌린 뒤의 크기 그대로, 그림만 폭·높이를 바꾼 틀에 그려 가운데를 중심으로 돌린다
+          wrap.style.transform = '';
+          wrap.style.width = n.attrs.width + 'px';
+          wrap.style.height = n.attrs.height + 'px';
+          // 돌리기 전 그림 상자가 줄의 기준선을 정하지 않게 (돌린 그림은 상자 안에 꼭 든다)
+          wrap.style.overflow = 'hidden';
+          img.style.cssText = qt;
+        } else {
+          img.style.transform = '';
+          wrap.style.overflow = '';
+          wrap.style.transform = Number.isFinite(rot) && rot % 360 ? `rotate(${rot}deg)` : '';
+        }
         // 그림 보정·효과: 지난번에 준 속성은 지우고 새로
         for (const k of LOOK_PROPS) {
           wrap.style.removeProperty(k);
@@ -517,6 +551,18 @@ function cleanPageSetup(v: any): Record<string, any> | null {
   };
 }
 
+/**
+ * 자리 pos 가 놓인 구역의 구역 나누기 (본문 최상위의, pos 앞 마지막 '용지를 가진 쪽 나누기'). 첫 구역이면 null
+ */
+export function sectionAt(doc: PMNode, pos: number): { pos: number; node: PMNode } | null {
+  let found: { pos: number; node: PMNode } | null = null;
+  doc.forEach((node, offset) => {
+    if (offset >= pos) return;
+    if (node.type.name === 'pageBreak' && node.attrs.sectionPage) found = { pos: offset, node };
+  });
+  return found;
+}
+
 /** 쪽 나누기·단 나누기 같은 '나누기' 블록을 커서 자리에 넣는다 (문단 가운데면 문단을 쪼갠다) */
 function insertBreak(state: any, tr: Transaction, dispatch: ((tr: Transaction) => void) | undefined, pb: PMNode): boolean {
   const para = state.schema.nodes.paragraph;
@@ -550,6 +596,34 @@ function insertBreak(state: any, tr: Transaction, dispatch: ((tr: Transaction) =
   if (dispatch) dispatch(tr.scrollIntoView());
   return true;
 }
+
+// ---------------- 책갈피 ----------------
+/** 책갈피 이름 검사: 앞뒤 빈칸을 빼고 64자까지 (빈 이름은 쓰지 않는다) */
+export const cleanBookmarkName = (v: unknown): string => (typeof v === 'string' ? v.trim().replace(/[\u0000-\u001f]/g, '').slice(0, 64) : '');
+
+/** 책갈피 (한글의 입력 → 책갈피, Word 의 책갈피): 글 사이의 이름 붙은 자리. 화면에는 문단 부호를 보일 때만 표시가 보인다 */
+export const Bookmark = Node.create({
+  name: 'bookmark',
+  group: 'inline',
+  inline: true,
+  atom: true,
+  selectable: false,
+  addAttributes() {
+    return {
+      name: {
+        default: '',
+        parseHTML: (el: HTMLElement) => cleanBookmarkName(el.getAttribute('data-bookmark')),
+        renderHTML: (a: Record<string, any>) => ({ 'data-bookmark': cleanBookmarkName(a.name), title: `책갈피: ${cleanBookmarkName(a.name)}` }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'span[data-bookmark]' }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ['span', mergeAttributes({ class: 'k-bookmark' }, HTMLAttributes)];
+  },
+});
 
 // ---------------- 쪽 나누기 ----------------
 export const PageBreak = Node.create({
@@ -591,6 +665,11 @@ export const PageBreak = Node.create({
         () =>
         ({ state, tr, dispatch }) =>
           insertBreak(state, tr, dispatch, state.schema.nodes.pageBreak.create()),
+      /** 구역 나누기: 여기서 새 구역이 시작한다 (그 구역의 편집 용지를 따로 정할 수 있다) */
+      setSectionBreak:
+        (page: PageSetup) =>
+        ({ state, tr, dispatch }) =>
+          insertBreak(state, tr, dispatch, state.schema.nodes.pageBreak.create({ sectionPage: cleanPageSetup(page) })),
     };
   },
   addKeyboardShortcuts() {
@@ -659,30 +738,38 @@ export const Footnote = Node.create({
         parseHTML: (el: HTMLElement) => el.getAttribute('data-footnote') || '',
         renderHTML: (a: Record<string, any>) => ({ 'data-footnote': a.text }),
       },
+      /** 'end': 미주 (문서 끝에 모아 보인다. 번호는 각주와 따로) */
+      kind: {
+        default: null,
+        parseHTML: (el: HTMLElement) => (el.getAttribute('data-note') === 'end' ? 'end' : null),
+        renderHTML: (a: Record<string, any>) => (a.kind === 'end' ? { 'data-note': 'end' } : {}),
+      },
     };
   },
   parseHTML() {
     return [{ tag: 'sup[data-footnote]' }];
   },
-  renderHTML({ HTMLAttributes }) {
-    return ['sup', mergeAttributes(HTMLAttributes, { class: 'footnote-ref' }), '*'];
+  renderHTML({ node, HTMLAttributes }) {
+    return ['sup', mergeAttributes(HTMLAttributes, { class: node.attrs.kind === 'end' ? 'endnote-ref' : 'footnote-ref' }), '*'];
   },
   addNodeView() {
     return ({ node, getPos }) => {
       const dom = document.createElement('sup');
-      dom.className = 'footnote-ref';
+      let cur = node;
+      dom.className = node.attrs.kind === 'end' ? 'endnote-ref' : 'footnote-ref';
       dom.textContent = '*';
       dom.title = node.attrs.text;
       dom.setAttribute('data-footnote', node.attrs.text);
       dom.addEventListener('dblclick', (e) => {
         e.preventDefault();
         const pos = typeof getPos === 'function' ? getPos() : null;
-        window.dispatchEvent(new CustomEvent('kite:edit-footnote', { detail: { pos, text: node.attrs.text } }));
+        window.dispatchEvent(new CustomEvent('kite:edit-footnote', { detail: { pos, text: cur.attrs.text, kind: cur.attrs.kind } }));
       });
       return {
         dom,
         update: (n) => {
-          if (n.type.name !== 'footnote') return false;
+          if (n.type.name !== 'footnote' || n.attrs.kind !== cur.attrs.kind) return false;
+          cur = n;
           dom.title = n.attrs.text;
           dom.setAttribute('data-footnote', n.attrs.text);
           const p = typeof getPos === 'function' ? getPos() : undefined;
@@ -696,9 +783,9 @@ export const Footnote = Node.create({
   addCommands() {
     return {
       insertFootnote:
-        (text) =>
+        (text, kind = null) =>
         ({ chain }) =>
-          chain().insertContent({ type: 'footnote', attrs: { text } }).run(),
+          chain().insertContent({ type: 'footnote', attrs: { text, kind: kind === 'end' ? 'end' : null } }).run(),
       updateFootnote:
         (pos, text) =>
         ({ tr, dispatch, state }) => {
@@ -875,6 +962,12 @@ const cellAttrs = {
     parseHTML: (el: HTMLElement) => el.style.verticalAlign || el.getAttribute('valign') || null,
     renderHTML: (a: Record<string, any>) => (a.verticalAlign ? { style: `vertical-align: ${a.verticalAlign}` } : {}),
   },
+  /** 세로쓰기 (한글의 칸 속성 → 세로쓰기): 글자를 위에서 아래로, 줄은 오른쪽에서 왼쪽으로 */
+  vertical: {
+    default: null,
+    parseHTML: (el: HTMLElement) => (el.hasAttribute('data-vertical') ? true : null),
+    renderHTML: (a: Record<string, any>) => (a.vertical === true ? { 'data-vertical': '' } : {}),
+  },
   /** 선 굵기/색/종류 (t:0.5mm solid #00A651;...) */
   borderCss: {
     default: null,
@@ -968,6 +1061,8 @@ const cellAttrs = {
       return { 'data-bg-images': JSON.stringify(list), 'data-bg-key': key, style };
     },
   },
+  /** 원본 보존형 저장 (formats/hwpBase.ts): 한글 칸의 원본 크기 [폭, 높이] (HWPUNIT). 칸을 고치면 지운다 (hwpKeep) */
+  hwpSz: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
 };
 
 const blobUrls = new Map<string, string>();
@@ -1193,6 +1288,18 @@ export const KTable = Table.extend({
       hwpLen: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       /** 칸·글상자 안에서 앞 블록과 더 벌어진 간격(px): 표가 놓인 문단의 위 간격 등 (화면 전용) */
       hwpGap: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 원본 보존형 저장 (formats/hwpBase.ts): 표가 놓인 문단의 원본 줄 정보·글자 수. 표를 고치면 지운다 (hwpKeep) */
+      hwpSeg: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      hwpChars: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 원본 보존형 저장: 떠 있는 표가 딸린 한글 문단 ('prev' 앞 문단, 'next' 뒤 문단)과 원본 자리 { wrap, pos, om } (원문) */
+      hwpAnchor: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      hwpPos: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 원본 보존형 저장: 글자처럼 놓인 이 표와 뒤 문단이 원래 한 한글 문단 ('next') */
+      hwpJoin: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 원본 보존형 저장: 표가 든 한글 문단의 원본 [문단 모양 번호, 스타일 번호, 읽을 때의 표 속성 열쇠] */
+      hwpPr: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
+      /** 원본 보존형 저장: 한글 표의 원본 크기 [폭, 높이] (HWPUNIT). 표 안을 고치면 지운다 (hwpKeep) */
+      hwpSz: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       /** 위 바깥 여백에 더해 둔 세로 오프셋(px: 떠 있는 표가 문단에서 떨어진 거리). 표가 이어지는 쪽에서는 들지 않는다 (화면 전용) */
       hwpVOff: { default: null, parseHTML: () => null, renderHTML: () => ({}) },
       /** 한글의 '쪽 경계에서': cell(셀 단위로 나눔: 칸 안에서도 나눈다) · row(나눔: 줄 단위) · none(나누지 않음) */

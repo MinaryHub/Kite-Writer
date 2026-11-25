@@ -23,6 +23,8 @@ const back = await m.readHwpx(out);
 const a = count(doc), b = count(back);
 console.log('orig ', JSON.stringify(a));
 console.log('back ', JSON.stringify(b));
-console.log('settings same:', JSON.stringify(doc.settings) === JSON.stringify(back.settings), JSON.stringify(back.settings.page));
+// 원본 보존형 저장의 원본 정보(hwpBase: 원본 머리부 등)는 읽은 파일마다 다르므로 빼고 견준다
+const settingsOf = (s) => JSON.stringify({ ...s, hwpBase: undefined });
+console.log('settings same:', settingsOf(doc.settings) === settingsOf(back.settings), JSON.stringify(back.settings.page));
 const txt = (n) => n.type === 'text' ? n.text : (n.content || []).map(txt).join('');
 console.log('text same:', txt(doc.content) === txt(back.content), txt(doc.content).length, txt(back.content).length);

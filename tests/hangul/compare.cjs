@@ -7,6 +7,11 @@ const [url, samples, refDir, outDir, repo, ...names] = JSON.parse(process.env.CM
 const SCALE = +(process.env.CMP_SCALE || 1.1);
 const ONLY_PAGES = process.env.CMP_PAGES ? process.env.CMP_PAGES.split(',').map(Number) : null;
 const NO_PNG = !!process.env.CMP_NOPNG;
+// 저장 왕복: CMP_SAVE=hwpx|hwp|docx|same 이면 연 문서를 앱과 같은 경로(exportDocument)로 저장해 out 에 name.<형식> 으로 남긴다
+const SAVE = process.env.CMP_SAVE || '';
+// 한글 PDF 두 개 견주기: CMP_PDF_DIR 를 주면 Kite 로 열지 않고 그 폴더의 PDF(name + CMP_PDF_EXT(없으면 문서 확장자) + '.pdf')를 견줄 쪽으로 쓴다
+// (Kite 로 저장한 파일을 한글이 그린 PDF 를 원래 문서의 한글 PDF 와 견준다)
+const PDF_DIR = process.env.CMP_PDF_DIR || '';
 
 const LOGF = path.join(__dirname, 'cmp.log');
 fs.writeFileSync(LOGF, '');
@@ -96,9 +101,16 @@ app.whenReady().then(async () => {
       // 문서 확장자 (CMP_EXT=.hwp 면 HWP 문서. 기준 PDF 이름은 그대로 name.hwpx.pdf)
       // CMP_EXT 를 주지 않으면 samples 에 있는 쪽 (name.hwpx, 없으면 name.hwp)
       const ext = process.env.CMP_EXT || (fs.existsSync(path.join(samples, name + '.hwpx')) ? '.hwpx' : '.hwp');
+      let info;
+      if (PDF_DIR) {
+        const f = path.join(PDF_DIR, name + (process.env.CMP_PDF_EXT || ext) + '.pdf');
+        if (!fs.existsSync(f)) { log(name, 'ERROR', '견줄 PDF 없음', f); continue; }
+        pdfData = fs.readFileSync(f);
+        info = { pages: null, warnings: [], fonts: null };
+      } else {
       const b64 = fs.readFileSync(path.join(samples, name + ext)).toString('base64');
       pdfData = null;
-      const info = await js(`(async () => {
+      info = await js(`(async () => {
         const app = window.__app;
         window.__step = 'close';
         for (const d of [...app.docs]) await app.closeTab(d.id, true);
@@ -115,10 +127,26 @@ app.whenReady().then(async () => {
         }
         window.__step = 'export';
         await app.exportPdf(tab);
+        let saved = null;
+        const want = ${JSON.stringify(SAVE)};
+        if (want) {
+          window.__step = 'save';
+          const fmt = want === 'same' ? ${JSON.stringify(ext.slice(1))} : want;
+          const { exportDocument } = await import('/src/formats/index.ts');
+          const data = await exportDocument(fmt, tab.toKDocument(), { pageCount: tab.layout.pageCount });
+          let s = '';
+          for (let i = 0; i < data.length; i += 0x8000) s += String.fromCharCode.apply(null, data.subarray(i, i + 0x8000));
+          saved = { fmt, b64: btoa(s) };
+        }
         window.__step = 'done';
-        return { pages: tab.layout.pageCount, warnings: tab.warnings || [], fonts: window.__kiteFontLog ? { loaded: window.__kiteFontLog.loaded, failed: window.__kiteFontLog.failed } : null };
+        return { pages: tab.layout.pageCount, warnings: tab.warnings || [], saved, fonts: window.__kiteFontLog ? { loaded: window.__kiteFontLog.loaded, failed: window.__kiteFontLog.failed } : null };
       })()`);
       if (info.error || !pdfData) { log(name, 'ERROR', info.error || 'no pdf'); continue; }
+      if (info.saved) {
+        fs.writeFileSync(path.join(outDir, name + '.' + info.saved.fmt), Buffer.from(info.saved.b64, 'base64'));
+        delete info.saved;
+      }
+      }
       // 살펴볼 것: CMP_JS 파일의 식을 화면에서 돌려 결과를 적는다
       if (process.env.CMP_JS) log('JS:', JSON.stringify(await js(fs.readFileSync(process.env.CMP_JS, 'utf8'))));
       // 화면 그대로 찍기 (CMP_SHOT=1, CMP_SHOW=1 과 함께)

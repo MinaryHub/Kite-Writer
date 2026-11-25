@@ -718,6 +718,26 @@ input[type='number'] {
 .fn-area .fn-item:hover {
   background: #f2f6fd;
 }
+/* 미주: 문서 끝 쪽의 본문 맨 위부터 (자리는 쪽 나누기가 정한다) */
+.en-area {
+  position: absolute;
+  font-family: '함초롬바탕', 'HCR Batang', '바탕', serif;
+  color: #222;
+  pointer-events: auto;
+}
+.en-area .en-item {
+  position: absolute;
+  text-align: justify;
+  left: 0;
+  right: 0;
+  padding-left: 1.6em;
+  text-indent: -1.6em;
+  cursor: pointer;
+  word-break: keep-all;
+}
+.en-area .en-item:hover {
+  background: #f2f6fd;
+}
 .page-label {
   position: absolute;
   right: -46px;

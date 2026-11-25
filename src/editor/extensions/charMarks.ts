@@ -1,7 +1,7 @@
 import { Mark, mergeAttributes } from '@tiptap/core';
 import Underline from '@tiptap/extension-underline';
 import Strike from '@tiptap/extension-strike';
-import { normColor } from '../../formats/common';
+import { AUTO_NUM_KINDS, normColor } from '../../formats/common';
 
 /**
  * 한글의 글자 모양 가운데 줄·덧말·겹침: 밑줄(종류·색·위치), 취소선(종류·색), 덧말(글 위의 작은 글), 글자 겹침(원·네모 안의 글자).
@@ -123,6 +123,32 @@ export const Ruby = Mark.create({
 
 /** 글자 겹침의 테두리 모양 (한글 값) */
 export const COMPOSE_SHAPES = ['CHAR', 'SHAPE_CIRCLE', 'SHAPE_REVERSAL_CIRCLE', 'SHAPE_RECTANGLE', 'SHAPE_REVERSAL_RECTANGLE', 'SHAPE_TRIANGLE', 'SHAPE_REVERSAL_TIRANGLE', 'SHAPE_LIGHT', 'SHAPE_RHOMBUS', 'SHAPE_REVERSAL_RHOMBUS', 'SHAPE_ROUNDED_RECTANGLE', 'SHAPE_EMPTY_CIRCULATE_ARROW', 'SHAPE_THIN_CIRCULATE_ARROW', 'SHAPE_THICK_CIRCULATE_ARROW'];
+
+/**
+ * 자동 번호 (한글의 캡션 '표 1'·'그림 2' 의 번호): 글은 읽을 때의 번호이고, 한글로 저장하면 번호 컨트롤로 되돌린다 (한글이 다시 매긴다)
+ */
+export const AutoNum = Mark.create({
+  name: 'autoNum',
+  inclusive: false,
+  addAttributes() {
+    return {
+      kind: {
+        default: 'TABLE',
+        parseHTML: (el: HTMLElement) => {
+          const v = el.getAttribute('data-autonum') || '';
+          return AUTO_NUM_KINDS.includes(v) ? v : 'TABLE';
+        },
+        renderHTML: (a: Record<string, any>) => ({ 'data-autonum': AUTO_NUM_KINDS.includes(a.kind) ? a.kind : 'TABLE' }),
+      },
+    };
+  },
+  parseHTML() {
+    return [{ tag: 'span[data-autonum]' }];
+  },
+  renderHTML({ HTMLAttributes }) {
+    return ['span', mergeAttributes({ class: 'k-autonum' }, HTMLAttributes), 0];
+  },
+});
 
 /** 글자 겹침: 글자들을 한 글자 자리에 겹쳐 쓰고 원·네모 등으로 두른다 */
 export const Compose = Mark.create({

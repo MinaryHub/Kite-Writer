@@ -102,6 +102,8 @@ export class DocTab {
     if (initial) tr.setMeta('addToHistory', false);
     // 문서를 통째로 바꾸는 것은 변경 내용 추적 대상이 아니다
     tr.setMeta('trackChanges:skip', true);
+    // 원본 보존형 저장의 줄 정보를 지우지 않는다 (hwpKeep)
+    tr.setMeta('hwpKeep', true);
     view.dispatch(tr);
   }
 

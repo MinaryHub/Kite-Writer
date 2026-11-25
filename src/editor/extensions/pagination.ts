@@ -108,6 +108,14 @@ export interface FootnoteInfo {
   pos: number;
 }
 
+/** 미주: 번호, 놓인 쪽(0부터)과 그 쪽 본문 맨 위에서의 자리(px), 글 */
+export interface EndnoteInfo {
+  num: number;
+  page: number;
+  y: number;
+  text: string;
+}
+
 /** 단 구분선: 쪽(0부터), 본문 왼쪽에서의 가로 자리, 본문 맨 위에서의 세로 범위(px), 굵기(mm)·색·종류 */
 export interface ColLine {
   page: number;
@@ -122,6 +130,8 @@ export interface ColLine {
 export interface LayoutResult {
   pageCount: number;
   footnotes: FootnoteInfo[];
+  /** 미주 (문서 끝: 마지막 쪽 다음 쪽부터) */
+  endnotes?: EndnoteInfo[];
   /** 각 쪽의 시작 문서 위치 (쪽 이동용) */
   pageStarts: number[];
   /** 쪽 맨 위에 되풀이해 그릴 표 제목 줄 */
@@ -148,6 +158,17 @@ export const paginationKey = new PluginKey<PState>('pagination');
 export const FN_FONT_PX = 12; // 9pt
 export const FN_LINE = 1.5;
 export const FN_SEP = 14;
+
+/** 미주의 줄 간격 (한글 2018 의 미주 문단: 9pt, 130%) */
+export const EN_LINE = 1.3;
+
+/** 미주 하나의 높이(px): 줄 수 × 줄 간격, 마지막 줄 아래 간격은 빼고 (한글 PDF: 미주 사이 9pt, 미주 안 줄 사이 11.7pt) */
+export function estimateEndnoteHeight(text: string, width: number): number {
+  let w = 0;
+  for (const ch of text) w += /[ᄀ-ᇿ　-鿿가-힯＀-￯]/.test(ch) ? FN_FONT_PX : FN_FONT_PX * 0.55;
+  const lines = Math.max(1, Math.ceil((w + 28) / Math.max(50, width)));
+  return Math.ceil(FN_FONT_PX + (lines - 1) * FN_FONT_PX * EN_LINE);
+}
 
 export function estimateFootnoteHeight(text: string, width: number): number {
   let w = 0;
@@ -269,6 +290,22 @@ function hwpCellBreaks(leaves: { node: PMNode }[]): { list: (HwpLeafBreak | null
     } else list.push(null);
   }
   return { list, any };
+}
+
+/** 한글이 나눈 칸에서 첫 조각에 놓인 내용의 끝(px, 칸 내용 맨 위 기준): 처음 넘긴 자리 앞 줄들의 아래 끝 가운데 가장 아래 (줄 아래 간격 제외) */
+function hwpFirstPartEnd(leaves: { node: PMNode }[], hw: { list: (HwpLeafBreak | null)[] }): number {
+  let end = 0;
+  for (let i = 0; i < leaves.length; i++) {
+    const vs = leaves[i].node.attrs?.hwpVs as number[][] | null;
+    const b = hw.list[i];
+    if (b && b.block != null) return end;
+    if (!Array.isArray(vs)) continue;
+    for (let j = 0; j < vs.length; j++) {
+      if (b && b.lines.some((l) => l.i === j)) return end;
+      end = Math.max(end, (+vs[j][0] || 0) + (+vs[j][1] || 0));
+    }
+  }
+  return end;
 }
 
 /** 표가 이어지는 쪽에서의 위 바깥 여백(px): 위 바깥 여백에 더해 둔 세로 오프셋(hwpVOff: 문단에서 떨어진 거리)은 첫 쪽에서만 든다 */
@@ -595,6 +632,11 @@ function computeLayout(
   const refNum = new Map<HTMLElement, number>();
   refEls.forEach((el, i) => {
     refNum.set(el, i + 1);
+    if (el.textContent !== String(i + 1)) el.textContent = String(i + 1);
+  });
+  // 미주 번호 (각주와 따로, 문서 순서)
+  const endEls = Array.from(root.querySelectorAll('sup.endnote-ref')) as HTMLElement[];
+  endEls.forEach((el, i) => {
     if (el.textContent !== String(i + 1)) el.textContent = String(i + 1);
   });
 
@@ -1170,6 +1212,20 @@ function computeLayout(
         const r = el.getBoundingClientRect();
         const top = rel(r.top);
         const bottom = rel(r.bottom);
+        // 한글이 쪽에 걸쳐 나눈 가운데 맞춤 칸: 한글은 줄 높이로 첫 조각의 높이를 적어 두고, 첫 조각에 남은 내용(마지막 줄 아래 간격
+        // 제외)을 그 높이 안에서 가운데에 놓는다 (h1 12쪽: 적힌 표 높이 713.1pt = 첫 조각, 남은 자리 8.6pt 의 절반만큼 내려 찍힌다.
+        // 26쪽은 적힌 높이에 내용이 꽉 차 그대로. 한글 PDF 로 확인). 그만큼 칸 맨 앞에 공간을 끼운다 — 뒤 줄의 넘김은 그만큼 줄어든다
+        if (k === 0 && hw && hw.any && depth === 0 && cst && cst.verticalAlign === 'middle' && minH > 0) {
+          const end1 = hwpFirstPartEnd(leaves, hw);
+          const v0 = (lf.node.attrs?.hwpVs as number[][] | null)?.[0]?.[0] ?? 0;
+          const contentTop = top + shift + cs - v0;
+          const lim = Math.min(T(pc) + CHof(pc) - omB, startTop + minH) - padBottom;
+          const off = Math.round(((lim - contentTop - end1) / 2) * 100) / 100;
+          if (end1 > 0 && off > 0.5 && off < 200) {
+            breaks.push({ pos: lf.pos, height: off, kind: 'block' });
+            cs += off;
+          }
+        }
         if (hw) {
           const hb = hw.list[k];
           if (hb) {
@@ -1761,12 +1817,30 @@ function computeLayout(
     if (forceNext) pageCount = Math.max(pageCount, page + 2);
     pageCount = Math.min(pageCount, MAX_PAGES);
   }
+  // 미주: 한글 2018 은 문서 끝의 미주를 마지막 쪽 다음 쪽의 본문 맨 위부터 모아 찍는다 (미주 모양의 '이어서' 설정과 상관없이:
+  // 2026-11-25 한글로 확인). 쪽을 넘치면 다음 쪽으로
+  const endnotes: EndnoteInfo[] = [];
+  if (endEls.length) {
+    let p = Math.min(MAX_PAGES - 1, pageCount);
+    let y = 0;
+    endEls.forEach((el, i) => {
+      const text = el.getAttribute('data-footnote') || '';
+      const h = estimateEndnoteHeight(text, g.contentWidth);
+      if (y > 0 && y + h > CHof(p) && p < MAX_PAGES - 1) {
+        p++;
+        y = 0;
+      }
+      endnotes.push({ num: i + 1, page: p, y: Math.round(y * 100) / 100, text });
+      y += h;
+    });
+    pageCount = Math.min(MAX_PAGES, Math.max(pageCount, p + 1));
+  }
   while (pageStarts.length < pageCount) pageStarts.push(doc.content.size);
   if (pageStarts.length > pageCount) pageStarts = pageStarts.slice(0, pageCount);
   const repeats = breaks.filter((b) => b.head).map((b) => b.head!);
   const cuts = breaks.filter((b) => b.cut).map((b) => b.cut!);
   const overs = breaks.filter((b) => b.over).map((b) => b.over!);
-  const result: LayoutResult = { pageCount, footnotes, pageStarts, ...(repeats.length ? { repeats } : {}), ...(cuts.length ? { cuts } : {}), ...(overs.length ? { overs } : {}) };
+  const result: LayoutResult = { pageCount, footnotes, pageStarts, ...(endnotes.length ? { endnotes } : {}), ...(repeats.length ? { repeats } : {}), ...(cuts.length ? { cuts } : {}), ...(overs.length ? { overs } : {}) };
   // 단 구분선: 단 사이 한가운데에, 그 쪽에서 다단이 차지한 높이만큼 (다음 쪽으로 이어지는 다단은 본문 끝까지)
   const colLines: ColLine[] = [];
   for (const z of zones.values()) {

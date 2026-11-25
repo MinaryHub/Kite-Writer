@@ -1297,6 +1297,12 @@ class DocxReader {
         case 'r':
           this.convertRun(el, baseR, link, out, after);
           break;
+        case 'bookmarkStart': {
+          // 책갈피 (Word 가 저절로 넣는 '_' 로 시작하는 것은 뺀다: _GoBack·_Toc…)
+          const name = (attr(el, 'name') || '').trim().slice(0, 64);
+          if (name && !name.startsWith('_')) out.push({ type: 'bookmark', attrs: { name } });
+          break;
+        }
         case 'hyperlink': {
           const rid = attr(el, 'id');
           const anchor = attr(el, 'anchor');
@@ -1462,7 +1468,7 @@ class DocxReader {
         case 'endnoteReference': {
           const id = attr(c, 'id') || '';
           const text = (name === 'footnoteReference' ? this.footnotes : this.endnotes).get(id) || '';
-          out.push({ type: 'footnote', attrs: { text } });
+          out.push({ type: 'footnote', attrs: { text, ...(name === 'endnoteReference' ? { kind: 'end' } : {}) } });
           break;
         }
         case 'fldChar': {

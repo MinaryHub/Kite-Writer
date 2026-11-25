@@ -3,7 +3,7 @@ import { Plugin, PluginKey, type EditorState } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { Node as PMNode } from '@tiptap/pm/model';
 import { cssToPt, normLineHeight, r2 } from '../cssUnits';
-import { cleanPageHide, cleanParaBorder, normColor } from '../../formats/common';
+import { cleanPageHide, cleanPageNumStart, cleanParaBorder, normColor } from '../../formats/common';
 import { cleanTabs } from '../tabLayout';
 
 declare module '@tiptap/core' {
@@ -182,7 +182,23 @@ export const ParagraphFormat = Extension.create({
           hwpSeq: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
           /** 칸의 마지막 문단: 마지막 줄 간격·문단 아래 간격을 칸 높이에 넣는다 (한글이 칸 높이를 내용으로 새로 셈한 칸) */
           hwpTrail: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 원본 보존형 저장 (formats/hwpBase.ts): 원본 [문단 모양 번호, 스타일 번호, 읽을 때의 문단 모양 열쇠] */
+          hwpPr: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 원본 보존형 저장: 한글이 배치해 둔 줄 정보 (원본 값 그대로). 문단을 고치면 지운다 (hwpKeep) */
+          hwpSeg: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
+          /** 원본 보존형 저장: 읽을 때의 문단 글자 수 (한글 셈) [전체, 앞쪽 컨트롤 몫] */
+          hwpChars: { default: null, keepOnSplit: false, parseHTML: () => null, renderHTML: () => ({}) },
           /** 개요 수준 (1부터): 한글의 개요 문단. 차례 만들기가 제목 문단으로 쓴다 */
+          /** 캡션 문단: 바로 뒤('top')·앞('bottom')의 표의 캡션 (한글로 저장하면 표 안의 캡션으로) */
+          caption: {
+            default: null,
+            keepOnSplit: false,
+            parseHTML: (el: HTMLElement) => {
+              const v = el.getAttribute('data-caption');
+              return v === 'top' || v === 'bottom' ? v : null;
+            },
+            renderHTML: (attrs: Record<string, any>) => (attrs.caption === 'top' || attrs.caption === 'bottom' ? { 'data-caption': attrs.caption } : {}),
+          },
           outlineLevel: {
             default: null,
             keepOnSplit: false,
@@ -275,6 +291,13 @@ export const ParagraphFormat = Extension.create({
             default: null,
             parseHTML: (el: HTMLElement) => cleanPageHide(el.getAttribute('data-page-hide')),
             renderHTML: (attrs: Record<string, any>) => (cleanPageHide(attrs.pageHide) ? { 'data-page-hide': cleanPageHide(attrs.pageHide) } : {}),
+          },
+          /** 한글의 '새 번호로 시작' (쪽 번호): 이 블록이 놓인 쪽부터 이 번호로 다시 매긴다 */
+          pageNumStart: {
+            default: null,
+            keepOnSplit: false,
+            parseHTML: (el: HTMLElement) => cleanPageNumStart(el.getAttribute('data-page-num-start')),
+            renderHTML: (attrs: Record<string, any>) => (cleanPageNumStart(attrs.pageNumStart) != null ? { 'data-page-num-start': String(cleanPageNumStart(attrs.pageNumStart)) } : {}),
           },
         },
       },
